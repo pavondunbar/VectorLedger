@@ -41,4 +41,5 @@ tempfile            = { workspace = true }
 tar                 = "0.4.44"
 blake3              = { workspace = true }
 rustls          = { workspace = true }
+tokio-rustls    = { workspace = true }
 libc                = { workspace = true }

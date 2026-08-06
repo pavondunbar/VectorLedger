@@ -79,6 +79,10 @@ enum Commands {
     Verify,
     /// Run SQL against the database (interactive REPL or single statement).
     ///
+    /// When a server is running (default: 127.0.0.1:5433) the CLI connects
+    /// over TLS — this is the correct mode when `vledger start` is active,
+    /// because the server holds an exclusive file lock on the data directory.
+    ///
     /// Requires valid credentials. Supply them via --username / --password
     /// flags, or set VLEDGER_CLI_USER / VLEDGER_CLI_PASSWORD environment
     /// variables (useful for non-interactive scripting).
@@ -96,6 +100,17 @@ enum Commands {
         /// If neither is set the CLI prompts interactively.
         #[arg(short, long)]
         password: Option<String>,
+        /// Connect to a running server instead of opening the data directory
+        /// directly.  Use this whenever `vledger start` is active.
+        /// Format: host:port  (default: 127.0.0.1:5433)
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Manage user accounts (admin only).
+    #[command(name = "user", subcommand_required = true)]
+    User {
+        #[command(subcommand)]
+        action: UserAction,
     },
     /// Run the full Phase 2 self-test suite.
     #[command(name = "self-test")]
@@ -166,6 +181,52 @@ enum Commands {
     },
 }
 
+/// Sub-actions for `vledger user`.
+#[derive(Subcommand)]
+enum UserAction {
+    /// Change a user's password.
+    #[command(name = "set-password")]
+    SetPassword {
+        /// Username whose password will be changed.
+        #[arg(short, long)]
+        username: Option<String>,
+        /// New password (prompted interactively if omitted).
+        #[arg(long)]
+        new_password: Option<String>,
+    },
+    /// Create a new user account (admin only).
+    #[command(name = "create")]
+    Create {
+        /// Username for the new account.
+        #[arg(short, long)]
+        username: String,
+        /// Role: admin, operator, auditor, readonly.
+        #[arg(short, long, default_value = "readonly")]
+        role: String,
+        /// Password (prompted interactively if omitted).
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// List all user accounts.
+    #[command(name = "list")]
+    List,
+    /// Enable or disable a user account.
+    #[command(name = "set-enabled")]
+    SetEnabled {
+        #[arg(short, long)]
+        username: String,
+        /// true to enable, false to disable.
+        #[arg(long)]
+        enabled: bool,
+    },
+    /// Delete a user account.
+    #[command(name = "delete")]
+    Delete {
+        #[arg(short, long)]
+        username: String,
+    },
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -195,7 +256,7 @@ async fn main() -> Result<()> {
         Commands::Start { bind, pgwire, with_proofs } => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs).await,
         Commands::Status                             => cmd_status(&cli.data_dir).await,
         Commands::Verify                             => cmd_verify(&cli.data_dir).await,
-        Commands::Sql { query, username, password } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref()).await,
+        Commands::Sql { query, username, password, server } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref(), server.as_deref()).await,
         Commands::SelfTest                           => cmd_self_test().await,
         Commands::SelfTestPhase3                     => cmd_self_test_phase3().await,
         // Phase 3
@@ -204,6 +265,7 @@ async fn main() -> Result<()> {
         Commands::RotateKeys { hsm_socket, caller_id } => cmd_rotate_keys(&cli.data_dir, hsm_socket.as_deref(), &caller_id).await,
         Commands::AuditExport { format, output, from, to } => cmd_audit_export(&cli.data_dir, &format, output.as_deref(), from.as_deref(), to.as_deref()).await,
         Commands::ComplianceReport { standard, format, output } => cmd_compliance_report(&cli.data_dir, &standard, &format, output.as_deref()).await,
+        Commands::User { action } => cmd_user(&cli.data_dir, action).await,
     }
 }
 
@@ -463,40 +525,46 @@ async fn cmd_sql(
     query:    Option<&str>,
     username: Option<&str>,
     password: Option<&str>,
+    server:   Option<&str>,
 ) -> Result<()> {
-    if !data_dir.exists() {
-        anyhow::bail!("Not initialised. Run `vledger init` first.");
+    // Resolve credentials first (needed for both network and direct modes).
+    let resolved_username = resolve_username(username);
+    let resolved_password = resolve_password(password);
+
+    // ── Network mode: connect to a running server over TLS ────────────────
+    // Use this when `vledger start` is running (it holds the data-dir lock).
+    // Explicitly requested via --server, OR auto-detected by probing the
+    // default address.
+    let server_addr = server
+        .map(|s| s.to_string())
+        .or_else(|| {
+            // Auto-detect: if the default port is reachable, prefer network mode.
+            let addr = "127.0.0.1:5433";
+            if std::net::TcpStream::connect_timeout(
+                &addr.parse().unwrap(),
+                std::time::Duration::from_millis(200),
+            ).is_ok() {
+                Some(addr.to_string())
+            } else {
+                None
+            }
+        });
+
+    if let Some(addr) = server_addr {
+        return cmd_sql_network(&addr, query, &resolved_username, &resolved_password).await;
     }
 
-    // ── Authentication ────────────────────────────────────────────────────
-    // The CLI REPL must go through the same UserStore and role-based access
-    // control as the network server.  No bypassing auth by having OS access
-    // to the data directory.
+    // ── Direct mode: open the data directory (only safe when server is NOT running) ──
+    if !data_dir.exists() {
+        anyhow::bail!(
+            "Not initialised and no running server found.\n\
+             Run `vledger init` then `vledger start`, or pass --server <host:port>."
+        );
+    }
+
     let catalog_dir = data_dir.join("catalog");
     let user_store = vledger_server::UserStore::open(&catalog_dir)
         .context("Failed to open user store — run `vledger start` to initialise auth")?;
-
-    // Resolve credentials: flag > env var > interactive prompt
-    let resolved_username = username
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("VLEDGER_CLI_USER").ok())
-        .unwrap_or_else(|| {
-            use std::io::Write;
-            print!("Username: ");
-            let _ = std::io::stdout().flush();
-            let mut u = String::new();
-            let _ = std::io::stdin().read_line(&mut u);
-            u.trim().to_string()
-        });
-
-    let resolved_password = password
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("VLEDGER_CLI_PASSWORD").ok())
-        .unwrap_or_else(|| {
-            // Read password without echoing (rpassword-style via termios).
-            // Fall back to a regular read if we can't disable echo.
-            read_password_from_tty()
-        });
 
     let session = user_store.authenticate(&resolved_username, &resolved_password)
         .map_err(|_| anyhow::anyhow!("Authentication failed"))?;
@@ -511,10 +579,8 @@ async fn cmd_sql(
         .context("Failed to open ledger")?;
 
     if let Some(sql) = query {
-        // Single-shot mode
         run_sql_authenticated(&mut ledger, sql, &session)?;
     } else {
-        // Interactive REPL
         println!("VectorLedger SQL REPL — authenticated as {} ({})", session.username, session.role);
         println!("  Data dir: {} | Type 'exit' or Ctrl-D to quit", data_dir.display());
         println!();
@@ -535,6 +601,318 @@ async fn cmd_sql(
         }
     }
     Ok(())
+}
+
+/// Connect to a running vledger server over TLS and run SQL.
+async fn cmd_sql_network(
+    addr:     &str,
+    query:    Option<&str>,
+    username: &str,
+    password: &str,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio_rustls::rustls::ClientConfig;
+    use tokio_rustls::TlsConnector;
+    use tokio_rustls::rustls::pki_types::ServerName;
+
+    // Build a TLS client config that accepts self-signed certs (dev default).
+    // In production the server cert should be CA-signed and this replaced
+    // with a proper root store.
+    let tls_config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+
+    let connector  = TlsConnector::from(std::sync::Arc::new(tls_config));
+    let host_part  = addr.split(':').next().unwrap_or("127.0.0.1");
+    let port: u16  = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
+
+    let tcp = tokio::net::TcpStream::connect((host_part, port)).await
+        .with_context(|| format!("Cannot connect to server at {addr}"))?;
+
+    let server_name = ServerName::try_from(host_part.to_string())
+        .map_err(|_| anyhow::anyhow!("Invalid server hostname: {host_part}"))?;
+    let tls = connector.connect(server_name, tcp).await
+        .context("TLS handshake failed")?;
+
+    // Split into read/write halves with concrete types so the compiler can
+    // infer `R` in `BufReader<R>` without ambiguity.
+    let (read_half, mut write_half) =
+        tokio::io::split(tls);
+    let mut lines = BufReader::new(read_half).lines();
+
+    // ── Authenticate ──────────────────────────────────────────────────────
+    let auth_req = serde_json::json!({
+        "auth": { "username": username, "password": password }
+    });
+    write_half.write_all(format!("{}\n", auth_req).as_bytes()).await?;
+    write_half.flush().await?;
+
+    let auth_line = lines.next_line().await?
+        .ok_or_else(|| anyhow::anyhow!("Server closed connection during auth"))?;
+    let auth_resp: serde_json::Value = serde_json::from_str(&auth_line)
+        .context("Invalid auth response from server")?;
+
+    if !auth_resp["ok"].as_bool().unwrap_or(false) {
+        anyhow::bail!(
+            "Authentication failed: {}",
+            auth_resp["error"].as_str().unwrap_or("unknown error")
+        );
+    }
+
+    let token = auth_resp["token"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("Server did not return a session token"))?
+        .to_string();
+    let role = auth_resp["role"].as_str().unwrap_or("unknown");
+
+    // ── Helper: send one SQL and print the response ───────────────────────
+    macro_rules! send_sql {
+        ($sql:expr) => {{
+            let req = serde_json::json!({ "sql": $sql, "token": token });
+            write_half.write_all(format!("{}\n", req).as_bytes()).await?;
+            write_half.flush().await?;
+            let resp_line = lines.next_line().await?
+                .ok_or_else(|| anyhow::anyhow!("Server closed connection"))?;
+            serde_json::from_str::<serde_json::Value>(&resp_line)
+                .context("Invalid response from server")?
+        }};
+    }
+
+    let print_response = |resp: &serde_json::Value| {
+        if !resp["ok"].as_bool().unwrap_or(false) {
+            eprintln!("Error: {}", resp["error"].as_str().unwrap_or("unknown"));
+            return;
+        }
+        let cols: Vec<&str> = resp["columns"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        if !cols.is_empty() {
+            println!("{}", cols.join(" | "));
+            println!("{}", "-".repeat(cols.iter().map(|c| c.len() + 3).sum::<usize>().max(40)));
+        }
+        if let Some(rows) = resp["rows"].as_array() {
+            for row in rows {
+                if let Some(vals) = row.as_array() {
+                    let strs: Vec<String> = vals.iter()
+                        .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                        .collect();
+                    println!("{}", strs.join(" | "));
+                }
+            }
+        }
+        println!("── {}", resp["message"].as_str().unwrap_or(""));
+        println!();
+    };
+
+    if let Some(sql) = query {
+        // Single-shot mode.
+        let resp = send_sql!(sql);
+        print_response(&resp);
+    } else {
+        // Interactive REPL.
+        println!("VectorLedger SQL REPL — connected to {addr} as {username} ({role})");
+        println!("  Type 'exit' or Ctrl-D to quit");
+        println!();
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        loop {
+            print!("vledger> ");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            line.clear();
+            if stdin.read_line(&mut line).unwrap_or(0) == 0 { break; }
+            let trimmed = line.trim().to_string();
+            if trimmed.is_empty() { continue; }
+            if trimmed == "exit" || trimmed == "\\q" { break; }
+
+            let req = serde_json::json!({ "sql": trimmed, "token": token });
+            if let Err(e) = write_half.write_all(format!("{}\n", req).as_bytes()).await
+                .and(write_half.flush().await) {
+                eprintln!("Connection error: {e}");
+                break;
+            }
+            match lines.next_line().await {
+                Ok(Some(resp_line)) => {
+                    match serde_json::from_str::<serde_json::Value>(&resp_line) {
+                        Ok(resp) => print_response(&resp),
+                        Err(e)   => eprintln!("Bad response: {e}"),
+                    }
+                }
+                Ok(None) => { eprintln!("Server closed connection."); break; }
+                Err(e)   => { eprintln!("Read error: {e}"); break; }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// A TLS certificate verifier that accepts any certificate.
+/// Used for connecting to servers with self-signed certs (development default).
+/// In production, replace with a verifier that checks against a known CA.
+#[derive(Debug)]
+struct AcceptAnyCert;
+
+impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _server_name: &tokio_rustls::rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error> {
+        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+// ── Credential helpers ────────────────────────────────────────────────────────
+
+fn resolve_username(username: Option<&str>) -> String {
+    username
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("VLEDGER_CLI_USER").ok())
+        .unwrap_or_else(|| {
+            use std::io::Write;
+            print!("Username: ");
+            let _ = std::io::stdout().flush();
+            let mut u = String::new();
+            let _ = std::io::stdin().read_line(&mut u);
+            u.trim().to_string()
+        })
+}
+
+fn resolve_password(password: Option<&str>) -> String {
+    password
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("VLEDGER_CLI_PASSWORD").ok())
+        .unwrap_or_else(read_password_from_tty)
+}
+
+// ── user ──────────────────────────────────────────────────────────────────────
+
+async fn cmd_user(data_dir: &PathBuf, action: UserAction) -> Result<()> {
+    let catalog_dir = data_dir.join("catalog");
+    if !catalog_dir.exists() {
+        anyhow::bail!(
+            "Data directory not initialised at: {}\nRun `vledger init` first.",
+            data_dir.display()
+        );
+    }
+    let store = vledger_server::UserStore::open(&catalog_dir)
+        .context("Failed to open user store")?;
+
+    match action {
+        UserAction::SetPassword { username, new_password } => {
+            let target = username
+                .unwrap_or_else(|| resolve_username(None));
+            let new_pw = new_password.unwrap_or_else(|| {
+                let pw1 = prompt_new_password("New password: ");
+                let pw2 = prompt_new_password("Confirm password: ");
+                if pw1 != pw2 {
+                    eprintln!("Passwords do not match.");
+                    std::process::exit(1);
+                }
+                pw1
+            });
+            store.set_password(&target, &new_pw)
+                .with_context(|| format!("Failed to set password for '{target}'"))?;
+            println!("✓ Password updated for '{target}'. All existing sessions revoked.");
+        }
+        UserAction::Create { username, role, password } => {
+            let role_parsed: vledger_server::auth::Role = role.parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+            let pw = password.unwrap_or_else(|| {
+                let pw1 = prompt_new_password("Password: ");
+                let pw2 = prompt_new_password("Confirm password: ");
+                if pw1 != pw2 {
+                    eprintln!("Passwords do not match.");
+                    std::process::exit(1);
+                }
+                pw1
+            });
+            store.create_user(&username, &pw, role_parsed, None)
+                .with_context(|| format!("Failed to create user '{username}'"))?;
+            println!("✓ User '{username}' created with role '{role}'.");
+        }
+        UserAction::List => {
+            let mut users = store.list_users();
+            users.sort_by(|a, b| a.0.cmp(&b.0));
+            println!("{:<20} {:<12} {}", "USERNAME", "ROLE", "ENABLED");
+            println!("{}", "-".repeat(40));
+            for (name, role, enabled) in users {
+                println!("{:<20} {:<12} {}", name, role, enabled);
+            }
+        }
+        UserAction::SetEnabled { username, enabled } => {
+            store.set_enabled(&username, enabled)
+                .with_context(|| format!("Failed to update '{username}'"))?;
+            let state = if enabled { "enabled" } else { "disabled" };
+            println!("✓ User '{username}' {state}.");
+        }
+        UserAction::Delete { username } => {
+            store.delete_user(&username)
+                .with_context(|| format!("Failed to delete '{username}'"))?;
+            println!("✓ User '{username}' deleted.");
+        }
+    }
+    Ok(())
+}
+
+fn prompt_new_password(prompt: &str) -> String {
+    use std::io::Write;
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+    // Reuse the same tty-echo-off logic.
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = std::io::stdin().as_raw_fd();
+        let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        let orig = if unsafe { libc::tcgetattr(fd, &mut termios) } == 0 {
+            let orig = termios;
+            termios.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
+            unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
+            Some(orig)
+        } else { None };
+        let mut pw = String::new();
+        let _ = std::io::stdin().read_line(&mut pw);
+        println!();
+        if let Some(orig) = orig {
+            unsafe { libc::tcsetattr(fd, libc::TCSANOW, &orig) };
+        }
+        pw.trim().to_string()
+    }
+    #[cfg(not(unix))]
+    {
+        let mut pw = String::new();
+        let _ = std::io::stdin().read_line(&mut pw);
+        pw.trim().to_string()
+    }
 }
 
 /// Execute one SQL statement with full privilege enforcement.

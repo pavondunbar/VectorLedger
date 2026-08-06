@@ -332,11 +332,25 @@ The first start generates an initial admin password and prints it once:
 
 ### 4. Run your first queries
 
-In a second terminal, use the built-in SQL REPL:
+With the server running in one terminal, open a second terminal and use the built-in SQL REPL. When the server is running, the CLI automatically connects to it over TLS — you do not need to stop the server first:
 
 ```bash
 vledger sql --data-dir ./vledger-data --username admin
 # Password: <your initial password>
+```
+
+If you ever need to connect to a server on a different address, use `--server`:
+
+```bash
+vledger sql --server 10.0.0.1:5433 --username admin
+```
+
+Change the admin password immediately after first login:
+
+```bash
+vledger user set-password --username admin
+# New password: <type new password>
+# Confirm password: <type again>
 ```
 
 ```sql
@@ -383,6 +397,39 @@ Or with pgAdmin, DBeaver, or Metabase using standard PostgreSQL connection setti
 
 ---
 
+## Reset / Starting Over
+
+If you lose the admin password, or need to wipe the database and start fresh, delete the data directory and re-initialise:
+
+```bash
+# Stop the server first (Ctrl-C in the terminal where it is running)
+
+rm -rf ./vledger-data
+
+export VectorLedger_MASTER_KEY="$(openssl rand -hex 32)"
+vledger init --data-dir ./vledger-data
+vledger start --data-dir ./vledger-data --bind 127.0.0.1:5433
+```
+
+The first `start` after a fresh `init` prints a new admin password. Copy it before doing anything else.
+
+A few things to keep in mind:
+
+- Deleting `vledger-data` is **permanent and irreversible**. All ledger entries, accounts, audit logs, and user accounts are gone. Only do this on a database that either has no data worth keeping, or has already been backed up with `vledger backup`.
+- The `VectorLedger_MASTER_KEY` you generate is a new key, unrelated to the old one. If you had encrypted data in the old directory, it cannot be decrypted with the new key.
+- For production, store the master key in Vault or AWS KMS (see [Key Source Backends](#key-source-backends)) so it survives shell session restarts without being re-generated.
+
+If you just want to reset the admin password without wiping data, use `vledger user set-password` while the server is not running (direct mode reads the catalog directly):
+
+```bash
+# Stop the server first, then:
+vledger user set-password --username admin --data-dir ./vledger-data
+# New password: <type new password>
+# Confirm password: <type again>
+```
+
+---
+
 ## CLI Reference
 
 ### `vledger init`
@@ -425,7 +472,12 @@ vledger sql [OPTIONS]
   --query <SQL>       Run a single statement and exit (omit for interactive mode)
   --username <USER>   Username (or set VLEDGER_CLI_USER)
   --password <PASS>   Password (or set VLEDGER_CLI_PASSWORD, or enter interactively)
+  --server <ADDR>     Connect to a running server at host:port instead of opening
+                      the data directory directly (auto-detected if server is
+                      reachable at 127.0.0.1:5433)
 ```
+
+When `vledger start` is running, the CLI automatically detects it and connects over TLS. Use `--server` to point at a non-default address. If no server is reachable, the CLI opens the data directory directly (safe only when the server is stopped).
 
 ### `vledger verify`
 
@@ -492,6 +544,52 @@ vledger compliance-report --data-dir ./vledger-data \
   --standard pci-dss \
   --format markdown \
   --output pci-report.md
+```
+
+### `vledger user`
+
+Manage user accounts. All subcommands read the user store directly from the data directory — the server does not need to be running.
+
+```bash
+vledger user set-password   # change a user's password (revokes all active sessions)
+vledger user create         # create a new user account
+vledger user list           # list all accounts
+vledger user set-enabled    # enable or disable an account
+vledger user delete         # delete an account
+```
+
+**Change a password:**
+
+```bash
+vledger user set-password --data-dir <PATH> [--username <USER>]
+# Prompts for new password and confirmation interactively.
+# Or non-interactively:
+vledger user set-password --data-dir <PATH> --username admin --new-password 'NewP@ss!'
+```
+
+**Create a user:**
+
+```bash
+vledger user create --data-dir <PATH> --username alice --role operator
+# Roles: admin, operator, auditor, readonly
+```
+
+**List users:**
+
+```bash
+vledger user list --data-dir <PATH>
+```
+
+**Disable an account:**
+
+```bash
+vledger user set-enabled --data-dir <PATH> --username alice --enabled false
+```
+
+**Delete an account:**
+
+```bash
+vledger user delete --data-dir <PATH> --username alice
 ```
 
 ---
