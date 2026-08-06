@@ -230,7 +230,13 @@ The binary is written to:
 - Development: `target/debug/vledger`
 - Release: `target/release/vledger`
 
-Optionally, copy it to a location on your `PATH`:
+Install the binary to your `PATH` so you can run `vledger` from any directory:
+
+```bash
+cargo install --path crates/vledger
+```
+
+This places the binary in `~/.cargo/bin/`, which the Rust toolchain adds to your `PATH` automatically. Alternatively, copy it manually:
 
 ```bash
 # macOS / Linux

@@ -22,10 +22,10 @@ use tracing_subscriber::EnvFilter;
     about = "VectorLedger — cryptographically verifiable financial database engine",
 )]
 struct Cli {
-    #[arg(short, long, default_value = "./vledger-data")]
+    #[arg(short, long, default_value = "./vledger-data", global = true)]
     data_dir: PathBuf,
 
-    #[arg(short, long, default_value = "info")]
+    #[arg(short, long, default_value = "info", global = true)]
     log_level: String,
 
     #[command(subcommand)]
