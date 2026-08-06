@@ -71,7 +71,7 @@ chrono         = { version = "0.4.41", features = ["serde"] }
 uuid           = { version = "1.17.0", features = ["v4", "serde"] }
 
 # Networking / TLS
-rustls         = { version = "0.23.27" }
+rustls         = { version = "0.23.27", features = ["aws-lc-rs"] }
 tokio-rustls   = { version = "0.26.2" }
 rcgen          = { version = "0.13.2" }
 rustls-pemfile = { version = "2.2.0" }

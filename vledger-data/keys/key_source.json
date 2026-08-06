@@ -1,0 +1,4 @@
+{
+  "backend": "env",
+  "var": "VectorLedger_MASTER_KEY"
+}

@@ -170,6 +170,14 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install the aws-lc-rs crypto provider as the process-level default for
+    // rustls. This must happen before any TLS acceptor or connector is built.
+    // Without this, rustls 0.23+ panics when it cannot auto-detect a unique
+    // provider (e.g. when both aws-lc-rs and ring are compiled in transitively).
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .ok(); // ok() — ignore the error if a provider was already installed
+
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()

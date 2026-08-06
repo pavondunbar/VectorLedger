@@ -1,0 +1,10 @@
+{
+  "admin": {
+    "username": "admin",
+    "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$2UaHHULxPmPSiOalLyht3A$yh3VZL837f0lU5HEaBsV8NdvqtkdvGKOuVqHpij5siE",
+    "role": "admin",
+    "enabled": true,
+    "created_at": "2026-08-06T21:20:09.668710+00:00",
+    "domain_filter": null
+  }
+}
