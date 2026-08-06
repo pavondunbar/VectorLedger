@@ -816,6 +816,26 @@ fn resolve_password(password: Option<&str>) -> String {
 // ── user ──────────────────────────────────────────────────────────────────────
 
 async fn cmd_user(data_dir: &PathBuf, action: UserAction) -> Result<()> {
+    // If the server is running, route through it so the in-memory UserStore
+    // is updated. Direct disk writes behind the server's back would be lost
+    // on the next authenticate call (server holds state in memory).
+    let server_addr = {
+        let addr = "127.0.0.1:5433";
+        if std::net::TcpStream::connect_timeout(
+            &addr.parse().unwrap(),
+            std::time::Duration::from_millis(200),
+        ).is_ok() {
+            Some(addr.to_string())
+        } else {
+            None
+        }
+    };
+
+    if let Some(addr) = server_addr {
+        return cmd_user_network(&addr, action).await;
+    }
+
+    // ── Direct mode: server is not running, safe to edit disk directly ───
     let catalog_dir = data_dir.join("catalog");
     if !catalog_dir.exists() {
         anyhow::bail!(
@@ -828,20 +848,16 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction) -> Result<()> {
 
     match action {
         UserAction::SetPassword { username, new_password } => {
-            let target = username
-                .unwrap_or_else(|| resolve_username(None));
+            let target = username.unwrap_or_else(|| resolve_username(None));
             let new_pw = new_password.unwrap_or_else(|| {
                 let pw1 = prompt_new_password("New password: ");
                 let pw2 = prompt_new_password("Confirm password: ");
-                if pw1 != pw2 {
-                    eprintln!("Passwords do not match.");
-                    std::process::exit(1);
-                }
+                if pw1 != pw2 { eprintln!("Passwords do not match."); std::process::exit(1); }
                 pw1
             });
             store.set_password(&target, &new_pw)
                 .with_context(|| format!("Failed to set password for '{target}'"))?;
-            println!("✓ Password updated for '{target}'. All existing sessions revoked.");
+            println!("✓ Password updated for '{target}'.");
         }
         UserAction::Create { username, role, password } => {
             let role_parsed: vledger_server::auth::Role = role.parse()
@@ -849,10 +865,7 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction) -> Result<()> {
             let pw = password.unwrap_or_else(|| {
                 let pw1 = prompt_new_password("Password: ");
                 let pw2 = prompt_new_password("Confirm password: ");
-                if pw1 != pw2 {
-                    eprintln!("Passwords do not match.");
-                    std::process::exit(1);
-                }
+                if pw1 != pw2 { eprintln!("Passwords do not match."); std::process::exit(1); }
                 pw1
             });
             store.create_user(&username, &pw, role_parsed, None)
@@ -880,6 +893,129 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction) -> Result<()> {
             println!("✓ User '{username}' deleted.");
         }
     }
+    Ok(())
+}
+
+/// Send a user management command to a running server over TLS.
+async fn cmd_user_network(addr: &str, action: UserAction) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio_rustls::rustls::ClientConfig;
+    use tokio_rustls::TlsConnector;
+    use tokio_rustls::rustls::pki_types::ServerName;
+
+    // Gather credentials for the admin user who is authorised to make changes.
+    println!("Connecting to server at {addr} — admin credentials required.");
+    let username = resolve_username(None);
+    let password = resolve_password(None);
+
+    // Collect the new password / other interactive prompts BEFORE opening
+    // the TLS connection so the terminal is clean.
+    let admin_cmd = match action {
+        UserAction::SetPassword { username: target, new_password } => {
+            let target = target.unwrap_or_else(|| {
+                use std::io::Write;
+                print!("Username to change: ");
+                let _ = std::io::stdout().flush();
+                let mut u = String::new();
+                let _ = std::io::stdin().read_line(&mut u);
+                u.trim().to_string()
+            });
+            let new_pw = new_password.unwrap_or_else(|| {
+                let pw1 = prompt_new_password("New password: ");
+                let pw2 = prompt_new_password("Confirm password: ");
+                if pw1 != pw2 { eprintln!("Passwords do not match."); std::process::exit(1); }
+                pw1
+            });
+            serde_json::json!({ "op": "set_password", "username": target, "new_password": new_pw })
+        }
+        UserAction::Create { username: target, role, password } => {
+            let pw = password.unwrap_or_else(|| {
+                let pw1 = prompt_new_password("Password: ");
+                let pw2 = prompt_new_password("Confirm password: ");
+                if pw1 != pw2 { eprintln!("Passwords do not match."); std::process::exit(1); }
+                pw1
+            });
+            serde_json::json!({ "op": "create_user", "username": target, "password": pw, "role": role })
+        }
+        UserAction::List =>
+            serde_json::json!({ "op": "list_users" }),
+        UserAction::SetEnabled { username: target, enabled } =>
+            serde_json::json!({ "op": "set_enabled", "username": target, "enabled": enabled }),
+        UserAction::Delete { username: target } =>
+            serde_json::json!({ "op": "delete_user", "username": target }),
+    };
+
+    // Connect.
+    let tls_config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = TlsConnector::from(std::sync::Arc::new(tls_config));
+    let host_part = addr.split(':').next().unwrap_or("127.0.0.1");
+    let port: u16 = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
+    let tcp = tokio::net::TcpStream::connect((host_part, port)).await
+        .with_context(|| format!("Cannot connect to server at {addr}"))?;
+    let server_name = ServerName::try_from(host_part.to_string())
+        .map_err(|_| anyhow::anyhow!("Invalid hostname: {host_part}"))?;
+    let tls = connector.connect(server_name, tcp).await
+        .context("TLS handshake failed")?;
+
+    let (read_half, mut write_half) = tokio::io::split(tls);
+    let mut lines = BufReader::new(read_half).lines();
+
+    // Authenticate first.
+    let auth_req = serde_json::json!({ "auth": { "username": username, "password": password } });
+    write_half.write_all(format!("{}\n", auth_req).as_bytes()).await?;
+    write_half.flush().await?;
+
+    let auth_line = lines.next_line().await?
+        .ok_or_else(|| anyhow::anyhow!("Server closed connection during auth"))?;
+    let auth_resp: serde_json::Value = serde_json::from_str(&auth_line)?;
+    if !auth_resp["ok"].as_bool().unwrap_or(false) {
+        anyhow::bail!("Authentication failed: {}",
+            auth_resp["error"].as_str().unwrap_or("unknown"));
+    }
+    let token = auth_resp["token"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("No token in auth response"))?
+        .to_string();
+
+    // Send the admin command.
+    let req = serde_json::json!({ "token": token, "admin": admin_cmd });
+    write_half.write_all(format!("{}\n", req).as_bytes()).await?;
+    write_half.flush().await?;
+
+    let resp_line = lines.next_line().await?
+        .ok_or_else(|| anyhow::anyhow!("Server closed connection"))?;
+    let resp: serde_json::Value = serde_json::from_str(&resp_line)?;
+
+    if !resp["ok"].as_bool().unwrap_or(false) {
+        anyhow::bail!("{}", resp["error"].as_str().unwrap_or("unknown error"));
+    }
+
+    // Print list output if present.
+    if let Some(rows) = resp["rows"].as_array() {
+        if !rows.is_empty() {
+            let cols: Vec<&str> = resp["columns"].as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            if !cols.is_empty() {
+                println!("{:<20} {:<12} {}", cols[0], cols.get(1).unwrap_or(&""), cols.get(2).unwrap_or(&""));
+                println!("{}", "-".repeat(40));
+            }
+            for row in rows {
+                if let Some(vals) = row.as_array() {
+                    let v: Vec<String> = vals.iter()
+                        .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                        .collect();
+                    println!("{:<20} {:<12} {}", v.get(0).map(|s| s.as_str()).unwrap_or(""),
+                             v.get(1).map(|s| s.as_str()).unwrap_or(""),
+                             v.get(2).map(|s| s.as_str()).unwrap_or(""));
+                }
+            }
+        }
+    }
+
+    println!("✓ {}", resp["message"].as_str().unwrap_or("Done."));
     Ok(())
 }
 

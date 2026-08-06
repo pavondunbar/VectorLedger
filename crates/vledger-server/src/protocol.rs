@@ -34,6 +34,24 @@ pub struct Request {
     /// When true, attach a Merkle proof to the response.
     #[serde(default)]
     pub with_proof: bool,
+    /// Admin command (e.g. set_password). Requires admin role.
+    pub admin: Option<AdminCommand>,
+}
+
+/// An admin command sent by the client.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum AdminCommand {
+    /// Change a user's password.
+    SetPassword { username: String, new_password: String },
+    /// Create a new user.
+    CreateUser  { username: String, password: String, role: String },
+    /// Delete a user.
+    DeleteUser  { username: String },
+    /// Enable or disable a user.
+    SetEnabled  { username: String, enabled: bool },
+    /// List all users.
+    ListUsers,
 }
 
 /// A response frame sent to the client.

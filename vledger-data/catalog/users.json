@@ -1,10 +1,10 @@
 {
   "admin": {
     "username": "admin",
-    "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$4rYFvXUY/JWiDoxJpCs02Q$cDC9ncoNiKV8hA7ll+zm/KKox7aoH4AEas+bCXNnbg0",
+    "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$WibxojIppbeZSBaWta+QMg$yY6gk1qGWLhTvFea74sG3J5WVtINBrDPDyPoungp0Q8",
     "role": "admin",
     "enabled": true,
-    "created_at": "2026-08-06T21:35:07.147961+00:00",
+    "created_at": "2026-08-06T22:16:19.397310+00:00",
     "domain_filter": null
   }
 }

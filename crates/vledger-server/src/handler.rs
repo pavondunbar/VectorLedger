@@ -45,7 +45,7 @@ use vledger_sql::{executor::Executor, parser::parse_one, planner::LogicalPlanBui
 
 use crate::auth::{check_plan_privilege, Session, UserStore};
 use crate::config::ServerConfig;
-use crate::protocol::{Request, Response};
+use crate::protocol::{AdminCommand, Request, Response};
 
 /// Maximum number of bytes accepted in a single newline-delimited JSON frame.
 ///
@@ -229,6 +229,20 @@ pub async fn handle_connection(
             }
         }
 
+        // ── Admin commands ────────────────────────────────────────────────
+        if let Some(admin_cmd) = req.admin {
+            let sess = session.as_ref().unwrap();
+            if !sess.role.can_admin() {
+                send(&mut writer_half, Response::err(
+                    format!("Permission denied: role '{}' cannot perform admin operations", sess.role)
+                )).await;
+                continue;
+            }
+            let resp = execute_admin(admin_cmd, &user_store).await;
+            send(&mut writer_half, resp).await;
+            continue;
+        }
+
         // ── SQL execution ─────────────────────────────────────────────────
         let sql = match req.sql {
             Some(ref s) => s.as_str(),
@@ -330,5 +344,73 @@ async fn send(writer: &mut (impl AsyncWriteExt + Unpin), resp: Response) {
     if let Ok(mut json) = serde_json::to_string(&resp) {
         json.push('\n');
         let _ = writer.write_all(json.as_bytes()).await;
+    }
+}
+
+// ── Admin command execution ───────────────────────────────────────────────────
+
+async fn execute_admin(cmd: AdminCommand, user_store: &Arc<UserStore>) -> Response {
+    match cmd {
+        AdminCommand::SetPassword { username, new_password } => {
+            match user_store.set_password(&username, &new_password) {
+                Ok(()) => Response::ok(
+                    vec!["result".into()],
+                    vec![],
+                    0,
+                    None,
+                    format!("Password updated for '{username}'. All sessions revoked."),
+                ),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        AdminCommand::CreateUser { username, password, role } => {
+            let parsed_role = match role.parse::<crate::auth::Role>() {
+                Ok(r)  => r,
+                Err(e) => return Response::err(e),
+            };
+            match user_store.create_user(&username, &password, parsed_role, None) {
+                Ok(()) => Response::ok(vec![], vec![], 0, None,
+                    format!("User '{username}' created with role '{role}'.")),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        AdminCommand::DeleteUser { username } => {
+            match user_store.delete_user(&username) {
+                Ok(()) => Response::ok(vec![], vec![], 0, None,
+                    format!("User '{username}' deleted.")),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        AdminCommand::SetEnabled { username, enabled } => {
+            match user_store.set_enabled(&username, enabled) {
+                Ok(()) => {
+                    let state = if enabled { "enabled" } else { "disabled" };
+                    Response::ok(vec![], vec![], 0, None,
+                        format!("User '{username}' {state}."))
+                }
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        AdminCommand::ListUsers => {
+            let mut users = user_store.list_users();
+            users.sort_by(|a, b| a.0.cmp(&b.0));
+            let rows = users.iter().map(|(name, role, enabled)| {
+                vledger_sql::result::Row {
+                    columns: vec!["username".into(), "role".into(), "enabled".into()],
+                    values: vec![
+                        vledger_sql::result::Value::Text(name.clone()),
+                        vledger_sql::result::Value::Text(role.to_string()),
+                        vledger_sql::result::Value::Text(enabled.to_string()),
+                    ],
+                }
+            }).collect();
+            Response::ok(
+                vec!["username".into(), "role".into(), "enabled".into()],
+                rows,
+                users.len(),
+                None,
+                format!("{} user(s)", users.len()),
+            )
+        }
     }
 }
