@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name            = "vledger-client"
+version         = "0.1.0"
+description     = "VectorLedger Python client library"
+readme          = "README.md"
+license         = { text = "BUSL-1.1" }
+authors         = [{ name = "VectorGuard Labs", email = "engineering@vectorguardlabs.com" }]
+requires-python = ">=3.11"
+dependencies    = []   # stdlib-only: json, socket, ssl, threading
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Repository = "https://github.com/vectorguardlabs/vectorledger"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vledger_client*"]

@@ -1,0 +1,20 @@
+[package]
+name        = "vledger-index"
+description = "B+ tree and hash indexes for VectorLedger"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto = { workspace = true }
+vledger-pages  = { workspace = true }
+hex            = { workspace = true }
+serde          = { workspace = true }
+bincode        = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

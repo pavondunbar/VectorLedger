@@ -1,0 +1,35 @@
+[package]
+name        = "vledger-server"
+description = "TLS 1.3 network server with SQL query dispatch for VectorLedger"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[features]
+# Enable the `require_auth = false` bypass path.
+# NEVER enable this feature in a production build.
+# Usage: cargo build -p vledger-server --features dev-no-auth
+dev-no-auth = []
+
+[dependencies]
+vledger-secrets = { workspace = true }
+vledger-crypto  = { workspace = true }
+vledger-ledger  = { workspace = true }
+vledger-sql     = { workspace = true }
+tokio           = { workspace = true }
+tokio-util      = { workspace = true }
+rustls          = { workspace = true }
+tokio-rustls    = { workspace = true }
+rcgen           = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+tracing         = { workspace = true }
+chrono          = { workspace = true }
+uuid            = { workspace = true }
+hex             = { workspace = true }
+argon2          = { workspace = true }
+rand            = { workspace = true }
+blake3          = { workspace = true }

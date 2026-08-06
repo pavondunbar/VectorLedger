@@ -1,0 +1,24 @@
+[package]
+name        = "vledger-sql"
+description = "SQL parser, logical planner, and executor for VectorLedger"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto  = { workspace = true }
+vledger-ledger  = { workspace = true }
+vledger-pages   = { workspace = true }
+hex             = { workspace = true }
+sqlparser       = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+tracing         = { workspace = true }
+chrono          = { workspace = true }
+uuid            = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

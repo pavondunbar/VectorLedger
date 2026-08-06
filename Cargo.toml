@@ -1,0 +1,130 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/vledger-crypto",
+    "crates/vledger-wal",
+    "crates/vledger-pages",
+    "crates/vledger-transaction",
+    "crates/vledger-ledger",
+    "crates/vledger-index",
+    "crates/vledger-sql",
+    "crates/vledger-server",
+    "crates/vledger-hsm",
+    "crates/vledger-pgwire",
+    "crates/vledger-replication",
+    "crates/vledger-audit",
+    "crates/vledger-compliance",
+    "crates/vledger-foureyes",
+    "crates/vledger-secrets",
+    "crates/vledger",
+]
+
+[workspace.package]
+version     = "0.1.0"
+edition     = "2021"
+authors     = ["VectorGuard Labs <engineering@vectorguardlabs.com>"]
+license     = "BUSL-1.1"
+repository  = "https://github.com/vectorguardlabs/vectorledger"
+rust-version = "1.80"
+
+# Shared dependency versions pinned workspace-wide
+[workspace.dependencies]
+# Async runtime
+tokio          = { version = "1.45.1",  features = ["full"] }
+
+# Serialization
+serde          = { version = "1.0.219", features = ["derive"] }
+serde_json     = { version = "1.0.140" }
+bincode        = { version = "2.0.1", features = ["serde"] }
+
+# Cryptography
+blake3         = { version = "1.8.2" }
+aes-gcm        = { version = "0.10.3" }
+ed25519-dalek  = { version = "2.1.1",   features = ["rand_core", "serde"] }
+x25519-dalek   = { version = "2.0.1" }
+argon2         = { version = "0.5.3" }
+rand           = { version = "0.8.5" }
+rand_core      = { version = "0.6.4" }
+zeroize        = { version = "1.8.1",   features = ["derive"] }
+hkdf           = { version = "0.12.4" }
+sha2           = { version = "0.10.9" }
+hmac           = { version = "0.12.1" }
+hex            = { version = "0.4.3" }
+
+# Storage
+memmap2        = { version = "0.9.5" }
+crc32fast      = { version = "1.4.2" }
+
+# Error handling
+thiserror      = { version = "2.0.12" }
+anyhow         = { version = "1.0.98" }
+
+# Logging / tracing
+tracing        = { version = "0.1.41" }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+
+# Time
+chrono         = { version = "0.4.41", features = ["serde"] }
+
+# UUID / IDs
+uuid           = { version = "1.17.0", features = ["v4", "serde"] }
+
+# Networking / TLS
+rustls         = { version = "0.23.27" }
+tokio-rustls   = { version = "0.26.2" }
+rcgen          = { version = "0.13.2" }
+rustls-pemfile = { version = "2.2.0" }
+webpki-roots   = { version = "0.26.7" }
+
+# SQL
+sqlparser      = { version = "0.53.0" }
+
+# CLI
+clap           = { version = "4.5.40", features = ["derive"] }
+
+# Testing
+proptest       = { version = "1.6.0" }
+tempfile       = { version = "3.20.0" }
+
+# CSV export
+csv            = { version = "1.3.1" }
+
+# Cancellation / graceful shutdown
+tokio-util     = { version = "0.7.15", features = ["rt"] }
+
+# HTTP client (used by vledger-secrets for Vault / AWS KMS calls)
+reqwest        = { version = "0.12.15", default-features = false, features = ["rustls-tls", "json"] }
+
+# Async trait support
+async-trait    = { version = "0.1.88" }
+
+# System-level file locking
+libc           = { version = "0.2.172" }
+
+# Internal crates
+vledger-crypto      = { path = "crates/vledger-crypto" }
+vledger-wal         = { path = "crates/vledger-wal" }
+vledger-pages       = { path = "crates/vledger-pages" }
+vledger-transaction = { path = "crates/vledger-transaction" }
+vledger-ledger      = { path = "crates/vledger-ledger" }
+vledger-index       = { path = "crates/vledger-index" }
+vledger-sql         = { path = "crates/vledger-sql" }
+vledger-server      = { path = "crates/vledger-server" }
+vledger-hsm         = { path = "crates/vledger-hsm" }
+vledger-pgwire      = { path = "crates/vledger-pgwire" }
+vledger-replication = { path = "crates/vledger-replication" }
+vledger-audit       = { path = "crates/vledger-audit" }
+vledger-compliance  = { path = "crates/vledger-compliance" }
+vledger-foureyes    = { path = "crates/vledger-foureyes" }
+vledger-secrets     = { path = "crates/vledger-secrets" }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"   # no unwinding in production — fail fast
+
+[profile.dev]
+opt-level = 0
+debug     = true

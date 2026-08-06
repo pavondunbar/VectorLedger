@@ -1,0 +1,32 @@
+# cargo-audit configuration for VectorLedger
+#
+# Run: cargo audit
+# Docs: https://docs.rs/cargo-audit
+
+[advisories]
+
+# RUSTSEC-2025-0141 — bincode is unmaintained
+#
+# Status: ACCEPTED, no security vulnerability.
+#
+# Rationale: bincode 2.0.1 is used for WAL segment and page-store binary
+# serialization.  The on-disk format is load-bearing: migrating to an
+# alternative (postcard, bitcode, rkyv) would require a WAL migration tool
+# and a coordinated major release.  The bincode team explicitly stated that
+# v1.3.3 / v2.x are "complete" with no known security issues.
+#
+# Tracking issue: replace with postcard in the next major storage-format
+# version (VectorLedger v2.0).  See docs/adr/0004-bincode-replacement.md.
+ignore = ["RUSTSEC-2025-0141"]
+
+# RUSTSEC-2025-0134 — rustls-pemfile is unmaintained
+#
+# Status: RESOLVED — rustls-pemfile has been removed from the codebase.
+# PEM parsing now uses rustls-pki-types::pem::PemObject directly.
+# This entry is kept as a historical record; once the Cargo.lock no longer
+# contains rustls-pemfile this advisory will stop appearing.
+# ignore = ["RUSTSEC-2025-0134"]   # uncomment if a transitive dep re-adds it
+
+[output]
+# Deny actual vulnerabilities; only warn on unmaintained/unsound advisories.
+deny = ["vulnerability"]

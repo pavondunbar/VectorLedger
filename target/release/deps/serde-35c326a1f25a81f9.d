@@ -1,0 +1,14 @@
+/Users/pavondunbar/FINTECH-DATABASE/target/release/deps/serde-35c326a1f25a81f9.d: /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/pavondunbar/FINTECH-DATABASE/target/release/build/serde-e297cfd5a9e2704a/out/private.rs
+
+/Users/pavondunbar/FINTECH-DATABASE/target/release/deps/libserde-35c326a1f25a81f9.rlib: /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/pavondunbar/FINTECH-DATABASE/target/release/build/serde-e297cfd5a9e2704a/out/private.rs
+
+/Users/pavondunbar/FINTECH-DATABASE/target/release/deps/libserde-35c326a1f25a81f9.rmeta: /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/pavondunbar/FINTECH-DATABASE/target/release/build/serde-e297cfd5a9e2704a/out/private.rs
+
+/Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/Users/pavondunbar/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/Users/pavondunbar/FINTECH-DATABASE/target/release/build/serde-e297cfd5a9e2704a/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/pavondunbar/FINTECH-DATABASE/target/release/build/serde-e297cfd5a9e2704a/out

@@ -1,0 +1,1 @@
+/Users/pavondunbar/FINTECH-DATABASE/target/debug/libvgdb_foureyes.rlib: /Users/pavondunbar/FINTECH-DATABASE/crates/vgdb-foureyes/src/error.rs /Users/pavondunbar/FINTECH-DATABASE/crates/vgdb-foureyes/src/lib.rs /Users/pavondunbar/FINTECH-DATABASE/crates/vgdb-foureyes/src/queue.rs /Users/pavondunbar/FINTECH-DATABASE/crates/vgdb-foureyes/src/record.rs

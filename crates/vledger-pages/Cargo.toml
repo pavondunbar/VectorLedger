@@ -1,0 +1,22 @@
+[package]
+name        = "vledger-pages"
+description = "Immutable data pages with per-page checksums, encryption, and Merkle authentication"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto = { workspace = true }
+serde          = { workspace = true }
+bincode        = { workspace = true }
+memmap2        = { workspace = true }
+crc32fast      = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+chrono         = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }

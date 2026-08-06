@@ -1,0 +1,19 @@
+{
+  "name": "vledger-client",
+  "version": "0.1.0",
+  "description": "VectorLedger TypeScript/Node.js client library",
+  "license": "BUSL-1.1",
+  "author": "VectorGuard Labs <engineering@vectorguardlabs.com>",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test":  "node --test dist/tests/client.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5",
+    "@types/node": "20.14.9"
+  }
+}

@@ -1,0 +1,23 @@
+[package]
+name        = "vledger-audit"
+description = "Append-only WORM audit log with JSON/CSV export for VectorLedger"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto   = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+tokio            = { workspace = true }
+chrono           = { workspace = true }
+uuid             = { workspace = true }
+blake3           = { workspace = true }
+hex              = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,33 @@
+[package]
+name        = "vledger-replication"
+description = "Synchronous hot-standby WAL replication for VectorLedger"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[features]
+# Allows a replica to connect without verifying the primary's TLS certificate.
+# ONLY for single-machine dev/test with self-signed certs.
+# NEVER enable in production — build_connector returns Err when ca_cert is
+# absent unless this feature is explicitly set.
+dev-insecure-replication = []
+
+[dependencies]
+vledger-crypto  = { workspace = true }
+vledger-wal     = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+anyhow          = { workspace = true }
+tracing         = { workspace = true }
+tokio           = { workspace = true }
+chrono          = { workspace = true }
+uuid            = { workspace = true }
+blake3          = { workspace = true }
+hex             = { workspace = true }
+rand            = { workspace = true }
+rustls          = { workspace = true }
+tokio-rustls    = { workspace = true }
+rcgen           = { workspace = true }

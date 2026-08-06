@@ -1,0 +1,27 @@
+[package]
+name        = "vledger-pgwire"
+description = "PostgreSQL wire-protocol v3 compatibility layer for VectorLedger"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-ledger  = { workspace = true }
+vledger-sql     = { workspace = true }
+vledger-server  = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+anyhow          = { workspace = true }
+tracing         = { workspace = true }
+tokio           = { workspace = true }
+tokio-util      = { workspace = true }
+tokio-rustls    = { workspace = true }
+rustls          = { workspace = true }
+rcgen           = { workspace = true }
+chrono          = { workspace = true }
+uuid            = { workspace = true }
+blake3          = { workspace = true }
+hex             = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name        = "vledger-hsm"
+description = "PyHSM integration for VectorLedger — Unix socket IPC client"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto = { workspace = true }
+tokio          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+hex            = { workspace = true }
+uuid           = { workspace = true }
+async-trait    = { workspace = true }
+zeroize        = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

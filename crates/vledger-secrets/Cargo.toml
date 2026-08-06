@@ -1,0 +1,31 @@
+[package]
+name        = "vledger-secrets"
+description = "Secrets manager integration for the VectorLedger master key"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto  = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+anyhow          = { workspace = true }
+tracing         = { workspace = true }
+tokio           = { workspace = true }
+async-trait     = { workspace = true }
+zeroize         = { workspace = true }
+hex             = { workspace = true }
+rand            = { workspace = true }
+sha2            = { workspace = true }
+hmac            = { workspace = true }
+rustls          = { workspace = true }
+tokio-rustls    = { workspace = true }
+webpki-roots    = { workspace = true }
+reqwest         = { workspace = true }
+blake3          = { workspace = true }
+chrono          = { workspace = true }
+subtle          = { version = "2.6.1" }
+base64          = { version = "0.22.1" }

@@ -1,0 +1,22 @@
+[package]
+name        = "vledger-wal"
+description = "Append-only Write-Ahead Log with crash recovery and fsync durability"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto = { workspace = true }
+serde          = { workspace = true }
+bincode        = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+chrono         = { workspace = true }
+uuid           = { workspace = true }
+crc32fast      = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.20.0"
+proptest = { workspace = true }

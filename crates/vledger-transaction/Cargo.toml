@@ -1,0 +1,24 @@
+[package]
+name        = "vledger-transaction"
+description = "ACID transaction manager: MVCC, snapshot isolation, WAL-backed commit/rollback"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto = { workspace = true }
+vledger-wal    = { workspace = true }
+vledger-pages  = { workspace = true }
+blake3         = { workspace = true }
+serde          = { workspace = true }
+bincode        = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+chrono         = { workspace = true }
+uuid           = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.20.0"
+proptest = { workspace = true }

@@ -1,0 +1,43 @@
+[package]
+name        = "vledger"
+description = "VectorLedger — cryptographically verifiable financial database engine by VectorGuard Labs"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[[bin]]
+name = "vledger"
+path = "src/main.rs"
+
+[dependencies]
+vledger-secrets     = { workspace = true }
+vledger-crypto      = { workspace = true }
+vledger-wal         = { workspace = true }
+vledger-pages       = { workspace = true }
+vledger-transaction = { workspace = true }
+vledger-ledger      = { workspace = true }
+vledger-index       = { workspace = true }
+vledger-sql         = { workspace = true }
+vledger-server      = { workspace = true }
+vledger-hsm         = { workspace = true }
+vledger-pgwire      = { workspace = true }
+vledger-replication = { workspace = true }
+vledger-audit       = { workspace = true }
+vledger-compliance  = { workspace = true }
+vledger-foureyes    = { workspace = true }
+tokio               = { workspace = true }
+tokio-util          = { workspace = true }
+clap                = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+anyhow              = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+chrono              = { workspace = true }
+hex                 = { workspace = true }
+tempfile            = { workspace = true }
+tar                 = "0.4.44"
+blake3              = { workspace = true }
+libc                = { workspace = true }

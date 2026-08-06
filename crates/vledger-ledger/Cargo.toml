@@ -1,0 +1,27 @@
+[package]
+name        = "vledger-ledger"
+description = "Double-entry financial ledger: accounts, journal entries, balances, idempotency, and financial invariants"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto      = { workspace = true }
+vledger-transaction = { workspace = true }
+vledger-wal         = { workspace = true }
+vledger-pages       = { workspace = true }
+blake3              = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+bincode             = { workspace = true }
+thiserror           = { workspace = true }
+tracing             = { workspace = true }
+chrono              = { workspace = true }
+uuid                = { workspace = true }
+libc                = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
