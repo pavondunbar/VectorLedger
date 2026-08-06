@@ -21,6 +21,11 @@ pub fn parse(sql: &str) -> Result<Vec<Statement>, SqlError> {
 /// Parse exactly one SQL statement. Returns an error if there are zero or
 /// more than one statements.
 pub fn parse_one(sql: &str) -> Result<Statement, SqlError> {
+    // Strip a single trailing semicolon (and surrounding whitespace) so
+    // users can type SQL in the conventional `SELECT …;` style without
+    // triggering the "got 2 statements" error that the underlying parser
+    // produces when it sees an empty statement after the semicolon.
+    let sql = sql.trim().trim_end_matches(';').trim();
     let mut stmts = parse(sql)?;
     match stmts.len() {
         0 => Err(SqlError::Parse("empty SQL input".into())),
