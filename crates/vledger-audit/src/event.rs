@@ -81,6 +81,11 @@ pub enum AuditEventKind {
         key_ids:   Vec<String>,
         caller_id: String,
     },
+    /// The server process started successfully.
+    ServerStarted {
+        bind_addr: String,
+        version:   String,
+    },
 }
 
 impl AuditEventKind {
@@ -99,6 +104,7 @@ impl AuditEventKind {
             Self::FourEyesRejected { .. }   => "four_eyes_rejected",
             Self::BackupCreated { .. }      => "backup_created",
             Self::KeyRotationStarted { .. } => "key_rotation_started",
+            Self::ServerStarted { .. }      => "server_started",
         }
     }
 }

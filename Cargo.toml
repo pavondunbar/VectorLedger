@@ -17,7 +17,9 @@ members = [
     "crates/vledger-compliance",
     "crates/vledger-foureyes",
     "crates/vledger-secrets",
+    "crates/vledger-license",
     "crates/vledger",
+    "tools/vledger-license-gen",
 ]
 
 [workspace.package]
@@ -118,6 +120,7 @@ vledger-audit       = { path = "crates/vledger-audit" }
 vledger-compliance  = { path = "crates/vledger-compliance" }
 vledger-foureyes    = { path = "crates/vledger-foureyes" }
 vledger-secrets     = { path = "crates/vledger-secrets" }
+vledger-license     = { path = "crates/vledger-license" }
 
 [profile.release]
 opt-level     = 3

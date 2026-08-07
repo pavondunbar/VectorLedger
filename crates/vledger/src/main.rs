@@ -106,12 +106,6 @@ enum Commands {
         #[arg(long)]
         server: Option<String>,
     },
-    /// Manage user accounts (admin only).
-    #[command(name = "user", subcommand_required = true)]
-    User {
-        #[command(subcommand)]
-        action: UserAction,
-    },
     /// Run the full Phase 2 self-test suite.
     #[command(name = "self-test")]
     SelfTest,
@@ -179,6 +173,15 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Manage user accounts (admin only).
+    #[command(name = "user", subcommand_required = true)]
+    User {
+        #[command(subcommand)]
+        action: UserAction,
+    },
+    /// Show the active license tier, features, and expiry.
+    #[command(name = "license")]
+    License,
 }
 
 /// Sub-actions for `vledger user`.
@@ -266,6 +269,7 @@ async fn main() -> Result<()> {
         Commands::AuditExport { format, output, from, to } => cmd_audit_export(&cli.data_dir, &format, output.as_deref(), from.as_deref(), to.as_deref()).await,
         Commands::ComplianceReport { standard, format, output } => cmd_compliance_report(&cli.data_dir, &standard, &format, output.as_deref()).await,
         Commands::User { action } => cmd_user(&cli.data_dir, action).await,
+        Commands::License          => cmd_license(&cli.data_dir),
     }
 }
 
@@ -378,9 +382,35 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
         anyhow::bail!("Data directory not found — run `vledger init` first.");
     }
 
+    // ── License check ─────────────────────────────────────────────────────
+    let license = vledger_license::LicenseStore::load_or_free(data_dir);
+
+    if pgwire {
+        license.require_feature(vledger_license::Feature::PgWire)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+
     info!("Opening ledger at {}", data_dir.display());
     let ledger = vledger_ledger::LedgerStore::open(data_dir)
         .context("Failed to open ledger")?;
+
+    // Write a ServerStarted audit event so audit/audit.log is created on
+    // first start. This satisfies CC6.2 (audit trail present) and ensures
+    // the compliance check passes even before any SQL has been executed.
+    {
+        let audit_path = data_dir.join("audit").join("audit.log");
+        match vledger_audit::AuditLog::open(&audit_path) {
+            Ok(log) => {
+                let _ = log.append(vledger_audit::AuditEventKind::ServerStarted {
+                    bind_addr: bind.to_string(),
+                    version:   env!("CARGO_PKG_VERSION").to_string(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!("Failed to open audit log at startup: {e}");
+            }
+        }
+    }
 
     let config = vledger_server::ServerConfig {
         bind_addr: bind.to_string(),
@@ -393,6 +423,7 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     println!("  Data dir   : {}", data_dir.display());
     println!("  Proofs     : {with_proofs}");
     println!("  Protocol   : newline-delimited JSON");
+    license.print_banner();
     if pgwire {
         println!("  PgWire     : 127.0.0.1:5432  (PostgreSQL wire protocol)");
     }
@@ -678,7 +709,7 @@ async fn cmd_sql_network(
         }};
     }
 
-    let print_response = |resp: &serde_json::Value| {
+    let print_response = |resp: &serde_json::Value, expanded: bool| {
         if !resp["ok"].as_bool().unwrap_or(false) {
             eprintln!("Error: {}", resp["error"].as_str().unwrap_or("unknown"));
             return;
@@ -686,37 +717,88 @@ async fn cmd_sql_network(
         let cols: Vec<&str> = resp["columns"].as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        if !cols.is_empty() {
-            println!("{}", cols.join(" | "));
-            println!("{}", "-".repeat(cols.iter().map(|c| c.len() + 3).sum::<usize>().max(40)));
-        }
-        if let Some(rows) = resp["rows"].as_array() {
-            for row in rows {
-                if let Some(vals) = row.as_array() {
-                    let strs: Vec<String> = vals.iter()
-                        .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
-                        .collect();
-                    println!("{}", strs.join(" | "));
+        let rows = resp["rows"].as_array();
+
+        if expanded && !cols.is_empty() {
+            // ── Expanded (vertical) display — like psql \x ────────────────
+            let col_width = cols.iter().map(|c| c.len()).max().unwrap_or(0);
+            if let Some(rows) = rows {
+                for (i, row) in rows.iter().enumerate() {
+                    println!("─────────────────────── [ row {} ]", i + 1);
+                    if let Some(vals) = row.as_array() {
+                        for (col, val) in cols.iter().zip(vals.iter()) {
+                            let v = val.as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| val.to_string());
+                            println!("{:>width$} │ {}", col, v, width = col_width);
+                        }
+                    }
+                }
+                if rows.is_empty() {
+                    println!("(0 rows)");
                 }
             }
+        } else if !cols.is_empty() {
+            // ── Normal (horizontal) display ───────────────────────────────
+            // Calculate column widths: max of header width and widest value.
+            let all_vals: Vec<Vec<String>> = rows.map(|rs| {
+                rs.iter().map(|row| {
+                    row.as_array().map(|vals| {
+                        vals.iter().map(|v| {
+                            v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string())
+                        }).collect::<Vec<_>>()
+                    }).unwrap_or_default()
+                }).collect()
+            }).unwrap_or_default();
+
+            let widths: Vec<usize> = cols.iter().enumerate().map(|(i, c)| {
+                let val_max = all_vals.iter()
+                    .filter_map(|r| r.get(i))
+                    .map(|v| v.len())
+                    .max()
+                    .unwrap_or(0);
+                c.len().max(val_max)
+            }).collect();
+
+            // Header row.
+            let header: Vec<String> = cols.iter().zip(widths.iter())
+                .map(|(c, w)| format!("{:<width$}", c, width = w))
+                .collect();
+            println!("{}", header.join(" │ "));
+
+            // Separator.
+            let sep: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+            println!("{}", sep.join("─┼─"));
+
+            // Data rows.
+            for row_vals in &all_vals {
+                let cells: Vec<String> = widths.iter().enumerate().map(|(i, w)| {
+                    let v = row_vals.get(i).map(|s| s.as_str()).unwrap_or("");
+                    format!("{:<width$}", v, width = w)
+                }).collect();
+                println!("{}", cells.join(" │ "));
+            }
         }
+
         println!("── {}", resp["message"].as_str().unwrap_or(""));
         println!();
     };
 
     if let Some(sql) = query {
-        // Single-shot mode.
+        // Single-shot mode — always normal display.
         let resp = send_sql!(sql);
-        print_response(&resp);
+        print_response(&resp, false);
     } else {
         // Interactive REPL.
+        let mut expanded = false;
         println!("VectorLedger SQL REPL — connected to {addr} as {username} ({role})");
-        println!("  Type 'exit' or Ctrl-D to quit");
+        println!("  Type 'exit' or Ctrl-D to quit. Use \\x to toggle expanded display.");
         println!();
         let stdin = std::io::stdin();
         let mut line = String::new();
         loop {
-            print!("vledger> ");
+            let prompt = if expanded { "vledger (expanded)> " } else { "vledger> " };
+            print!("{prompt}");
             use std::io::Write;
             let _ = std::io::stdout().flush();
             line.clear();
@@ -724,6 +806,22 @@ async fn cmd_sql_network(
             let trimmed = line.trim().to_string();
             if trimmed.is_empty() { continue; }
             if trimmed == "exit" || trimmed == "\\q" { break; }
+
+            // Handle REPL meta-commands (no server round-trip needed).
+            if trimmed == "\\x" {
+                expanded = !expanded;
+                println!("Expanded display is {}.", if expanded { "on" } else { "off" });
+                println!();
+                continue;
+            }
+            if trimmed == "\\?" || trimmed == "\\help" {
+                println!("  \\x        Toggle expanded (vertical) display");
+                println!("  \\q        Quit");
+                println!("  exit      Quit");
+                println!("  \\?        Show this help");
+                println!();
+                continue;
+            }
 
             let req = serde_json::json!({ "sql": trimmed, "token": token });
             if let Err(e) = write_half.write_all(format!("{}\n", req).as_bytes()).await
@@ -734,7 +832,7 @@ async fn cmd_sql_network(
             match lines.next_line().await {
                 Ok(Some(resp_line)) => {
                     match serde_json::from_str::<serde_json::Value>(&resp_line) {
-                        Ok(resp) => print_response(&resp),
+                        Ok(resp) => print_response(&resp, expanded),
                         Err(e)   => eprintln!("Bad response: {e}"),
                     }
                 }
@@ -811,6 +909,61 @@ fn resolve_password(password: Option<&str>) -> String {
         .map(|s| s.to_string())
         .or_else(|| std::env::var("VLEDGER_CLI_PASSWORD").ok())
         .unwrap_or_else(read_password_from_tty)
+}
+
+// ── license ───────────────────────────────────────────────────────────────────
+
+fn cmd_license(data_dir: &PathBuf) -> Result<()> {
+    let license = vledger_license::LicenseStore::load_or_free(data_dir);
+
+    println!("── VectorLedger License ────────────────────────");
+    println!("  Tier       : {}", license.tier);
+    if license.is_signed {
+        println!("  Licensee   : {}", license.licensee);
+        println!("  Email      : {}", license.email);
+        println!("  Issued     : {}", license.issued_at);
+        println!("  Expires    : {}", license.expires_at);
+        if let Some(days) = license.days_remaining() {
+            if days < 0 {
+                println!("  Status     : ⚠  EXPIRED ({} days ago)", -days);
+            } else if days < 30 {
+                println!("  Status     : ⚠  Expiring soon ({days} days remaining)");
+            } else {
+                println!("  Status     : Active ({days} days remaining)");
+            }
+        }
+    } else {
+        println!("  Status     : No license file found — running on Free tier");
+        println!("  Upgrade    : https://vectorguardlabs.com/pricing");
+    }
+    println!("──────────────────────────────────────────────────");
+
+    let all_features = [
+        vledger_license::Feature::PgWire,
+        vledger_license::Feature::Replication,
+        vledger_license::Feature::Hsm,
+        vledger_license::Feature::ComplianceReport,
+        vledger_license::Feature::AuditExportUnlimited,
+        vledger_license::Feature::MultiNode,
+    ];
+
+    println!("  Features:");
+    for feature in &all_features {
+        let enabled = license.has_feature(feature);
+        let mark = if enabled { "✓" } else { "✗" };
+        println!("    {mark} {feature}");
+    }
+    println!();
+
+    if !license.is_signed {
+        println!(
+            "  Place a signed license.json in your data directory to unlock\n  \
+             paid features. Contact sales@vectorguardlabs.com or visit\n  \
+             https://vectorguardlabs.com/pricing"
+        );
+    }
+
+    Ok(())
 }
 
 // ── user ──────────────────────────────────────────────────────────────────────

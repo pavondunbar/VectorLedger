@@ -1,0 +1,17 @@
+[package]
+name        = "vledger-license"
+description = "License tier enforcement and Ed25519 verification for VectorLedger"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+vledger-crypto  = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+chrono          = { workspace = true }
+thiserror       = { workspace = true }
+hex             = { workspace = true }
+ed25519-dalek   = { workspace = true }

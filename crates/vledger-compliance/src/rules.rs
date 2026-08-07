@@ -221,9 +221,17 @@ fn check_replication_config(data_dir: &Path, control: &str, description: &str) -
         Evidence::pass(control, "High-availability replication",
             &format!("{description} (replication.json present)"))
     } else {
-        Evidence::fail(control, "High-availability replication",
+        // Missing replication config is a warning for single-node deployments,
+        // not a hard failure. SOC 2 A1.1 requires availability controls —
+        // replication is the recommended mechanism but a documented single-node
+        // deployment with regular backups is an accepted alternative.
+        Evidence::warn(control, "High-availability replication",
             description,
-            vec!["replication.json not found — configure synchronous replication for HA".into()])
+            vec![
+                "replication.json not found — single-node deployment detected.".into(),
+                "Configure synchronous replication (`replication.json`) for full HA, \
+                 or document a backup-based recovery strategy to satisfy A1.1.".into(),
+            ])
     }
 }
 

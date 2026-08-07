@@ -2237,6 +2237,7 @@ dependencies = [
  "vledger-hsm",
  "vledger-index",
  "vledger-ledger",
+ "vledger-license",
  "vledger-pages",
  "vledger-pgwire",
  "vledger-replication",
@@ -2362,6 +2363,33 @@ dependencies = [
  "vledger-pages",
  "vledger-transaction",
  "vledger-wal",
+]
+
+[[package]]
+name = "vledger-license"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "vledger-crypto",
+]
+
+[[package]]
+name = "vledger-license-gen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

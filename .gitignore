@@ -1,0 +1,14 @@
+# Rust build artifacts
+/target/
+
+# VectorGuard Labs license signing private key — NEVER commit this
+/.vgl-keys/
+license_signing_key.hex
+
+# Local data directories
+/vledger-data/
+/vledger-data-*/
+
+# Environment / secrets
+.env
+*.env

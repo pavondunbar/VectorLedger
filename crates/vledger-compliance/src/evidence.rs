@@ -11,6 +11,8 @@ pub enum EvidenceStatus {
     Pass,
     /// The control is not satisfied — finding must be addressed.
     Fail,
+    /// The control is satisfied but with a caveat worth noting.
+    Warn,
     /// The control could not be evaluated (data unavailable).
     NotApplicable,
 }
@@ -20,6 +22,7 @@ impl std::fmt::Display for EvidenceStatus {
         match self {
             Self::Pass           => write!(f, "PASS"),
             Self::Fail           => write!(f, "FAIL"),
+            Self::Warn           => write!(f, "WARN"),
             Self::NotApplicable  => write!(f, "N/A"),
         }
     }
@@ -85,6 +88,22 @@ impl Evidence {
             status:       EvidenceStatus::NotApplicable,
             description:  reason.into(),
             findings:     vec![],
+            collected_at: Utc::now(),
+        }
+    }
+
+    pub fn warn(
+        control_id:  impl Into<String>,
+        title:       impl Into<String>,
+        description: impl Into<String>,
+        findings:    Vec<String>,
+    ) -> Self {
+        Self {
+            control_id:   control_id.into(),
+            title:        title.into(),
+            status:       EvidenceStatus::Warn,
+            description:  description.into(),
+            findings,
             collected_at: Utc::now(),
         }
     }

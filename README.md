@@ -353,6 +353,29 @@ vledger user set-password --username admin
 # Confirm password: <type again>
 ```
 
+Once in the REPL, use `\x` to toggle expanded (vertical) display — useful for wide rows like ledger entries:
+
+```
+vledger> \x
+Expanded display is on.
+
+vledger (expanded)> SELECT * FROM ledger;
+─────────────────────── [ row 1 ]
+     sequence │ 1
+           id │ a509b39c-a6af-4ca8-afe2-851ec6f21cce
+       status │ Posted
+  description │ Customer payment
+       domain │ main
+ effective_at │ 2026-08-06T22:52:52+00:00
+    posted_at │ 2026-08-06T22:52:52+00:00
+ content_hash │ 30f3516a...
+   chain_hash │ 0523670d...
+        lines │ ...: Debit 100000 USD; ...: Credit 100000 USD
+── 1 rows
+```
+
+Toggle back with `\x` again. Use `\?` inside the REPL to see all available meta-commands.
+
 ```sql
 -- Create accounts
 INSERT INTO accounts (code, name, account_type, currency, domain)
@@ -479,6 +502,29 @@ vledger sql [OPTIONS]
 
 When `vledger start` is running, the CLI automatically detects it and connects over TLS. Use `--server` to point at a non-default address. If no server is reachable, the CLI opens the data directory directly (safe only when the server is stopped).
 
+#### REPL meta-commands
+
+These commands are handled locally by the REPL — they do not send a request to the server:
+
+| Command | Description |
+|---|---|
+| `\x` | Toggle expanded (vertical) display. Useful for wide rows. |
+| `\q` or `exit` | Quit the REPL. |
+| `\?` or `\help` | Show available meta-commands. |
+
+In normal display mode, columns are auto-sized to fit their widest value and separated with `│`. In expanded mode, each row is printed as a vertical key-value block:
+
+```
+─────────────────────── [ row 1 ]
+     sequence │ 1
+           id │ a509b39c-...
+  description │ Customer payment
+       status │ Posted
+        lines │ ...: Debit 100000 USD; ...: Credit 100000 USD
+```
+
+The prompt changes to `vledger (expanded)>` while expanded mode is active as a visual reminder.
+
 ### `vledger verify`
 
 Verify WAL integrity and the ledger hash chain.
@@ -545,6 +591,16 @@ vledger compliance-report --data-dir ./vledger-data \
   --format markdown \
   --output pci-report.md
 ```
+
+### `vledger license`
+
+Show the active license tier, features, and expiry.
+
+```bash
+vledger license --data-dir <PATH>
+```
+
+Place a signed `license.json` in your data directory to unlock paid features. If no file is present, the engine runs in Free tier. See the [Licensing](#licensing) section for the full tier comparison and feature list.
 
 ### `vledger user`
 
@@ -649,6 +705,74 @@ Generates a random key and writes it to `vledger-data/keys/master_key.hex` with 
 
 ---
 
+## Licensing
+
+VectorLedger uses a tiered license model. The binary enforces feature availability at startup by verifying a signed `license.json` file in your data directory. If no license file is present, the engine runs in **Free** tier mode.
+
+### Tiers
+
+| Feature | Free | Growth | Enterprise |
+|---|---|---|---|
+| Core ledger + SQL REPL | ✓ | ✓ | ✓ |
+| Self-tests | ✓ | ✓ | ✓ |
+| Backup & restore | ✓ | ✓ | ✓ |
+| Compliance reports | ✓ | ✓ | ✓ |
+| PostgreSQL wire protocol (`--pgwire`) | ✗ | ✓ | ✓ |
+| WAL replication | ✗ | ✓ | ✓ |
+| HSM PKCS#11 integration | ✗ | ✗ | ✓ |
+| Unlimited audit log export | ✗ | ✓ | ✓ |
+| Multi-node deployment | ✗ | ✗ | ✓ |
+
+### Installing a license
+
+Place the `license.json` file provided by VectorGuard Labs into your data directory:
+
+```bash
+cp acme-license.json ./vledger-data/license.json
+```
+
+The server reads and verifies it on every start. No restart is required if you drop in a new license while the server is stopped — it is re-read at next startup.
+
+Check the active license at any time:
+
+```bash
+vledger license --data-dir ./vledger-data
+```
+
+Example output:
+
+```
+── VectorLedger License ────────────────────────
+  Tier       : Growth
+  Licensee   : Acme Corp
+  Email      : ops@acme.com
+  Issued     : 2026-08-07
+  Expires    : 2027-08-07
+  Status     : Active (365 days remaining)
+──────────────────────────────────────────────────
+  Features:
+    ✓ pgwire
+    ✓ replication
+    ✗ hsm
+    ✓ compliance_report
+    ✓ audit_export_unlimited
+    ✗ multi_node
+```
+
+### Attempting to use a gated feature without a license
+
+```
+$ vledger start --data-dir ./vledger-data --pgwire
+Error: Feature 'pgwire' is not available on your Free license.
+Upgrade at https://vectorguardlabs.com/pricing
+```
+
+### License expiry
+
+The server startup banner shows days remaining when a signed license is active. A warning is printed when fewer than 30 days remain. Contact [sales@vectorguardlabs.com](mailto:sales@vectorguardlabs.com) to renew.
+
+---
+
 ## Production Deployment Checklist
 
 Before putting VectorLedger in front of production traffic:
@@ -658,6 +782,7 @@ Before putting VectorLedger in front of production traffic:
 - [ ] Delete `keys/MASTER_KEY_PLACEHOLDER.txt` (its presence will fail the PCI-DSS compliance check)
 - [ ] Set up HSM key management and run `vledger init --hsm-backend soft|aws|azure`
 - [ ] Configure replication with a secondary node (`replication.json`)
+- [ ] Install a valid `license.json` in the data directory (`vledger license` to confirm tier and expiry)
 - [ ] Schedule regular `vledger backup` runs
 - [ ] Schedule regular `vledger verify` runs (recommended: after each backup)
 - [ ] Set `VLEDGER_CLI_USER` and `VLEDGER_CLI_PASSWORD` in your CI environment rather than using the initial admin password

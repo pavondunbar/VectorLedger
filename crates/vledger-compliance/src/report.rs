@@ -43,28 +43,29 @@ pub struct ComplianceReport {
 }
 
 impl ComplianceReport {
-    /// Count of PASS / FAIL / N/A controls.
-    pub fn counts(&self) -> (usize, usize, usize) {
+    /// Count of PASS / WARN / FAIL / N/A controls.
+    pub fn counts(&self) -> (usize, usize, usize, usize) {
         let pass = self.evidence.iter().filter(|e| e.status == EvidenceStatus::Pass).count();
+        let warn = self.evidence.iter().filter(|e| e.status == EvidenceStatus::Warn).count();
         let fail = self.evidence.iter().filter(|e| e.status == EvidenceStatus::Fail).count();
         let na   = self.evidence.iter().filter(|e| e.status == EvidenceStatus::NotApplicable).count();
-        (pass, fail, na)
+        (pass, warn, fail, na)
     }
 
-    /// Whether every evaluated control passes.
+    /// Whether every evaluated control passes (warnings are allowed).
     pub fn is_compliant(&self) -> bool {
         self.evidence.iter().all(|e| e.status != EvidenceStatus::Fail)
     }
 
     /// One-line summary string.
     pub fn summary(&self) -> String {
-        let (pass, fail, na) = self.counts();
+        let (pass, warn, fail, na) = self.counts();
         format!(
-            "{:?} compliance report ({} — {}): {} PASS, {} FAIL, {} N/A — {}",
+            "{:?} compliance report ({} — {}): {} PASS, {} WARN, {} FAIL, {} N/A — {}",
             self.standard,
             self.date_range.from.format("%Y-%m-%d"),
             self.date_range.to.format("%Y-%m-%d"),
-            pass, fail, na,
+            pass, warn, fail, na,
             if self.is_compliant() { "COMPLIANT" } else { "NON-COMPLIANT" },
         )
     }
@@ -96,11 +97,15 @@ impl ComplianceReport {
                 ev.control_id, ev.title, ev.status, findings
             ));
         }
-        let (pass, fail, na) = self.counts();
+        let (pass, warn, fail, na) = self.counts();
+        let result_label = if self.is_compliant() {
+            if warn > 0 { "COMPLIANT WITH WARNINGS" } else { "COMPLIANT" }
+        } else {
+            "NON-COMPLIANT"
+        };
         out.push_str(&format!(
-            "\n**Result:** {} PASS · {} FAIL · {} N/A — **{}**\n",
-            pass, fail, na,
-            if self.is_compliant() { "COMPLIANT" } else { "NON-COMPLIANT" },
+            "\n**Result:** {} PASS · {} WARN · {} FAIL · {} N/A — **{}**\n",
+            pass, warn, fail, na, result_label,
         ));
         out
     }

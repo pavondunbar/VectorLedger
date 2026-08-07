@@ -43,3 +43,4 @@ blake3              = { workspace = true }
 rustls          = { workspace = true }
 tokio-rustls    = { workspace = true }
 libc                = { workspace = true }
+vledger-license     = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name        = "vledger-license-gen"
+description = "Internal tool for generating and signing VectorLedger license files (VectorGuard Labs use only)"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[[bin]]
+name = "vledger-license-gen"
+path = "src/main.rs"
+
+[dependencies]
+ed25519-dalek  = { workspace = true }
+rand           = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+hex            = { workspace = true }
+chrono         = { workspace = true }
+clap           = { workspace = true }
+anyhow         = { workspace = true }
