@@ -1,7 +1,16 @@
 //! Async PyHSM IPC client.
 //!
-//! Connects to the PyHSM daemon over a Unix domain socket and exposes a
-//! typed Rust API matching the TypeScript client in `PyHSM/pyhsm-ts/client.ts`.
+//! Connects to the PyHSM daemon and exposes a typed Rust API matching the
+//! TypeScript client in `PyHSM/pyhsm-ts/client.ts`.
+//!
+//! ## Transport
+//! | Platform | Transport | Address format |
+//! |---|---|---|
+//! | Linux / macOS | Unix domain socket | `/tmp/pyhsm.sock` |
+//! | Windows | TCP loopback | `127.0.0.1:7777` or `<host>:<port>` |
+//!
+//! On Windows, start the PyHSM daemon with `PYHSM_TCP_PORT=7777` and pass
+//! `--pyhsm-socket 127.0.0.1:7777` (or set `PYHSM_SOCKET_PATH=127.0.0.1:7777`).
 //!
 //! ## Usage
 //! ```no_run
@@ -10,11 +19,8 @@
 //! #[tokio::main]
 //! async fn main() {
 //!     let hsm = HsmClient::new("/tmp/pyhsm.sock", "vledger");
-//!     // Generate a table encryption key
 //!     hsm.generate_key("vgdb/table/1/encrypt", None).await.unwrap();
-//!     // Encrypt data
 //!     let ct = hsm.encrypt("vgdb/table/1/encrypt", b"secret data").await.unwrap();
-//!     // Decrypt data
 //!     let pt = hsm.decrypt("vgdb/table/1/encrypt", &ct).await.unwrap();
 //!     assert_eq!(*pt, b"secret data");
 //! }
@@ -24,7 +30,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
@@ -54,9 +59,12 @@ impl HsmClient {
         }
     }
 
-    /// Use the default socket path `/tmp/pyhsm.sock`.
+    /// Use the default socket/address for this platform.
+    ///
+    /// - Unix: `/tmp/pyhsm.sock`
+    /// - Windows: `127.0.0.1:7777` (PyHSM TCP mode via `PYHSM_TCP_PORT=7777`)
     pub fn default_socket(caller_id: impl Into<String>) -> Self {
-        Self::new("/tmp/pyhsm.sock", caller_id)
+        Self::new(default_pyhsm_address(), caller_id)
     }
 
     // ── Symmetric operations ──────────────────────────────────────────────
@@ -155,7 +163,11 @@ impl HsmClient {
 
     /// Returns `true` if the PyHSM daemon socket exists and responds to health.
     pub async fn is_available(&self) -> bool {
-        if !self.socket_path.exists() { return false; }
+        // On Unix we can cheaply check for socket existence before connecting.
+        #[cfg(unix)]
+        if !self.socket_path.exists() {
+            return false;
+        }
         self.health().await.is_ok()
     }
 
@@ -198,56 +210,110 @@ impl HsmClient {
     // ── Internal IPC ──────────────────────────────────────────────────────
 
     async fn send(&self, req: &HsmRequest) -> Result<HsmResponse, HsmError> {
-        if !self.socket_path.exists() {
-            return Err(HsmError::SocketNotFound {
-                path: self.socket_path.display().to_string(),
-            });
-        }
-
-        let stream = timeout(
-            Duration::from_millis(IPC_TIMEOUT_MS),
-            UnixStream::connect(&self.socket_path),
-        )
-        .await
-        .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
-        .map_err(|e| HsmError::Ipc(e.to_string()))?;
-
-        let (reader_half, mut writer) = tokio::io::split(stream);
-
-        // Send request as newline-terminated JSON
+        // Serialise request once — shared by both platform branches.
         let mut line = serde_json::to_string(req)
             .map_err(|e| HsmError::Serialisation(e.to_string()))?;
         line.push('\n');
 
-        timeout(Duration::from_millis(IPC_TIMEOUT_MS), writer.write_all(line.as_bytes()))
+        #[cfg(unix)]
+        {
+            use tokio::net::UnixStream;
+
+            if !self.socket_path.exists() {
+                return Err(HsmError::SocketNotFound {
+                    path: self.socket_path.display().to_string(),
+                });
+            }
+
+            let stream = timeout(
+                Duration::from_millis(IPC_TIMEOUT_MS),
+                UnixStream::connect(&self.socket_path),
+            )
             .await
             .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
             .map_err(|e| HsmError::Ipc(e.to_string()))?;
 
-        // Read response line
-        let mut buf_reader = BufReader::new(reader_half);
-        let mut resp_line  = String::new();
+            let (reader_half, mut writer) = tokio::io::split(stream);
 
-        timeout(
-            Duration::from_millis(IPC_TIMEOUT_MS),
-            buf_reader.read_line(&mut resp_line),
-        )
-        .await
-        .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
-        .map_err(|e| HsmError::Ipc(e.to_string()))?;
+            timeout(Duration::from_millis(IPC_TIMEOUT_MS), writer.write_all(line.as_bytes()))
+                .await
+                .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
+                .map_err(|e| HsmError::Ipc(e.to_string()))?;
 
-        let resp: HsmResponse = serde_json::from_str(resp_line.trim())
-            .map_err(|e| HsmError::Serialisation(format!("bad response JSON: {e}")))?;
+            let mut buf_reader = BufReader::new(reader_half);
+            let mut resp_line  = String::new();
+            timeout(
+                Duration::from_millis(IPC_TIMEOUT_MS),
+                buf_reader.read_line(&mut resp_line),
+            )
+            .await
+            .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
+            .map_err(|e| HsmError::Ipc(e.to_string()))?;
 
-        if !resp.ok {
-            return Err(HsmError::Remote(
-                resp.error.unwrap_or_else(|| "unknown error".into()),
-            ));
+            return parse_response(&resp_line);
         }
 
-        debug!("HSM IPC OK");
-        Ok(resp)
+        #[cfg(not(unix))]
+        {
+            // Windows: connect to PyHSM over TCP loopback.
+            // The socket_path field holds a "host:port" string on Windows,
+            // e.g. "127.0.0.1:7777".  Start PyHSM with PYHSM_TCP_PORT=7777.
+            let addr = self.socket_path.to_str().unwrap_or("127.0.0.1:7777");
+
+            let stream = timeout(
+                Duration::from_millis(IPC_TIMEOUT_MS),
+                tokio::net::TcpStream::connect(addr),
+            )
+            .await
+            .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
+            .map_err(|e| HsmError::Ipc(format!("TCP connect to PyHSM at {addr}: {e}")))?;
+
+            let (reader_half, mut writer) = tokio::io::split(stream);
+
+            timeout(Duration::from_millis(IPC_TIMEOUT_MS), writer.write_all(line.as_bytes()))
+                .await
+                .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
+                .map_err(|e| HsmError::Ipc(e.to_string()))?;
+
+            let mut buf_reader = BufReader::new(reader_half);
+            let mut resp_line  = String::new();
+            timeout(
+                Duration::from_millis(IPC_TIMEOUT_MS),
+                buf_reader.read_line(&mut resp_line),
+            )
+            .await
+            .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
+            .map_err(|e| HsmError::Ipc(e.to_string()))?;
+
+            return parse_response(&resp_line);
+        }
     }
+}
+
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+/// Parse a raw NDJSON response line into an `HsmResponse`.
+fn parse_response(resp_line: &str) -> Result<HsmResponse, HsmError> {
+    let resp: HsmResponse = serde_json::from_str(resp_line.trim())
+        .map_err(|e| HsmError::Serialisation(format!("bad response JSON: {e}")))?;
+    if !resp.ok {
+        return Err(HsmError::Remote(
+            resp.error.unwrap_or_else(|| "unknown error".into()),
+        ));
+    }
+    debug!("HSM IPC OK");
+    Ok(resp)
+}
+
+/// Default PyHSM address for this platform.
+///
+/// - Unix: `/tmp/pyhsm.sock`
+/// - Windows: `127.0.0.1:7777`
+pub fn default_pyhsm_address() -> &'static str {
+    #[cfg(unix)]
+    { "/tmp/pyhsm.sock" }
+    #[cfg(not(unix))]
+    { "127.0.0.1:7777" }
 }
 
 // ── HsmKeyProvider ────────────────────────────────────────────────────────────

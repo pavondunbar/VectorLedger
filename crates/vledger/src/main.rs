@@ -39,12 +39,13 @@ enum Commands {
         #[arg(long)]
         force: bool,
         /// Master key source backend.
-        /// Choices: env, file, vault, aws_kms  (default: env)
+        /// Choices: env, file, vault, aws_kms, pyhsm  (default: pyhsm)
+        /// - pyhsm    : PyHSM Unix-socket daemon — default; requires running daemon
         /// - env      : read from VectorLedger_MASTER_KEY environment variable
         /// - file     : generate and store in vledger-data/keys/master_key.hex (dev only)
         /// - vault    : HashiCorp Vault KV v2 (set VAULT_TOKEN, --vault-addr, --vault-path)
         /// - aws_kms  : AWS KMS GenerateDataKey (set AWS credentials, --kms-key-id)
-        #[arg(long, default_value = "env")]
+        #[arg(long, default_value = "pyhsm")]
         key_source: String,
         /// Vault server address (used with --key-source=vault).
         #[arg(long, default_value = "http://127.0.0.1:8200")]
@@ -61,6 +62,15 @@ enum Commands {
         /// AWS region (used with --key-source=aws_kms).
         #[arg(long, default_value = "us-east-1")]
         kms_region: String,
+        /// PyHSM Unix socket path (used with --key-source=pyhsm).
+        /// Overrides the PYHSM_SOCKET_PATH environment variable.
+        /// Default: /tmp/pyhsm.sock
+        #[arg(long)]
+        pyhsm_socket: Option<String>,
+        /// Caller ID written to the PyHSM audit log (used with --key-source=pyhsm).
+        /// Default: vledger
+        #[arg(long, default_value = "vledger")]
+        pyhsm_caller_id: String,
     },
     /// Start the TLS 1.3 server and accept SQL connections.
     Start {
@@ -254,8 +264,8 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Init { force, key_source, vault_addr, vault_mount, vault_path, kms_key_id, kms_region }
-            => cmd_init(&cli.data_dir, force, &key_source, &vault_addr, &vault_mount, &vault_path, kms_key_id.as_deref(), &kms_region).await,
+        Commands::Init { force, key_source, vault_addr, vault_mount, vault_path, kms_key_id, kms_region, pyhsm_socket, pyhsm_caller_id }
+            => cmd_init(&cli.data_dir, force, &key_source, &vault_addr, &vault_mount, &vault_path, kms_key_id.as_deref(), &kms_region, pyhsm_socket.as_deref(), &pyhsm_caller_id).await,
         Commands::Start { bind, pgwire, with_proofs } => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs).await,
         Commands::Status                             => cmd_status(&cli.data_dir).await,
         Commands::Verify                             => cmd_verify(&cli.data_dir).await,
@@ -276,14 +286,16 @@ async fn main() -> Result<()> {
 // ── init ──────────────────────────────────────────────────────────────────────
 
 async fn cmd_init(
-    data_dir:    &PathBuf,
-    force:       bool,
-    key_source:  &str,
-    vault_addr:  &str,
-    vault_mount: &str,
-    vault_path:  &str,
-    kms_key_id:  Option<&str>,
-    kms_region:  &str,
+    data_dir:        &PathBuf,
+    force:           bool,
+    key_source:      &str,
+    vault_addr:      &str,
+    vault_mount:     &str,
+    vault_path:      &str,
+    kms_key_id:      Option<&str>,
+    kms_region:      &str,
+    pyhsm_socket:    Option<&str>,
+    pyhsm_caller_id: &str,
 ) -> Result<()> {
     if data_dir.exists() && !force {
         anyhow::bail!(
@@ -339,8 +351,20 @@ async fn cmd_init(
                     encryption_context: std::collections::HashMap::new(),
                 }
             }
+            "pyhsm" => {
+                // Resolve socket path: CLI flag → env var → platform default.
+                let socket = pyhsm_socket
+                    .map(|s| s.to_string())
+                    .or_else(|| std::env::var("PYHSM_SOCKET_PATH").ok())
+                    .unwrap_or_else(|| vledger_hsm::default_pyhsm_address().to_string());
+                KeySourceConfig::PyHsm {
+                    socket_path: socket,
+                    caller_id:   pyhsm_caller_id.to_string(),
+                    key_id:      "vledger.master-key".to_string(),
+                }
+            }
             _ => {
-                // Default: env var
+                // Explicit --key-source env, or unrecognised value: fall back to env var.
                 KeySourceConfig::Env { var: "VectorLedger_MASTER_KEY".to_string() }
             }
         };
@@ -359,6 +383,8 @@ async fn cmd_init(
                 println!("  Vault: {addr} → {secret_path}"),
             KeySourceConfig::AwsKms { key_id, region, .. } =>
                 println!("  AWS KMS: {key_id} in {region}"),
+            KeySourceConfig::PyHsm { socket_path, key_id, .. } =>
+                println!("  PyHSM: socket={socket_path}  wrapping-key={key_id}"),
         }
     }
 
@@ -1172,6 +1198,38 @@ async fn cmd_user_network(addr: &str, action: UserAction) -> Result<()> {
     Ok(())
 }
 
+// ── Windows console echo suppression ─────────────────────────────────────────
+
+/// Temporarily disable `ENABLE_ECHO_INPUT` on the Windows console stdin
+/// handle while `f` runs, then restore the original mode.
+///
+/// Uses `windows-sys` `GetConsoleMode` / `SetConsoleMode` which are always
+/// available on Windows console hosts (cmd.exe, PowerShell, Windows Terminal).
+/// Falls back to a plain call if the handle is not a console (e.g. redirected).
+#[cfg(windows)]
+fn suppress_echo_windows<F: FnOnce() -> String>(f: F) -> String {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, SetConsoleMode, ENABLE_ECHO_INPUT,
+    };
+
+    let handle = std::io::stdin().as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    let mut orig_mode: u32 = 0;
+    let has_console = unsafe { GetConsoleMode(handle, &mut orig_mode) } != 0;
+
+    if has_console {
+        unsafe { SetConsoleMode(handle, orig_mode & !ENABLE_ECHO_INPUT) };
+    }
+
+    let result = f();
+
+    if has_console {
+        unsafe { SetConsoleMode(handle, orig_mode) };
+    }
+
+    result
+}
+
 fn prompt_new_password(prompt: &str) -> String {
     use std::io::Write;
     print!("{prompt}");
@@ -1196,7 +1254,16 @@ fn prompt_new_password(prompt: &str) -> String {
         }
         pw.trim().to_string()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        suppress_echo_windows(|| {
+            let mut pw = String::new();
+            let _ = std::io::stdin().read_line(&mut pw);
+            println!();
+            pw.trim().to_string()
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let mut pw = String::new();
         let _ = std::io::stdin().read_line(&mut pw);
@@ -1275,9 +1342,19 @@ fn read_password_from_tty() -> String {
         pw.trim().to_string()
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // Windows / other: plain read (no echo suppression without external crate)
+        suppress_echo_windows(|| {
+            let mut pw = String::new();
+            let _ = std::io::stdin().read_line(&mut pw);
+            println!();
+            pw.trim().to_string()
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Other platforms: plain read (no echo suppression)
         let mut pw = String::new();
         let _ = std::io::stdin().read_line(&mut pw);
         pw.trim().to_string()
@@ -1588,6 +1665,11 @@ async fn cmd_compliance_report(
     output:    Option<&std::path::Path>,
 ) -> Result<()> {
     use vledger_compliance::{ComplianceEngine, ComplianceStandard, ReportDateRange};
+
+    // ── License check ─────────────────────────────────────────────────────
+    let license = vledger_license::LicenseStore::load_or_free(data_dir);
+    license.require_feature(vledger_license::Feature::ComplianceReport)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let std_enum = match standard.to_lowercase().as_str() {
         "soc2" | "soc-2" => ComplianceStandard::Soc2,

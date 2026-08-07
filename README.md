@@ -180,7 +180,7 @@ Native client libraries are included for three languages, all in `clients/`:
 | Requirement | Minimum version | Notes |
 |---|---|---|
 | Rust toolchain | 1.80 | Install via [rustup.rs](https://rustup.rs) |
-| macOS or Linux | — | Windows is not supported |
+| macOS, Linux, or Windows | — | macOS and Linux are fully supported; Windows 10/11 and Windows Server 2019/2022 (x86_64 and ARM64) are supported |
 | Git | Any recent | To clone the repository |
 
 No other runtime dependencies are required. All cryptographic libraries are statically linked via Cargo.
@@ -188,6 +188,103 @@ No other runtime dependencies are required. All cryptographic libraries are stat
 ---
 
 ## Installation
+
+### Option 1 — Install via curl (recommended)
+
+The fastest way to install VectorLedger. The installer detects your OS and
+architecture, downloads the correct pre-built binary, verifies its SHA-256
+checksum, and places `vledger` on your `PATH`.
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.sh | bash
+```
+
+**Install a specific version:**
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.sh \
+  | VLEDGER_VERSION=v0.1.0 bash
+```
+
+**Install to a custom directory:**
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.sh \
+  | VLEDGER_INSTALL_DIR="$HOME/.local/bin" bash
+```
+
+The installer supports macOS and Linux on x86_64 and aarch64. If no pre-built
+binary is available for your platform it automatically falls back to building
+from source using Cargo (Rust 1.80+ required).
+
+**Installer environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `VLEDGER_VERSION` | latest | Release tag to install, e.g. `v0.1.0` |
+| `VLEDGER_INSTALL_DIR` | `/usr/local/bin` | Directory to place the `vledger` binary |
+| `VLEDGER_NO_MODIFY_PATH` | `0` | Set to `1` to skip adding the install dir to your shell profile |
+
+After installation, verify it works:
+
+```bash
+vledger --version
+vledger self-test
+```
+
+---
+
+### Option 3 — Windows (PowerShell)
+
+Run this in PowerShell 5.1+ or PowerShell 7+:
+
+```powershell
+irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 | iex
+```
+
+The installer detects your architecture (x86_64 or ARM64), downloads the signed release zip, verifies its SHA-256 checksum, installs `vledger.exe` to `%LOCALAPPDATA%\vledger\bin`, and adds it to your user `PATH`.
+
+**Install a specific version:**
+
+```powershell
+$env:VLEDGER_VERSION = "v0.1.0"
+irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 | iex
+```
+
+**Install to a custom directory (with parameters):**
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1))) `
+    -InstallDir "C:\Tools\vledger"
+```
+
+**Installer parameters:**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `-Version` | latest | Release tag, e.g. `v0.1.0`. Also reads `$env:VLEDGER_VERSION`. |
+| `-InstallDir` | `%LOCALAPPDATA%\vledger\bin` | Directory to install `vledger.exe` |
+| `-NoPathUpdate` | off | Skip adding the install dir to your user `PATH` |
+
+After installation, verify it works in a new terminal:
+
+```powershell
+vledger --version
+vledger self-test
+```
+
+**Windows-specific notes:**
+
+- PyHSM uses **TCP** instead of a Unix socket on Windows. Start the PyHSM daemon with `$env:PYHSM_TCP_PORT = 7777` and pass `--pyhsm-socket 127.0.0.1:7777` to `vledger init`.
+- File permissions (`0o600`) are not set on Windows — protect your data directory using NTFS ACLs or store it inside a user-only folder.
+- Graceful shutdown responds to `CTRL-C`. `SIGTERM` is Unix-only; use `Stop-Process` or the service manager on Windows.
+
+---
+
+### Option 2 — Build from source
 
 ### Step 1 — Install Rust
 
@@ -208,8 +305,8 @@ cargo --version
 ### Step 2 — Clone the repository
 
 ```bash
-git clone https://github.com/vectorguardlabs/vectorledger.git
-cd vectorledger
+git clone https://github.com/pavondunbar/VectorLedger.git
+cd VectorLedger
 ```
 
 ### Step 3 — Build
@@ -463,12 +560,14 @@ Initialise a new database.
 vledger init [OPTIONS]
   --data-dir <PATH>       Data directory (default: ./vledger-data)
   --force                 Reinitialise an existing database
-  --key-source <BACKEND>  env | file | vault | aws_kms  (default: env)
+  --key-source <BACKEND>  env | file | vault | aws_kms | pyhsm  (default: pyhsm)
   --vault-addr <URL>      Vault server address
   --vault-mount <MOUNT>   Vault KV v2 mount path (default: secret)
   --vault-path <PATH>     Vault secret path (default: vledger/master_key)
   --kms-key-id <ARN>      AWS KMS key ARN or alias
   --kms-region <REGION>   AWS region (default: us-east-1)
+  --pyhsm-socket <PATH>   PyHSM Unix socket path (default: /tmp/pyhsm.sock)
+  --pyhsm-caller-id <ID>  Caller ID written to PyHSM audit log (default: vledger)
 ```
 
 ### `vledger start`
@@ -702,6 +801,60 @@ vledger init --key-source file
 ```
 
 Generates a random key and writes it to `vledger-data/keys/master_key.hex` with mode `0o600`. **Not recommended for production.** Move to Vault or KMS before deployment.
+
+---
+
+### PyHSM Unix-socket daemon
+
+```bash
+# 1. Start the PyHSM daemon (from the PyHSM project directory)
+export PYHSM_MASTER_PASSWORD="your-master-password"
+export PYHSM_KEYSTORE_PATH="/secure/pyhsm-keystore.enc"
+export PYHSM_SOCKET_PATH="/run/pyhsm/pyhsm.sock"   # optional; default: /tmp/pyhsm.sock
+npx tsx pyhsm-ts/process.ts &
+
+# 2. Initialise VectorLedger with PyHSM as the key source
+vledger init \
+  --key-source pyhsm \
+  --pyhsm-socket /run/pyhsm/pyhsm.sock \
+  --pyhsm-caller-id vledger
+```
+
+PyHSM acts as a local software HSM. VectorLedger generates a 32-byte master key, hands it to PyHSM for encryption under a dedicated wrapping key (`vledger.master-key`), and stores only the encrypted blob in `vledger-data/keys/pyhsm_master_key.enc`. The raw key material never touches disk unencrypted.
+
+**How it works across restarts:**
+
+| Event | What happens |
+|---|---|
+| First `vledger init` | Master key generated in-process, encrypted by PyHSM, blob cached with BLAKE3-keyed HMAC |
+| Every `vledger start` | HMAC verified locally, blob sent to PyHSM for decryption, plaintext key used briefly then zeroized |
+| PyHSM daemon not running | `vledger start` fails immediately with a clear error before touching any data |
+| Cache file tampered | HMAC check fails, startup aborts before any KMS/IPC call |
+
+The `PYHSM_SOCKET_PATH` environment variable is also respected if `--pyhsm-socket` is not provided.
+
+**Windows:** PyHSM has no Unix socket support on Windows. Use TCP mode instead:
+
+```powershell
+# Start PyHSM with TCP transport
+$env:PYHSM_TCP_PORT = 7777
+npx tsx pyhsm-ts/process.ts
+
+# Initialise VectorLedger pointing at the TCP address
+vledger init --key-source pyhsm --pyhsm-socket 127.0.0.1:7777
+```
+
+**Caller authentication:** if the PyHSM daemon was started with `PYHSM_CALLER_SECRET`, set the same secret in VectorLedger's environment and pass the pre-computed `service:hmac-hex` string as `--pyhsm-caller-id`. Without a shared secret, any caller ID string is accepted by PyHSM.
+
+**Key Source Backends summary:**
+
+| Backend | `--key-source` | Key never on disk | External dependency |
+|---|---|---|---|
+| PyHSM | `pyhsm` | ✓ | PyHSM daemon running |
+| Environment variable | `env` | ✗ (in env) | None |
+| Disk file | `file` | ✗ | None |
+| HashiCorp Vault | `vault` | ✓ | Vault server + token |
+| AWS KMS | `aws_kms` | ✓ | AWS credentials + KMS key |
 
 ---
 

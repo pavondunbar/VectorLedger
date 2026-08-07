@@ -22,6 +22,9 @@ pub enum SecretsError {
     #[error("AWS KMS error: {0}")]
     AwsKms(String),
 
+    #[error("PyHSM error: {0}")]
+    PyHsm(String),
+
     #[error("Serialisation error: {0}")]
     Serialisation(String),
 

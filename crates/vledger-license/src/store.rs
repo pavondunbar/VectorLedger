@@ -21,7 +21,7 @@ use crate::tier::{Feature, LicenseTier};
 // Generated with: vledger-license-gen keygen
 // Key ID: vgl-license-v1
 const VECTORGUARD_LICENSE_PUBKEY_HEX: &str =
-    "00c0abf160b4cc8cbce2175230c4aaf4aff6930aed79b057ae48e0a26112d425";
+    "9cf73a416943d55255a4943d2c839560454869ff8ea2fa74c33e787d70e09b14";
 
 // ── License file structure (as stored in license.json) ───────────────────────
 

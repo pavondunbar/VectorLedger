@@ -103,6 +103,12 @@ async-trait    = { version = "0.1.88" }
 
 # System-level file locking
 libc           = { version = "0.2.172" }
+windows-sys    = { version = "0.59.0", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+] }
 
 # Internal crates
 vledger-crypto      = { path = "crates/vledger-crypto" }

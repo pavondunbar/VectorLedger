@@ -14,7 +14,7 @@ pub mod error;
 pub mod pkcs11;
 pub mod protocol;
 
-pub use client::{HsmClient, KeyProvider};
+pub use client::{HsmClient, KeyProvider, default_pyhsm_address};
 pub use error::HsmError;
 pub use pkcs11::{
     AwsCloudHsmConfig, AwsCloudHsmProvider,

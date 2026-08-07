@@ -93,16 +93,21 @@ fn try_exclusive_lock(file: &File) -> bool {
 #[cfg(windows)]
 fn try_exclusive_lock(file: &File) -> bool {
     use std::os::windows::io::AsRawHandle;
-    use winapi::um::fileapi::LockFileEx;
-    use winapi::um::minwinbase::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OVERLAPPED};
-    use winapi::shared::minwindef::DWORD;
-    let handle = file.as_raw_handle();
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    let handle = file.as_raw_handle() as HANDLE;
     let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
     let result = unsafe {
         LockFileEx(
-            handle as _,
+            handle,
             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0, 1, 0, &mut overlapped,
+            0,
+            1,
+            0,
+            &mut overlapped,
         )
     };
     result != 0

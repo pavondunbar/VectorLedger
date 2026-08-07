@@ -184,4 +184,8 @@ fn set_mode_600(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
+    #[cfg(not(unix))]
+    {
+        let _ = path; // Windows uses ACLs; file is inside the protected data dir
+    }
 }

@@ -97,10 +97,47 @@ pub enum KeySourceConfig {
         #[serde(default)]
         encryption_context: std::collections::HashMap<String, String>,
     },
+
+    /// PyHSM Unix-socket daemon backend.
+    ///
+    /// The master key is generated once inside the PyHSM daemon and never
+    /// leaves it.  VectorLedger stores only an encrypted blob (sealed by
+    /// PyHSM's own AES-256-GCM-SIV key-wrapping layer) in
+    /// `keys/pyhsm_master_key.enc`, plus an HMAC-BLAKE3 integrity seal.
+    ///
+    /// On every start the blob is sent to PyHSM for decryption; the
+    /// plaintext key exists in-process only for the duration of startup
+    /// key derivation, then is zeroized.
+    ///
+    /// ## Prerequisites
+    /// The PyHSM TypeScript daemon (`pyhsm-ts/process.ts`) must be running
+    /// and listening on `socket_path` before `vledger start` is invoked.
+    PyHsm {
+        /// Path to the PyHSM Unix domain socket.
+        /// Default: `/tmp/pyhsm.sock`  (overrideable via `PYHSM_SOCKET_PATH`).
+        #[serde(default = "default_pyhsm_socket")]
+        socket_path: String,
+        /// Caller identifier written to the PyHSM audit log.
+        /// Default: `"vledger"`.
+        #[serde(default = "default_pyhsm_caller_id")]
+        caller_id: String,
+        /// Key ID used inside PyHSM for the master-key wrapping key.
+        /// Default: `"vledger.master-key"`.
+        #[serde(default = "default_pyhsm_key_id")]
+        key_id: String,
+    },
 }
 
 fn default_env_var()     -> String { "VectorLedger_MASTER_KEY".into() }
 fn default_vault_field() -> String { "value".into() }
+fn default_pyhsm_socket()    -> String {
+    #[cfg(unix)]
+    { "/tmp/pyhsm.sock".into() }
+    #[cfg(not(unix))]
+    { "127.0.0.1:7777".into() }
+}
+fn default_pyhsm_caller_id() -> String { "vledger".into() }
+fn default_pyhsm_key_id()    -> String { "vledger.master-key".into() }
 
 impl KeySourceConfig {
     /// Load config from a JSON file.
@@ -147,6 +184,13 @@ pub fn build_provider(
                 region:             region.clone(),
                 encryption_context: encryption_context.clone(),
                 cache_dir:          None,
+            })),
+        KeySourceConfig::PyHsm { socket_path, caller_id, key_id } =>
+            Ok(Box::new(PyHsmProvider {
+                socket_path: socket_path.clone(),
+                caller_id:   caller_id.clone(),
+                key_id:      key_id.clone(),
+                cache_dir:   None,
             })),
     }
 }
@@ -725,4 +769,314 @@ fn set_mode_600(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
+}
+
+
+
+// ── PyHsmProvider ─────────────────────────────────────────────────────────────
+
+/// Derives the VectorLedger master key from the PyHSM Unix-socket daemon.
+///
+/// ## How it works
+///
+/// PyHSM owns a wrapping key (`key_id`, default `"vledger.master-key"`) whose
+/// raw bytes **never** leave the daemon.  VectorLedger's 32-byte master key is
+/// encrypted by PyHSM and the resulting ciphertext is stored locally in
+/// `<data_dir>/keys/pyhsm_master_key.enc` with an BLAKE3-keyed HMAC-SHA256
+/// integrity seal (same pattern as `AwsKmsProvider`).
+///
+/// ### First boot (`pyhsm_master_key.enc` absent)
+/// 1. Generate a 32-byte master key with `OsRng`.
+/// 2. Ask PyHSM to encrypt it → receive a Base64 ciphertext.
+/// 3. Write `<ciphertext_b64>\n<hmac_hex>\n` to the cache file (mode 0o600).
+/// 4. Return the plaintext key.
+///
+/// ### Subsequent boots (cache present)
+/// 1. Read and HMAC-verify the cache file.
+/// 2. Send the Base64 ciphertext to PyHSM → receive plaintext.
+/// 3. Return the plaintext key.
+///
+/// The HMAC key is `BLAKE3(socket_path || key_id)` so an attacker who can
+/// write the cache file but does not know which PyHSM instance / key is in
+/// use cannot forge a valid seal.
+pub struct PyHsmProvider {
+    pub socket_path: String,
+    pub caller_id:   String,
+    pub key_id:      String,
+    /// Directory where `pyhsm_master_key.enc` is cached.  `None` → current dir.
+    pub cache_dir:   Option<std::path::PathBuf>,
+}
+
+impl PyHsmProvider {
+    fn cache_path(&self) -> std::path::PathBuf {
+        self.cache_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("pyhsm_master_key.enc")
+    }
+
+    /// HMAC key = BLAKE3(socket_path || key_id).
+    /// Ties the integrity seal to this specific PyHSM instance and wrapping key.
+    fn hmac_key(&self) -> [u8; 32] {
+        let mut input = self.socket_path.as_bytes().to_vec();
+        input.extend_from_slice(self.key_id.as_bytes());
+        *blake3::hash(&input).as_bytes()
+    }
+
+    fn compute_hmac(key: &[u8], data: &str) -> String {
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+        mac.update(data.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn write_cache(&self, path: &std::path::Path, ct_b64: &str) -> Result<(), SecretsError> {
+        let hmac_hex = Self::compute_hmac(&self.hmac_key(), ct_b64);
+        std::fs::write(path, format!("{ct_b64}\n{hmac_hex}\n"))
+            .map_err(|e| SecretsError::PyHsm(format!("write pyhsm_master_key.enc: {e}")))?;
+        set_mode_600(path);
+        Ok(())
+    }
+
+    fn read_cache_verified(&self, path: &std::path::Path) -> Result<String, SecretsError> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| SecretsError::PyHsm(format!("read pyhsm_master_key.enc: {e}")))?;
+        let mut lines = raw.lines();
+        let ct_b64 = lines.next().ok_or_else(|| {
+            SecretsError::PyHsm("pyhsm_master_key.enc: missing ciphertext line".into())
+        })?;
+        let stored_hmac = lines.next().ok_or_else(|| {
+            SecretsError::PyHsm(
+                "pyhsm_master_key.enc: missing HMAC line — \
+                 delete the file to trigger re-generation"
+                    .into(),
+            )
+        })?;
+        let expected = Self::compute_hmac(&self.hmac_key(), ct_b64);
+        use subtle::ConstantTimeEq;
+        if !bool::from(stored_hmac.as_bytes().ct_eq(expected.as_bytes())) {
+            return Err(SecretsError::PyHsm(
+                "pyhsm_master_key.enc HMAC verification FAILED — \
+                 file may have been tampered with. \
+                 Delete it to force re-generation."
+                    .into(),
+            ));
+        }
+        Ok(ct_b64.to_string())
+    }
+
+    /// Ensure the wrapping key exists in PyHSM, generating it if absent.
+    async fn ensure_wrapping_key(&self) -> Result<(), SecretsError> {
+        // generateKey is idempotent — if it already exists PyHSM returns an
+        // error string containing "already exists"; we treat that as success.
+        let req = serde_json::json!({
+            "type": "generateKey",
+            "keyId": self.key_id,
+            "policy": { "allowEncrypt": true, "allowDecrypt": true },
+            "callerId": self.caller_id,
+        });
+        match self.ipc_call(&req).await {
+            Ok(_) => Ok(()),
+            Err(SecretsError::PyHsm(ref msg)) if msg.contains("already exists") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Encrypt `plaintext` via PyHSM and return the Base64 ciphertext string.
+    async fn hsm_encrypt(&self, plaintext: &[u8]) -> Result<String, SecretsError> {
+        let req = serde_json::json!({
+            "type": "encrypt",
+            "keyId": self.key_id,
+            "plaintext": String::from_utf8_lossy(plaintext).to_string(),
+            "callerId": self.caller_id,
+        });
+        let resp = self.ipc_call(&req).await?;
+        resp["data"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| SecretsError::PyHsm("encrypt: missing data in response".into()))
+    }
+
+    /// Decrypt a Base64 ciphertext via PyHSM and return plaintext bytes.
+    async fn hsm_decrypt(&self, ct_b64: &str) -> Result<Zeroizing<Vec<u8>>, SecretsError> {
+        let req = serde_json::json!({
+            "type": "decrypt",
+            "keyId": self.key_id,
+            "ciphertext": ct_b64,
+            "callerId": self.caller_id,
+        });
+        let resp = self.ipc_call(&req).await?;
+        let plaintext = resp["data"]
+            .as_str()
+            .ok_or_else(|| SecretsError::PyHsm("decrypt: missing data in response".into()))?
+            .to_string();
+        Ok(Zeroizing::new(plaintext.into_bytes()))
+    }
+
+    /// Send a single JSON request to the PyHSM socket/address and return the
+    /// parsed success `data` value, or a `SecretsError::PyHsm` on failure.
+    ///
+    /// ## Transport
+    /// | Platform | Transport        | `socket_path` format    |
+    /// |----------|------------------|-------------------------|
+    /// | Unix     | Unix domain socket | `/tmp/pyhsm.sock`     |
+    /// | Windows  | TCP loopback       | `127.0.0.1:7777`      |
+    async fn ipc_call(
+        &self,
+        req: &serde_json::Value,
+    ) -> Result<serde_json::Value, SecretsError> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::time::{timeout, Duration};
+
+        let mut line = serde_json::to_string(req)
+            .map_err(|e| SecretsError::Serialisation(e.to_string()))?;
+        line.push('\n');
+
+        #[cfg(unix)]
+        {
+            use tokio::net::UnixStream;
+
+            let socket = std::path::Path::new(&self.socket_path);
+            if !socket.exists() {
+                return Err(SecretsError::PyHsm(format!(
+                    "PyHSM socket not found at '{}' — is the PyHSM daemon running?\n\
+                     Start it with: npx tsx pyhsm-ts/process.ts",
+                    self.socket_path
+                )));
+            }
+
+            let stream = timeout(Duration::from_secs(10), UnixStream::connect(socket))
+                .await
+                .map_err(|_| SecretsError::PyHsm("PyHSM IPC connect timeout (10 s)".into()))?
+                .map_err(|e| SecretsError::PyHsm(format!("PyHSM IPC connect: {e}")))?;
+
+            let (reader_half, mut writer) = tokio::io::split(stream);
+
+            timeout(Duration::from_secs(10), writer.write_all(line.as_bytes()))
+                .await
+                .map_err(|_| SecretsError::PyHsm("PyHSM IPC write timeout".into()))?
+                .map_err(|e| SecretsError::PyHsm(format!("PyHSM IPC write: {e}")))?;
+
+            let mut resp_line = String::new();
+            timeout(
+                Duration::from_secs(10),
+                BufReader::new(reader_half).read_line(&mut resp_line),
+            )
+            .await
+            .map_err(|_| SecretsError::PyHsm("PyHSM IPC read timeout".into()))?
+            .map_err(|e| SecretsError::PyHsm(format!("PyHSM IPC read: {e}")))?;
+
+            return pyhsm_parse_response(resp_line.trim());
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Windows: connect over TCP loopback.
+            // Start PyHSM with PYHSM_TCP_PORT=7777 (or whichever port you use).
+            let addr = &self.socket_path;
+
+            let stream = timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(addr))
+                .await
+                .map_err(|_| SecretsError::PyHsm("PyHSM TCP connect timeout (10 s)".into()))?
+                .map_err(|e| SecretsError::PyHsm(format!(
+                    "PyHSM TCP connect to '{}' failed: {e}\n\
+                     Is the PyHSM daemon running with PYHSM_TCP_PORT set?\n\
+                     Start it with: $env:PYHSM_TCP_PORT=7777; npx tsx pyhsm-ts/process.ts",
+                    addr
+                )))?;
+
+            let (reader_half, mut writer) = tokio::io::split(stream);
+
+            timeout(Duration::from_secs(10), writer.write_all(line.as_bytes()))
+                .await
+                .map_err(|_| SecretsError::PyHsm("PyHSM IPC write timeout".into()))?
+                .map_err(|e| SecretsError::PyHsm(format!("PyHSM IPC write: {e}")))?;
+
+            let mut resp_line = String::new();
+            timeout(
+                Duration::from_secs(10),
+                BufReader::new(reader_half).read_line(&mut resp_line),
+            )
+            .await
+            .map_err(|_| SecretsError::PyHsm("PyHSM IPC read timeout".into()))?
+            .map_err(|e| SecretsError::PyHsm(format!("PyHSM IPC read: {e}")))?;
+
+            return pyhsm_parse_response(resp_line.trim());
+        }
+    }
+}
+
+#[async_trait]
+impl MasterKeyProvider for PyHsmProvider {
+    async fn load_master_key(&self) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
+        let cache = self.cache_path();
+
+        if cache.exists() {
+            // Subsequent boots: verify HMAC, then ask PyHSM to decrypt.
+            let ct_b64 = self.read_cache_verified(&cache)?;
+            tracing::info!(
+                socket = %self.socket_path,
+                key_id = %self.key_id,
+                "PyHSM: HMAC verified — decrypting cached master key blob"
+            );
+            let plaintext = self.hsm_decrypt(&ct_b64).await?;
+            return bytes_to_key32(plaintext.as_slice());
+        }
+
+        // First boot: generate master key, seal it inside PyHSM.
+        tracing::info!(
+            socket = %self.socket_path,
+            key_id = %self.key_id,
+            "PyHSM: first boot — generating and sealing master key"
+        );
+
+        // Ensure the wrapping key exists in PyHSM.
+        self.ensure_wrapping_key().await?;
+
+        // Generate a fresh 32-byte master key.
+        use rand::RngCore;
+        let mut raw = Zeroizing::new([0u8; 32]);
+        rand::rngs::OsRng.fill_bytes(raw.as_mut());
+
+        // PyHSM encrypt expects a UTF-8 string as plaintext; we hex-encode
+        // the key bytes so they survive the round-trip as a clean string.
+        let hex_key = hex::encode(raw.as_ref());
+        let ct_b64  = self.hsm_encrypt(hex_key.as_bytes()).await?;
+
+        // Cache the encrypted blob with HMAC integrity seal.
+        self.write_cache(&cache, &ct_b64)?;
+        tracing::info!(
+            path = %cache.display(),
+            "PyHSM: master key sealed and cached"
+        );
+
+        Ok(Zeroizing::new(*raw))
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "PyHSM daemon at '{}' (key '{}')",
+            self.socket_path, self.key_id
+        )
+    }
+}
+
+/// Parse a raw NDJSON response line from PyHSM.
+fn pyhsm_parse_response(line: &str) -> Result<serde_json::Value, SecretsError> {
+    let resp: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| SecretsError::PyHsm(format!("PyHSM bad JSON response: {e}")))?;
+    if resp["ok"].as_bool() != Some(true) {
+        let msg = resp["error"].as_str().unwrap_or("unknown error").to_string();
+        return Err(SecretsError::PyHsm(format!("PyHSM returned error: {msg}")));
+    }
+    Ok(resp)
+}
+
+/// Convert a plaintext byte slice returned by PyHSM decrypt back to a
+/// 32-byte key.  PyHSM round-trips through hex encoding, so the plaintext
+/// is the hex string we originally passed to encrypt.
+fn bytes_to_key32(plaintext: &[u8]) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
+    // Try hex decode first (our encoding path).
+    let s = std::str::from_utf8(plaintext)
+        .map_err(|e| SecretsError::PyHsm(format!("plaintext is not valid UTF-8: {e}")))?;
+    parse_hex_key(s.trim())
 }

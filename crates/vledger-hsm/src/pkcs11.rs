@@ -196,7 +196,7 @@ impl Default for AwsCloudHsmConfig {
         Self {
             bridge_socket: format!(
                 "{}/.vledger-hsm-aws/bridge.sock",
-                std::env::var("HOME").unwrap_or_else(|_| "/root".into())
+                home_dir()
             ),
             cluster_id: String::new(),
             crypto_user: "vgdb-cu".into(),
@@ -278,7 +278,7 @@ impl Default for AzureHsmConfig {
         Self {
             bridge_socket: format!(
                 "{}/.vledger-hsm-azure/bridge.sock",
-                std::env::var("HOME").unwrap_or_else(|_| "/root".into())
+                home_dir()
             ),
             resource_group: String::new(),
             device_host: String::new(),
@@ -329,6 +329,34 @@ impl Pkcs11Provider for AzureHsmProvider {
     async fn health(&self) -> Result<(), HsmError> {
         self.inner.health().await
     }
+}
+
+// ── Cross-platform home directory ─────────────────────────────────────────────
+
+/// Returns the current user's home directory as a `String`.
+///
+/// Checks (in order):
+/// - `HOME` (Unix)
+/// - `USERPROFILE` (Windows)
+/// - `HOMEDRIVE` + `HOMEPATH` (Windows legacy)
+/// - Falls back to `/root` on Unix or `C:\Users\Default` on Windows.
+fn home_dir() -> String {
+    if let Ok(h) = std::env::var("HOME") {
+        return h;
+    }
+    if let Ok(h) = std::env::var("USERPROFILE") {
+        return h;
+    }
+    if let (Ok(drive), Ok(path)) = (
+        std::env::var("HOMEDRIVE"),
+        std::env::var("HOMEPATH"),
+    ) {
+        return format!("{drive}{path}");
+    }
+    #[cfg(windows)]
+    { r"C:\Users\Default".into() }
+    #[cfg(not(windows))]
+    { "/root".into() }
 }
 
 // ── HsmProviderConfig — selects backend at startup ────────────────────────────
