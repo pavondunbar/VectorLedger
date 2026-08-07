@@ -425,53 +425,189 @@ Expected output:
 
 ## Quick Start
 
-### 1. Set the master encryption key
+VectorLedger uses [PyHSM](https://github.com/pavondunbar/PyHSM) — a VectorGuard Labs product — as its default key management backend. PyHSM acts as a local software HSM: VectorLedger's master encryption key is sealed inside PyHSM's encrypted keystore and never touches disk in plaintext.
 
-VectorLedger requires a 256-bit master key for encrypting data at rest. For development, set it as an environment variable:
+The steps below walk through the full setup from scratch. If you are not using PyHSM and prefer a different key backend, skip to [Key Source Backends](#key-source-backends).
+
+### 1. Install and start PyHSM
+
+PyHSM ships as both a Python package and a TypeScript daemon. **VectorLedger connects to the TypeScript daemon** via a Unix domain socket — the Python package is a separate key management CLI and is not required for VectorLedger integration.
+
+**Install Node.js (18+) if you don't have it:**
 
 ```bash
-export VectorLedger_MASTER_KEY="$(openssl rand -hex 32)"
+# macOS with Homebrew
+brew install node
+
+# Or download from https://nodejs.org
 ```
 
-For production, see [Key Source Backends](#key-source-backends) below.
+**Clone PyHSM and install its dependencies:**
+
+```bash
+git clone https://github.com/pavondunbar/PyHSM.git ~/PyHSM
+cd ~/PyHSM/pyhsm-ts
+npm install
+```
+
+**Generate a PyHSM master password and store it in your secrets manager.**
+
+This password protects PyHSM's own internal keystore. It must be supplied every time the daemon starts. Treat it with the same care as a database root password — if it is lost, the keystore cannot be unlocked.
+
+```bash
+# Generate a strong password — save this somewhere safe before running vledger
+openssl rand -base64 32
+```
+
+**Start the PyHSM daemon:**
+
+```bash
+cd ~/PyHSM
+PYHSM_MASTER_PASSWORD="<your-password>" \
+PYHSM_KEYSTORE_PATH="$HOME/PyHSM/pyhsm-keystore.enc" \
+PYHSM_AUDIT_LOG_PATH="$HOME/PyHSM/pyhsm-audit.jsonl" \
+npx tsx pyhsm-ts/process.ts
+```
+
+Expected output:
+
+```
+[PyHSM] Process started (PID 12345)
+[PyHSM] Listening on /tmp/pyhsm.sock
+```
+
+**Confirm the socket is ready** (new terminal):
+
+```bash
+ls -la /tmp/pyhsm.sock
+# srw-------  1 you  wheel  0 Aug 7 15:28 /tmp/pyhsm.sock
+```
+
+The socket must exist and have mode `srw-------` (0600) before proceeding. If it is not present, the daemon did not start successfully — check the terminal running PyHSM for errors.
+
+> **Important:** PyHSM must always start **before** VectorLedger. If the daemon is not running when `vledger start` is called, startup will fail with a clear error. Never start VectorLedger without PyHSM running.
 
 ### 2. Initialise the database
 
+With PyHSM running, initialise VectorLedger from your VectorLedger directory:
+
 ```bash
-vledger init --data-dir ./vledger-data
+cd /path/to/VectorLedger
+vledger init --data-dir ./vledger-data --key-source pyhsm
 ```
 
-This creates the directory structure, generates an Ed25519 signing keypair, and writes `key_source.json`. On first run you will see:
+Correct output looks like this:
 
 ```
+Key source : pyhsm
+PyHSM: socket=/tmp/pyhsm.sock  wrapping-key=vledger.master-key
 ✓ VectorLedger initialised at: ./vledger-data
-  Signing key (first 16 hex): 3f8a1c...
-  Key source stored in: keys/key_source.json
+  Signing key (first 16 hex): 7d596f8e1ecfaebd
+    wal
+    pages
+    indexes
+    catalog
+    snapshots
+    keys
+    audit
+
+  Master key source stored in: keys/key_source.json
 ```
 
-### 3. Start the server
+**Verify the backend was recorded correctly:**
 
 ```bash
-vledger start --data-dir ./vledger-data --bind 127.0.0.1:5433
+cat vledger-data/keys/key_source.json
 ```
 
-The first start generates an initial admin password and prints it once:
+Must contain `"backend": "py_hsm"`:
+
+```json
+{
+  "backend": "py_hsm",
+  "socket_path": "/tmp/pyhsm.sock",
+  "caller_id": "vledger",
+  "key_id": "vledger.master-key"
+}
+```
+
+If it shows `"backend": "env"`, the PyHSM socket was not found during init and VectorLedger fell back silently. Delete the data directory, confirm the socket exists, and re-run init.
+
+> **Never run `vledger init` without `--key-source pyhsm` in production.** The default without this flag uses an environment variable backend which stores key material in your shell environment.
+
+### 3. Lock down the data directory
+
+```bash
+chmod 700 vledger-data/
+chmod 700 vledger-data/keys/
+chmod 700 vledger-data/catalog/
+chmod 700 vledger-data/audit/
+chmod 700 vledger-data/wal/
+chmod 700 vledger-data/pages/
+```
+
+### 4. Start the server
+
+```bash
+vledger start --data-dir ./vledger-data
+```
+
+The first start generates an initial admin password and writes it to a restricted file — it is **not** printed to the terminal (to prevent it appearing in log aggregators):
 
 ```
 ╔══════════════════════════════════════════════════════╗
-║  VectorLedger — Initial Admin Credentials          ║
-║  Username : admin                                    ║
-║  Password : Xk9mP2qRvLnJwBcY7dZs4fHt              ║
-║  CHANGE THIS IMMEDIATELY with `vledger user set-password` ║
+║  VectorLedger — Initial Admin Credentials            ║
+║                                                      ║
+║  Credentials written to (mode 0o600):                ║
+║  ./vledger-data/catalog/.admin_initial_credentials   ║
+║                                                      ║
+║  Read the file, change the password, then delete it. ║
 ╚══════════════════════════════════════════════════════╝
 ── VectorLedger ────────────────────────────────
   Listening  : 127.0.0.1:5433  (TLS 1.3)
   Data dir   : ./vledger-data
   Protocol   : newline-delimited JSON
+  WAL sync   : group_commit  (flush every 2 ms)
 ──────────────────────────────────────────────────
 ```
 
-### 4. Run your first queries
+### 5. Change the admin password
+
+In a new terminal, read the credential file, change the password, and delete the file:
+
+```bash
+# Read the generated password
+cat vledger-data/catalog/.admin_initial_credentials
+
+# Change it immediately
+vledger user set-password --username admin --data-dir ./vledger-data
+
+# Delete the credential file — it must not persist
+rm vledger-data/catalog/.admin_initial_credentials
+
+# Confirm it is gone
+ls vledger-data/catalog/
+```
+
+The `.admin_initial_credentials` file must not exist after this step.
+
+### 6. Verify integrity
+
+```bash
+vledger verify --data-dir ./vledger-data
+```
+
+Expected output:
+
+```
+── VectorLedger Integrity Verification ─────────
+  WAL integrity            ... ✓ (0 committed txns)
+  Ledger hash chain        ... ✓ (0 entries, tip=0000000000000000)
+
+✓ Verification complete
+```
+
+### 7. Run your first queries
 
 With the server running in one terminal, open a second terminal and use the built-in SQL REPL. When the server is running, the CLI automatically connects to it over TLS — you do not need to stop the server first:
 
@@ -545,7 +681,7 @@ SELECT VERIFY_CHAIN();
 SELECT * FROM ledger;
 ```
 
-### 5. Also start the PostgreSQL wire-protocol listener
+### 8. Also start the PostgreSQL wire-protocol listener
 
 ```bash
 vledger start --data-dir ./vledger-data --pgwire
@@ -563,34 +699,18 @@ Or with pgAdmin, DBeaver, or Metabase using standard PostgreSQL connection setti
 
 ## Reset / Starting Over
 
-If you lose the admin password, or need to wipe the database and start fresh, delete the data directory and re-initialise:
+If you lose the admin password, or need to wipe the database and start fresh, delete the data directory and re-initialise. **Make sure PyHSM is running before you init.**
 
 ```bash
 # Stop the server first (Ctrl-C in the terminal where it is running)
 
 rm -rf ./vledger-data
 
-export VectorLedger_MASTER_KEY="$(openssl rand -hex 32)"
-vledger init --data-dir ./vledger-data
-vledger start --data-dir ./vledger-data --bind 127.0.0.1:5433
+vledger init --data-dir ./vledger-data --key-source pyhsm
+vledger start --data-dir ./vledger-data
 ```
 
-The first `start` after a fresh `init` prints a new admin password. Copy it before doing anything else.
-
-A few things to keep in mind:
-
-- Deleting `vledger-data` is **permanent and irreversible**. All ledger entries, accounts, audit logs, and user accounts are gone. Only do this on a database that either has no data worth keeping, or has already been backed up with `vledger backup`.
-- The `VectorLedger_MASTER_KEY` you generate is a new key, unrelated to the old one. If you had encrypted data in the old directory, it cannot be decrypted with the new key.
-- For production, store the master key in Vault or AWS KMS (see [Key Source Backends](#key-source-backends)) so it survives shell session restarts without being re-generated.
-
-If you just want to reset the admin password without wiping data, use `vledger user set-password` while the server is not running (direct mode reads the catalog directly):
-
-```bash
-# Stop the server first, then:
-vledger user set-password --username admin --data-dir ./vledger-data
-# New password: <type new password>
-# Confirm password: <type again>
-```
+The first `start` after a fresh `init` writes a new admin credential file. Read it, change the password, and delete the file before doing anything else (see [Step 5](#5-change-the-admin-password) above).
 
 ---
 
@@ -848,53 +968,95 @@ Generates a random key and writes it to `vledger-data/keys/master_key.hex` with 
 
 ---
 
-### PyHSM Unix-socket daemon
+### PyHSM (recommended — VectorGuard Labs)
+
+PyHSM is a VectorGuard Labs product and the default key backend for VectorLedger. The master encryption key is sealed inside PyHSM's AES-256-GCM-SIV encrypted keystore and never touches disk in plaintext.
+
+#### Two ways to install PyHSM
+
+**Option A — TypeScript daemon (required for VectorLedger integration)**
+
+This is what VectorLedger connects to. The daemon listens on a Unix domain socket and handles all key operations via IPC.
 
 ```bash
-# 1. Start the PyHSM daemon (from the PyHSM project directory)
-export PYHSM_MASTER_PASSWORD="your-master-password"
-export PYHSM_KEYSTORE_PATH="/secure/pyhsm-keystore.enc"
-export PYHSM_SOCKET_PATH="/run/pyhsm/pyhsm.sock"   # optional; default: /tmp/pyhsm.sock
-npx tsx pyhsm-ts/process.ts &
-
-# 2. Initialise VectorLedger with PyHSM as the key source
-vledger init \
-  --key-source pyhsm \
-  --pyhsm-socket /run/pyhsm/pyhsm.sock \
-  --pyhsm-caller-id vledger
+git clone https://github.com/pavondunbar/PyHSM.git ~/PyHSM
+cd ~/PyHSM/pyhsm-ts
+npm install
 ```
 
-PyHSM acts as a local software HSM. VectorLedger generates a 32-byte master key, hands it to PyHSM for encryption under a dedicated wrapping key (`vledger.master-key`), and stores only the encrypted blob in `vledger-data/keys/pyhsm_master_key.enc`. The raw key material never touches disk unencrypted.
+Start the daemon:
 
-**How it works across restarts:**
+```bash
+PYHSM_MASTER_PASSWORD="<your-password>" \
+PYHSM_KEYSTORE_PATH="$HOME/PyHSM/pyhsm-keystore.enc" \
+PYHSM_AUDIT_LOG_PATH="$HOME/PyHSM/pyhsm-audit.jsonl" \
+npx tsx ~/PyHSM/pyhsm-ts/process.ts
+```
+
+**Option B — Python CLI (`pip install vectorguard-pyhsm`)**
+
+The Python package installs the `vectorguard-pyhsm` command — a key management CLI for generating, rotating, and inspecting keys in a PyHSM keystore. It is a standalone tool, not a daemon. VectorLedger does **not** connect to it.
+
+```bash
+pip install vectorguard-pyhsm
+```
+
+You can use it to inspect or manage the same keystore that the TypeScript daemon uses:
+
+```bash
+# List keys in the keystore
+vectorguard-pyhsm --store ~/PyHSM/pyhsm-keystore.enc list
+
+# Rotate the VectorLedger wrapping key
+vectorguard-pyhsm --store ~/PyHSM/pyhsm-keystore.enc rotate vledger.master-key
+
+# Verify audit log integrity
+vectorguard-pyhsm --store ~/PyHSM/pyhsm-keystore.enc audit --verify
+```
+
+To use the pip CLI, the TypeScript daemon does **not** need to be running — it opens the keystore file directly using `PYHSM_MASTER_PASSWORD`.
+
+> **Summary:** install **both** if you want the full toolkit. The TypeScript daemon is what VectorLedger needs to run. The Python CLI is what you use to administer the keystore.
+
+#### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `PYHSM_MASTER_PASSWORD` | — | **Required.** Password that unlocks the PyHSM keystore. |
+| `PYHSM_KEYSTORE_PATH` | `./pyhsm-keystore.enc` | Path where the encrypted keystore is stored. Set this to a persistent, backed-up location. |
+| `PYHSM_AUDIT_LOG_PATH` | `<keystore>.audit.jsonl` | Path for PyHSM's own tamper-evident audit log. |
+| `PYHSM_SOCKET_PATH` | `/tmp/pyhsm.sock` | Unix socket path the daemon listens on. |
+| `PYHSM_CALLER_SECRET` | — | Optional shared secret for IPC caller authentication. |
+| `PYHSM_RATE_LIMIT` | `100` | Max operations per rate window. |
+| `PYHSM_RATE_WINDOW_MS` | `60000` | Rate window in milliseconds. |
+
+#### How VectorLedger uses PyHSM across restarts
 
 | Event | What happens |
 |---|---|
-| First `vledger init` | Master key generated in-process, encrypted by PyHSM, blob cached with BLAKE3-keyed HMAC |
-| Every `vledger start` | HMAC verified locally, blob sent to PyHSM for decryption, plaintext key used briefly then zeroized |
-| PyHSM daemon not running | `vledger start` fails immediately with a clear error before touching any data |
-| Cache file tampered | HMAC check fails, startup aborts before any KMS/IPC call |
+| First `vledger init --key-source pyhsm` | VectorLedger generates a 32-byte master key in-process, asks PyHSM to encrypt it, stores only the encrypted blob at `vledger-data/keys/pyhsm_master_key.enc` with an HMAC-SHA256 integrity seal |
+| Every `vledger start` | HMAC verified locally first, blob sent to PyHSM for decryption, plaintext key used briefly for key derivation then immediately zeroized from memory |
+| PyHSM daemon not running at startup | `vledger start` fails immediately with a clear error — no data is touched |
+| Cache file tampered | HMAC check fails, startup aborts before any IPC call |
 
-The `PYHSM_SOCKET_PATH` environment variable is also respected if `--pyhsm-socket` is not provided.
+#### Windows
 
-**Windows:** PyHSM has no Unix socket support on Windows. Use TCP mode instead:
+PyHSM uses TCP instead of a Unix socket on Windows. Start the daemon with `PYHSM_TCP_PORT` and pass the TCP address to VectorLedger:
 
 ```powershell
-# Start PyHSM with TCP transport
+$env:PYHSM_MASTER_PASSWORD = "your-password"
 $env:PYHSM_TCP_PORT = 7777
-npx tsx pyhsm-ts/process.ts
+npx tsx ~/PyHSM/pyhsm-ts/process.ts
 
-# Initialise VectorLedger pointing at the TCP address
+# Then init:
 vledger init --key-source pyhsm --pyhsm-socket 127.0.0.1:7777
 ```
 
-**Caller authentication:** if the PyHSM daemon was started with `PYHSM_CALLER_SECRET`, set the same secret in VectorLedger's environment and pass the pre-computed `service:hmac-hex` string as `--pyhsm-caller-id`. Without a shared secret, any caller ID string is accepted by PyHSM.
-
-**Key Source Backends summary:**
+#### Key Source Backends summary
 
 | Backend | `--key-source` | Key never on disk | External dependency |
 |---|---|---|---|
-| PyHSM | `pyhsm` | ✓ | PyHSM daemon running |
+| **PyHSM** (recommended) | `pyhsm` | ✓ | PyHSM daemon running |
 | Environment variable | `env` | ✗ (in env) | None |
 | Disk file | `file` | ✗ | None |
 | HashiCorp Vault | `vault` | ✓ | Vault server + token |
@@ -974,17 +1136,20 @@ The server startup banner shows days remaining when a signed license is active. 
 
 Before putting VectorLedger in front of production traffic:
 
-- [ ] Replace the self-signed TLS certificate with a CA-signed one and set `tls_cert_path` / `tls_key_path`
-- [ ] Switch master key source from `env`/`file` to `vault` or `aws_kms`
-- [ ] Delete `keys/MASTER_KEY_PLACEHOLDER.txt` (its presence will fail the PCI-DSS compliance check)
-- [ ] Set up HSM key management and run `vledger init --hsm-backend soft|aws|azure`
-- [ ] Configure replication with a secondary node (`replication.json`)
+- [ ] PyHSM daemon running with a persistent, backed-up keystore (`PYHSM_KEYSTORE_PATH` points to a durable location)
+- [ ] `vledger init` completed with `--key-source pyhsm` and `key_source.json` shows `"backend": "py_hsm"`
+- [ ] `keys/MASTER_KEY_PLACEHOLDER.txt` deleted (its presence fails the PCI-DSS compliance check)
+- [ ] Admin credential file read, password changed, and `catalog/.admin_initial_credentials` deleted
+- [ ] Data directory permissions locked (`chmod 700` on `vledger-data/` and all subdirectories)
+- [ ] Volume encryption enabled on the disk hosting `vledger-data/`
+- [ ] Replace the self-signed TLS certificate with a CA-signed one — place it at `keys/server.crt` and `keys/server.key`, then start with `--tls-cert-path` and `--tls-key-path`
+- [ ] Configure replication with a secondary node (`replication.json`) or document a backup-based HA strategy
 - [ ] Install a valid `license.json` in the data directory (`vledger license` to confirm tier and expiry)
-- [ ] Schedule regular `vledger backup` runs
+- [ ] Test a full backup and restore drill: `vledger backup` → `vledger restore` → `vledger verify`
+- [ ] Schedule regular `vledger backup` runs (cron or your orchestrator)
 - [ ] Schedule regular `vledger verify` runs (recommended: after each backup)
-- [ ] Set `VLEDGER_CLI_USER` and `VLEDGER_CLI_PASSWORD` in your CI environment rather than using the initial admin password
-- [ ] Change the initial admin password: `vledger sql --query "ALTER USER admin SET PASSWORD 'newpassword'"`
-- [ ] Review the compliance report: `vledger compliance-report --standard pci-dss`
+- [ ] Ship `audit/audit.log` to an append-only off-host destination in real time
+- [ ] Run compliance reports and confirm zero FAIL items: `vledger compliance-report --standard pci-dss`
 
 ---
 

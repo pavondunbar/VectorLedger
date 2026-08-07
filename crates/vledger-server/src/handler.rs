@@ -47,6 +47,16 @@ use crate::auth::{check_plan_privilege, Session, UserStore};
 use crate::config::ServerConfig;
 use crate::protocol::{AdminCommand, Request, Response};
 
+/// Maximum number of failed authentication attempts allowed on a single
+/// connection before the connection is forcibly closed.
+///
+/// Fix #3: an attacker that establishes one TLS connection and sends a
+/// continuous stream of `{"auth":{…}}` frames is slowed only by Argon2 and
+/// the per-username exponential back-off.  Closing the connection after this
+/// many consecutive auth failures forces TCP reconnect overhead and allows
+/// the per-IP rate limiter to throttle the attacker at the network layer.
+const MAX_AUTH_ATTEMPTS_PER_CONN: u32 = 5;
+
 /// Maximum number of bytes accepted in a single newline-delimited JSON frame.
 ///
 /// Fix #8: prevents OOM from a client sending an arbitrarily large request.
@@ -62,8 +72,6 @@ const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// (Fix #6).  Long-running sessions that go silent for longer than this are
 /// reaped so they don't hold resources indefinitely.
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// Handle a single TLS connection until the client disconnects or `shutdown` fires.
 pub async fn handle_connection(
     stream:     TlsStream<TcpStream>,
     ledger:     Arc<RwLock<LedgerStore>>,
@@ -100,6 +108,11 @@ pub async fn handle_connection(
     let (reader_half, mut writer_half) = tokio::io::split(stream);
     let mut reader  = BufReader::new(reader_half);
     let mut session: Option<Session> = None;
+    // Fix #3: track consecutive auth failures on this connection so we can
+    // close it after MAX_AUTH_ATTEMPTS_PER_CONN without waiting for the
+    // per-username lockout to kick in.  Once the connection is authenticated
+    // the counter is no longer used.
+    let mut conn_auth_failures: u32 = 0;
 
     loop {
         // Fix #6: use a tighter deadline for the unauthenticated auth frame
@@ -201,7 +214,27 @@ pub async fn handle_connection(
 
             match result {
                 Err(e) => {
-                    warn!(peer = %peer_addr, "Auth failed: {e}");
+                    conn_auth_failures += 1;
+                    warn!(
+                        peer  = %peer_addr,
+                        attempt = conn_auth_failures,
+                        max     = MAX_AUTH_ATTEMPTS_PER_CONN,
+                        "Auth failed: {e}"
+                    );
+                    // Fix #3: close the connection after too many failures so
+                    // the attacker must pay TCP + TLS reconnect overhead for
+                    // every batch of MAX_AUTH_ATTEMPTS_PER_CONN guesses.
+                    if conn_auth_failures >= MAX_AUTH_ATTEMPTS_PER_CONN {
+                        warn!(
+                            peer = %peer_addr,
+                            "Connection closed: exceeded {} auth attempts on one connection",
+                            MAX_AUTH_ATTEMPTS_PER_CONN
+                        );
+                        send(&mut writer_half, Response::err(
+                            format!("too many authentication failures — reconnect to try again")
+                        )).await;
+                        break;
+                    }
                     send(&mut writer_half, Response::err(e)).await;
                     // Close connection on auth failure — don't allow retries
                     // on the same connection (forces TCP reconnect, imposes

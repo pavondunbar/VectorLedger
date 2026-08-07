@@ -70,15 +70,18 @@ pub fn self_signed_acceptor(
             return acceptor_from_files(&cert_path, &key_path, mtls_ca_cert);
         }
 
-        // Generate and persist.
-        let (certs, key) = generate_self_signed(hostname)?;
-        persist_cert_key(dir, hostname, &certs, &key)?;
+        // Generate once — persist the *same* CertifiedKey to disk so the
+        // acceptor and the on-disk files are always in sync (Fix #4).
+        let ck = generate_self_signed(hostname)?;
+        persist_cert_key(dir, &ck)?;
+        let (certs, key) = certified_to_der(&ck);
         return build_acceptor(certs, key, mtls_ca_cert);
     }
 
     // No catalog_dir — ephemeral cert (self-tests / pgwire with no data dir).
     info!(hostname, "Generating ephemeral self-signed TLS certificate (not persisted)");
-    let (certs, key) = generate_self_signed(hostname)?;
+    let ck = generate_self_signed(hostname)?;
+    let (certs, key) = certified_to_der(&ck);
     build_acceptor(certs, key, mtls_ca_cert)
 }
 
@@ -86,34 +89,37 @@ pub fn self_signed_acceptor(
 
 fn generate_self_signed(
     hostname: &str,
-) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), ServerError> {
-    let CertifiedKey { cert, key_pair } =
-        generate_simple_self_signed(vec![hostname.to_string()])
-            .map_err(|e| ServerError::Tls(e.to_string()))?;
+) -> Result<CertifiedKey, ServerError> {
+    generate_simple_self_signed(vec![hostname.to_string()])
+        .map_err(|e| ServerError::Tls(e.to_string()))
+}
 
-    let cert_der = CertificateDer::from(cert.der().to_vec());
+/// Convert a `CertifiedKey` into the DER types rustls needs.
+fn certified_to_der(
+    ck: &CertifiedKey,
+) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+    let cert_der = CertificateDer::from(ck.cert.der().to_vec());
     let key_der  = PrivateKeyDer::Pkcs8(
-        PrivatePkcs8KeyDer::from(key_pair.serialize_der())
+        PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der())
     );
-    Ok((vec![cert_der], key_der))
+    (vec![cert_der], key_der)
 }
 
 /// Write cert and key as PEM files to `<dir>/tls_cert.pem` and
 /// `<dir>/tls_key.pem` with mode 0o600.
+///
+/// Fix #4: persist the `CertifiedKey` produced by `generate_self_signed`
+/// rather than calling `generate_simple_self_signed` a second time.  The
+/// previous code discarded the `certs`/`key` arguments and wrote a
+/// completely different keypair to disk, so the acceptor used cert A while
+/// the file contained cert B.  On restart the server would load cert B and
+/// any client that had pinned cert A would fail to connect.
 fn persist_cert_key(
-    dir:      &str,
-    hostname: &str,
-    certs:    &[CertificateDer<'static>],
-    key:      &PrivateKeyDer<'static>,
+    dir:        &str,
+    certified:  &CertifiedKey,
 ) -> Result<(), ServerError> {
-    // Re-generate from rcgen to get the PEM serialisation.
-    // (rustls CertificateDer / PrivateKeyDer don't expose PEM directly.)
-    let CertifiedKey { cert, key_pair } =
-        generate_simple_self_signed(vec![hostname.to_string()])
-            .map_err(|e| ServerError::Tls(e.to_string()))?;
-
-    let cert_pem = cert.pem();
-    let key_pem  = key_pair.serialize_pem();
+    let cert_pem = certified.cert.pem();
+    let key_pem  = certified.key_pair.serialize_pem();
 
     let cert_path = std::path::Path::new(dir).join("tls_cert.pem");
     let key_path  = std::path::Path::new(dir).join("tls_key.pem");
@@ -131,7 +137,6 @@ fn persist_cert_key(
         key  = %key_path.display(),
         "Persisted self-signed TLS certificate"
     );
-    let _ = (certs, key); // suppress unused warnings — we re-generate for PEM
     Ok(())
 }
 

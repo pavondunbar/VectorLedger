@@ -276,12 +276,46 @@ impl UserStore {
                 created_at:    chrono::Utc::now().to_rfc3339(),
                 domain_filter: None,
             };
-            println!("╔══════════════════════════════════════════════════════╗");
-            println!("║  VectorLedger — Initial Admin Credentials          ║");
-            println!("║  Username : admin                                    ║");
-            println!("║  Password : {initial_password:<40} ║");
-            println!("║  CHANGE THIS IMMEDIATELY with `vledger user set-password`║");
-            println!("╚══════════════════════════════════════════════════════╝");
+
+            // Fix #2: write the initial password to a 0o600 file instead of
+            // printing it to stdout.  On containerized deployments stdout is
+            // captured by log aggregators (CloudWatch, Datadog, etc.) and the
+            // password would persist in plain text indefinitely.
+            //
+            // The credential file is written to the catalog directory, printed
+            // to stderr (not stdout) with its path, and must be read and
+            // deleted by the operator.  A subsequent `vledger start` will not
+            // regenerate it — the file is a one-shot bootstrap artefact.
+            let cred_path = catalog_dir.join(".admin_initial_credentials");
+            let cred_content = format!(
+                "VectorLedger initial admin credentials\n\
+                 Generated: {}\n\
+                 Username:  admin\n\
+                 Password:  {}\n\n\
+                 CHANGE THIS PASSWORD IMMEDIATELY:\n\
+                   vledger user set-password --username admin\n\n\
+                 DELETE THIS FILE after reading it:\n\
+                   rm \"{}\"\n",
+                chrono::Utc::now().to_rfc3339(),
+                initial_password,
+                cred_path.display(),
+            );
+            std::fs::write(&cred_path, &cred_content)
+                .map_err(ServerError::Io)?;
+            // Restrict to owner-read/write only immediately after creation.
+            set_file_mode_600(&cred_path)?;
+
+            // Print the path (not the password) to stderr so operators know
+            // where to find it without exposing the secret in logs.
+            eprintln!("╔══════════════════════════════════════════════════════╗");
+            eprintln!("║  VectorLedger — Initial Admin Credentials            ║");
+            eprintln!("║                                                      ║");
+            eprintln!("║  Credentials written to (mode 0o600):                ║");
+            eprintln!("║  {}  ║", format!("{:<50}", cred_path.display()));
+            eprintln!("║                                                      ║");
+            eprintln!("║  Read the file, change the password, then delete it. ║");
+            eprintln!("╚══════════════════════════════════════════════════════╝");
+
             users.insert("admin".into(), admin);
             let json = serde_json::to_string_pretty(&users)
                 .map_err(|e| ServerError::Auth(e.to_string()))?;

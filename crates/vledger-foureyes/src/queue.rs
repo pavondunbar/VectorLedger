@@ -75,6 +75,14 @@ impl FourEyesQueue {
     /// `post_fn` is called with the raw entry bytes — the caller should
     /// deserialise and call `LedgerStore::post_entry`.  Returns the approved
     /// `ApprovalRecord`.
+    ///
+    /// ## Idempotency guard (Fix #8)
+    /// If the process crashes after `post_fn` succeeds but before the atomic
+    /// rename that removes the entry from `pending.jsonl`, a second `approve`
+    /// call on restart would attempt to post the same entry again.  We detect
+    /// this by checking `approved.jsonl` for the `approval_id` before calling
+    /// `post_fn`, and returning the already-approved record without re-posting
+    /// if it is found there.
     pub fn approve<F>(
         &self,
         approval_id: Uuid,
@@ -85,6 +93,15 @@ impl FourEyesQueue {
         F: FnOnce(&[u8]) -> Result<(), String>,
     {
         let approver_id = approver_id.into();
+
+        // ── Idempotency check ─────────────────────────────────────────────
+        // If a previous approve() call succeeded with post_fn but crashed
+        // before the pending-file rewrite completed, the record already lives
+        // in approved.jsonl.  Return it immediately without re-posting.
+        if let Some(already) = self.find_in_decided("approved", approval_id)? {
+            warn!(id = %approval_id, "approve() called on already-approved entry — returning existing record (idempotent)");
+            return Ok(already);
+        }
 
         let mut record = self.get_pending(approval_id)?;
 
@@ -153,12 +170,17 @@ impl FourEyesQueue {
     // ── Persistence helpers ───────────────────────────────────────────────
 
     /// Append a new pending record to `pending.jsonl`.
+    ///
+    /// Fix #8: permissions are set to 0o600 before any content is written so
+    /// there is no window where a newly-created file is world-readable.
     fn persist_pending(&self, record: &ApprovalRecord) -> Result<(), FourEyesError> {
         let path = self.dir.join("pending.jsonl");
+        // Create the file if absent so we can set permissions before writing.
+        if !path.exists() {
+            std::fs::File::create(&path)?;
+            set_mode_600(&path);
+        }
         let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
-        // Fix #5: harden permissions to 0o600 on every open so newly created
-        // files are immediately restricted and pre-existing files stay locked.
-        set_mode_600(&path);
         let line  = serde_json::to_string(record)
             .map_err(|e| FourEyesError::Serialisation(e.to_string()))?;
         writeln!(f, "{line}")?;
@@ -167,15 +189,19 @@ impl FourEyesQueue {
     }
 
     /// Append a decided record to `approved.jsonl` or `rejected.jsonl`.
+    ///
+    /// Fix #8: same pre-creation permission pattern as `persist_pending`.
     fn persist_decided(
         &self,
         record: &ApprovalRecord,
         kind:   &str,
     ) -> Result<(), FourEyesError> {
         let path = self.dir.join(format!("{kind}.jsonl"));
+        if !path.exists() {
+            std::fs::File::create(&path)?;
+            set_mode_600(&path);
+        }
         let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
-        // Fix #5: harden permissions to 0o600.
-        set_mode_600(&path);
         let line  = serde_json::to_string(record)
             .map_err(|e| FourEyesError::Serialisation(e.to_string()))?;
         writeln!(f, "{line}")?;
@@ -184,6 +210,10 @@ impl FourEyesQueue {
     }
 
     /// Rewrite `pending.jsonl` with the given record removed.
+    ///
+    /// Fix #8: permissions are set on the tmp file immediately after creation
+    /// (before any data is written) so the file is never readable by
+    /// group/other users even for the brief window before the atomic rename.
     fn remove_pending(&self, id: Uuid) -> Result<(), FourEyesError> {
         let path = self.dir.join("pending.jsonl");
         if !path.exists() { return Ok(()); }
@@ -203,15 +233,22 @@ impl FourEyesQueue {
 
         let tmp_path = self.dir.join("pending.jsonl.tmp");
         {
-            let mut tmp = File::create(&tmp_path)?;
+            // Create the tmp file first, set 0o600 before writing any content,
+            // then write — eliminates the window where the file exists with
+            // default umask permissions (Fix #8).
+            let tmp_file = File::create(&tmp_path)?;
+            set_mode_600(&tmp_path);
+            drop(tmp_file);
+
+            let mut tmp = OpenOptions::new().write(true).open(&tmp_path)?;
             for line in &kept {
                 writeln!(tmp, "{line}")?;
             }
             tmp.sync_all()?;
         }
-        // Fix #5: harden the temp file before the atomic rename so the
-        // replacement inherits 0o600 permissions.
-        set_mode_600(&tmp_path);
+        // Atomic rename — on Unix this is guaranteed to be crash-safe: either
+        // the old file survives or the new one replaces it, never a partial
+        // state.
         std::fs::rename(&tmp_path, &path)?;
         Ok(())
     }
@@ -242,7 +279,34 @@ impl FourEyesQueue {
         self.pending.lock().unwrap().get(&id).cloned()
             .ok_or(FourEyesError::NotFound(id))
     }
-}
+
+    /// Search `<kind>.jsonl` (e.g. "approved", "rejected") for a record with
+    /// the given `id`.  Returns `Ok(None)` if the file does not exist or the
+    /// record is not present.
+    ///
+    /// Used by the idempotency guard in `approve` (Fix #8).
+    fn find_in_decided(
+        &self,
+        kind: &str,
+        id:   Uuid,
+    ) -> Result<Option<ApprovalRecord>, FourEyesError> {
+        let path = self.dir.join(format!("{kind}.jsonl"));
+        if !path.exists() { return Ok(None); }
+
+        let file   = File::open(&path)?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() { continue; }
+            if let Ok(r) = serde_json::from_str::<ApprovalRecord>(&line) {
+                if r.id == id {
+                    return Ok(Some(r));
+                }
+            }
+        }
+        Ok(None)
+    }
+}  // impl FourEyesQueue
 
 
 // ── File permission helper (Fix #5) ──────────────────────────────────────────

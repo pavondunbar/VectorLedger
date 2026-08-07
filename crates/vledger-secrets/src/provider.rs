@@ -882,13 +882,31 @@ impl PyHsmProvider {
     }
 
     /// Encrypt `plaintext` via PyHSM and return the Base64 ciphertext string.
+    ///
+    /// Fix #5: the JSON request contains the hex-encoded key bytes in the
+    /// "plaintext" field.  We must never log the full request object —
+    /// tracing/debug output must reference only the key_id and operation type,
+    /// never the plaintext value.  The `ipc_call` helper is called with a
+    /// pre-built `Value`; we log only the sanitized version here.
     async fn hsm_encrypt(&self, plaintext: &[u8]) -> Result<String, SecretsError> {
+        // Build the request but keep the plaintext value out of any log output.
+        // hex::encode produces a borrowed String; we move it directly into the
+        // JSON Value without binding it to a named variable that could be
+        // accidentally logged.
         let req = serde_json::json!({
             "type": "encrypt",
             "keyId": self.key_id,
-            "plaintext": String::from_utf8_lossy(plaintext).to_string(),
+            "plaintext": hex::encode(plaintext),
             "callerId": self.caller_id,
         });
+        // Log only the sanitized (plaintext-free) shape so debug traces from
+        // this call site never contain key material.
+        tracing::debug!(
+            key_id   = %self.key_id,
+            caller   = %self.caller_id,
+            op       = "encrypt",
+            "PyHSM encrypt request (plaintext redacted from log)"
+        );
         let resp = self.ipc_call(&req).await?;
         resp["data"]
             .as_str()
@@ -920,6 +938,10 @@ impl PyHsmProvider {
     /// |----------|------------------|-------------------------|
     /// | Unix     | Unix domain socket | `/tmp/pyhsm.sock`     |
     /// | Windows  | TCP loopback       | `127.0.0.1:7777`      |
+    ///
+    /// Fix #5: this method never logs the `req` object because it may contain
+    /// a `"plaintext"` field with key material.  Callers are responsible for
+    /// emitting their own sanitized debug logs before calling `ipc_call`.
     async fn ipc_call(
         &self,
         req: &serde_json::Value,
@@ -1037,10 +1059,11 @@ impl MasterKeyProvider for PyHsmProvider {
         let mut raw = Zeroizing::new([0u8; 32]);
         rand::rngs::OsRng.fill_bytes(raw.as_mut());
 
-        // PyHSM encrypt expects a UTF-8 string as plaintext; we hex-encode
-        // the key bytes so they survive the round-trip as a clean string.
-        let hex_key = hex::encode(raw.as_ref());
-        let ct_b64  = self.hsm_encrypt(hex_key.as_bytes()).await?;
+        // Pass the raw key bytes to hsm_encrypt, which hex-encodes them
+        // before embedding in the JSON request (Fix #5: encoding happens
+        // inside hsm_encrypt so no intermediate hex binding is created that
+        // could be accidentally logged by the caller).
+        let ct_b64  = self.hsm_encrypt(raw.as_ref()).await?;
 
         // Cache the encrypted blob with HMAC integrity seal.
         self.write_cache(&cache, &ct_b64)?;

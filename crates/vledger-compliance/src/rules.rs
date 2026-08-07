@@ -168,16 +168,40 @@ fn check_encryption_at_rest(data_dir: &Path) -> Evidence {
 }
 
 fn check_tls_config_present(data_dir: &Path) -> Evidence {
-    // Check for user-supplied cert, or note self-signed is used.
-    let cert_path = data_dir.join("keys").join("server.crt");
-    let description = if cert_path.exists() {
-        "User-supplied TLS certificate found at keys/server.crt".to_string()
+    // Fix #6: a self-signed certificate does not satisfy PCI-DSS / SOC 2
+    // requirements for trusted transmission encryption.  Emit a warning when
+    // no CA-signed certificate is found so the compliance report surfaces the
+    // gap rather than silently passing.
+    //
+    // Accepted evidence paths (checked in order):
+    //   1. keys/server.crt  — user-supplied CA-signed DER/PEM certificate.
+    //   2. catalog/tls_cert.pem that was issued by a CA (we cannot verify the
+    //      issuer without parsing the cert, so we treat any file at
+    //      keys/server.crt as CA-signed and anything else as self-signed).
+    let ca_cert = data_dir.join("keys").join("server.crt");
+    if ca_cert.exists() {
+        Evidence::pass(
+            "CC6.7",
+            "Transmission encryption — TLS configuration",
+            "CA-signed TLS certificate found at keys/server.crt. \
+             TLS 1.3 is mandatory for all connections (vledger-server uses rustls).",
+        )
     } else {
-        "vgdb generates a self-signed TLS 1.3 certificate at startup via rcgen. \
-         Replace with a CA-signed certificate before production deployment.".to_string()
-    };
-    Evidence::pass("CC6.7", "Transmission encryption — TLS configuration",
-        &description)
+        // Self-signed cert in use (catalog/tls_cert.pem) or no cert at all.
+        Evidence::warn(
+            "CC6.7",
+            "Transmission encryption — TLS configuration",
+            "No CA-signed TLS certificate found",
+            vec![
+                "vledger-server is using a self-signed certificate (catalog/tls_cert.pem). \
+                 Self-signed certificates do not satisfy PCI-DSS Req 4.2 or SOC 2 CC6.7 \
+                 for production deployments.".into(),
+                "Action: obtain a certificate signed by a trusted CA, place it at \
+                 keys/server.crt (cert) and keys/server.key (private key), then restart \
+                 the server with --tls-cert-path and --tls-key-path.".into(),
+            ],
+        )
+    }
 }
 
 fn check_audit_log_chain_integrity(data_dir: &Path) -> Evidence {

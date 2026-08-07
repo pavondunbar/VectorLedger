@@ -126,6 +126,16 @@ enum Commands {
         /// Format: host:port  (default: 127.0.0.1:5433)
         #[arg(long)]
         server: Option<String>,
+        /// Path to a PEM file containing the CA certificate used to verify the
+        /// server's TLS certificate.
+        ///
+        /// Required when connecting to a server at a non-loopback address.
+        /// For loopback connections (127.0.0.1 / ::1 / localhost) the self-
+        /// signed certificate is accepted automatically.
+        ///
+        /// Example: --ca-cert /etc/vledger/ca.crt
+        #[arg(long)]
+        ca_cert: Option<String>,
     },
     /// Run the full Phase 2 self-test suite.
     #[command(name = "self-test")]
@@ -199,6 +209,12 @@ enum Commands {
     User {
         #[command(subcommand)]
         action: UserAction,
+        /// Path to a PEM file containing the CA certificate used to verify the
+        /// server's TLS certificate when connecting to a running server.
+        ///
+        /// Required when the server is at a non-loopback address.
+        #[arg(long, global = true)]
+        ca_cert: Option<String>,
     },
     /// Show the active license tier, features, and expiry.
     #[command(name = "license")]
@@ -281,7 +297,7 @@ async fn main() -> Result<()> {
             => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms).await,
         Commands::Status                             => cmd_status(&cli.data_dir).await,
         Commands::Verify                             => cmd_verify(&cli.data_dir).await,
-        Commands::Sql { query, username, password, server } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref(), server.as_deref()).await,
+        Commands::Sql { query, username, password, server, ca_cert } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref(), server.as_deref(), ca_cert.as_deref()).await,
         Commands::SelfTest                           => cmd_self_test().await,
         Commands::SelfTestPhase3                     => cmd_self_test_phase3().await,
         // Phase 3
@@ -290,7 +306,7 @@ async fn main() -> Result<()> {
         Commands::RotateKeys { hsm_socket, caller_id } => cmd_rotate_keys(&cli.data_dir, hsm_socket.as_deref(), &caller_id).await,
         Commands::AuditExport { format, output, from, to } => cmd_audit_export(&cli.data_dir, &format, output.as_deref(), from.as_deref(), to.as_deref()).await,
         Commands::ComplianceReport { standard, format, output } => cmd_compliance_report(&cli.data_dir, &standard, &format, output.as_deref()).await,
-        Commands::User { action } => cmd_user(&cli.data_dir, action).await,
+        Commands::User { action, ca_cert } => cmd_user(&cli.data_dir, action, ca_cert.as_deref()).await,
         Commands::License          => cmd_license(&cli.data_dir),
     }
 }
@@ -418,6 +434,41 @@ async fn cmd_init(
 async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool, wal_sync_mode: &str, group_commit_delay_ms: u64) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Data directory not found — run `vledger init` first.");
+    }
+
+    // ── Fix #7: no_sync production guard ──────────────────────────────────
+    // NoSync mode never calls fsync — any crash between a COMMIT and the next
+    // OS writeback loses committed transactions permanently.  Refuse to start
+    // against a data directory that already contains committed WAL segments
+    // unless the operator explicitly acknowledges the risk.  In all cases emit
+    // a loud error so the setting cannot be silently deployed to production.
+    if wal_sync_mode == "no_sync" {
+        let wal_dir = data_dir.join("wal");
+        let has_existing_data = wal_dir.exists()
+            && std::fs::read_dir(&wal_dir)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false);
+
+        if has_existing_data {
+            anyhow::bail!(
+                "⛔  REFUSED: --wal-sync-mode=no_sync is set but the WAL directory \
+                 already contains committed data at '{}'.\n\
+                 Starting with no_sync against existing data risks silent, permanent \
+                 data loss on the next crash.\n\
+                 Use --wal-sync-mode=group_commit (recommended) or \
+                 --wal-sync-mode=per_record instead.\n\
+                 If you genuinely need no_sync for a dev/test database with \
+                 pre-existing data, delete the WAL directory first.",
+                wal_dir.display()
+            );
+        }
+
+        // Even for a fresh database, make the danger impossible to miss.
+        tracing::error!(
+            "⚠  WAL sync mode is NO_SYNC — fsync is NEVER called. \
+             Committed transactions will be lost on a crash or power failure. \
+             THIS SETTING MUST NOT BE USED IN PRODUCTION."
+        );
     }
 
     // ── License check ─────────────────────────────────────────────────────
@@ -608,6 +659,7 @@ async fn cmd_sql(
     username: Option<&str>,
     password: Option<&str>,
     server:   Option<&str>,
+    ca_cert:  Option<&str>,
 ) -> Result<()> {
     // Resolve credentials first (needed for both network and direct modes).
     let resolved_username = resolve_username(username);
@@ -633,7 +685,7 @@ async fn cmd_sql(
         });
 
     if let Some(addr) = server_addr {
-        return cmd_sql_network(&addr, query, &resolved_username, &resolved_password).await;
+        return cmd_sql_network(&addr, query, &resolved_username, &resolved_password, ca_cert).await;
     }
 
     // ── Direct mode: open the data directory (only safe when server is NOT running) ──
@@ -691,23 +743,59 @@ async fn cmd_sql_network(
     query:    Option<&str>,
     username: &str,
     password: &str,
+    ca_cert:  Option<&str>,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio_rustls::rustls::ClientConfig;
     use tokio_rustls::TlsConnector;
     use tokio_rustls::rustls::pki_types::ServerName;
 
-    // Build a TLS client config that accepts self-signed certs (dev default).
-    // In production the server cert should be CA-signed and this replaced
-    // with a proper root store.
-    let tls_config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))
-        .with_no_client_auth();
+    let host_part = addr.split(':').next().unwrap_or("127.0.0.1");
+    let port: u16 = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
+
+    // Fix #1: only accept self-signed / unverified certificates when the
+    // target is a loopback address.  For any non-loopback address the caller
+    // MUST supply --ca-cert; failing to do so produces a hard error so the
+    // danger cannot be silently ignored.
+    let is_loopback = host_part == "127.0.0.1"
+        || host_part == "::1"
+        || host_part.eq_ignore_ascii_case("localhost");
+
+    let tls_config: ClientConfig = if let Some(ca_path) = ca_cert {
+        // CA-verified mode: load the supplied PEM and verify normally.
+        let ca_pem = std::fs::read(ca_path)
+            .with_context(|| format!("Cannot read CA certificate: {ca_path}"))?;
+        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut ca_pem.as_slice()) {
+            root_store.add(cert.context("Invalid CA certificate DER")?)
+                .context("Failed to add CA certificate to root store")?;
+        }
+        ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    } else if is_loopback {
+        // Loopback-only: self-signed cert accepted, with a visible warning.
+        tracing::warn!(
+            "TLS certificate verification is DISABLED for loopback connection to {addr}. \
+             Use --ca-cert <path> to enable verification."
+        );
+        ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))
+            .with_no_client_auth()
+    } else {
+        // Non-loopback without --ca-cert: refuse with an actionable error.
+        anyhow::bail!(
+            "TLS certificate verification is required for non-loopback connections.\n\
+             Provide the server's CA certificate with --ca-cert <path>.\n\
+             Example: vledger sql --server {addr} --ca-cert /etc/vledger/ca.crt\n\n\
+             If this is a development server with a self-signed certificate,\
+             connect via loopback (127.0.0.1) or copy the server's\
+             catalog/tls_cert.pem and pass it as --ca-cert."
+        );
+    };
 
     let connector  = TlsConnector::from(std::sync::Arc::new(tls_config));
-    let host_part  = addr.split(':').next().unwrap_or("127.0.0.1");
-    let port: u16  = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
 
     let tcp = tokio::net::TcpStream::connect((host_part, port)).await
         .with_context(|| format!("Cannot connect to server at {addr}"))?;
@@ -897,8 +985,12 @@ async fn cmd_sql_network(
 }
 
 /// A TLS certificate verifier that accepts any certificate.
-/// Used for connecting to servers with self-signed certs (development default).
-/// In production, replace with a verifier that checks against a known CA.
+///
+/// Fix #1: this verifier is ONLY used when the target address resolves to a
+/// loopback interface (127.0.0.1 / ::1 / localhost) and no --ca-cert was
+/// supplied.  For any non-loopback address the CLI requires --ca-cert and
+/// builds a verified `ClientConfig` instead, so this struct is never reached
+/// for remote connections.
 #[derive(Debug)]
 struct AcceptAnyCert;
 
@@ -1019,7 +1111,7 @@ fn cmd_license(data_dir: &PathBuf) -> Result<()> {
 
 // ── user ──────────────────────────────────────────────────────────────────────
 
-async fn cmd_user(data_dir: &PathBuf, action: UserAction) -> Result<()> {
+async fn cmd_user(data_dir: &PathBuf, action: UserAction, ca_cert: Option<&str>) -> Result<()> {
     // If the server is running, route through it so the in-memory UserStore
     // is updated. Direct disk writes behind the server's back would be lost
     // on the next authenticate call (server holds state in memory).
@@ -1036,7 +1128,7 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction) -> Result<()> {
     };
 
     if let Some(addr) = server_addr {
-        return cmd_user_network(&addr, action).await;
+        return cmd_user_network(&addr, action, ca_cert).await;
     }
 
     // ── Direct mode: server is not running, safe to edit disk directly ───
@@ -1101,11 +1193,47 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction) -> Result<()> {
 }
 
 /// Send a user management command to a running server over TLS.
-async fn cmd_user_network(addr: &str, action: UserAction) -> Result<()> {
+async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio_rustls::rustls::ClientConfig;
     use tokio_rustls::TlsConnector;
     use tokio_rustls::rustls::pki_types::ServerName;
+
+    // Fix #1: same CA-cert / loopback logic as cmd_sql_network.
+    let host_part = addr.split(':').next().unwrap_or("127.0.0.1");
+    let port: u16 = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
+
+    let is_loopback = host_part == "127.0.0.1"
+        || host_part == "::1"
+        || host_part.eq_ignore_ascii_case("localhost");
+
+    let tls_config: ClientConfig = if let Some(ca_path) = ca_cert {
+        let ca_pem = std::fs::read(ca_path)
+            .with_context(|| format!("Cannot read CA certificate: {ca_path}"))?;
+        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut ca_pem.as_slice()) {
+            root_store.add(cert.context("Invalid CA certificate DER")?)
+                .context("Failed to add CA certificate to root store")?;
+        }
+        ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    } else if is_loopback {
+        tracing::warn!(
+            "TLS certificate verification is DISABLED for loopback connection to {addr}. \
+             Use --ca-cert <path> to enable verification."
+        );
+        ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))
+            .with_no_client_auth()
+    } else {
+        anyhow::bail!(
+            "TLS certificate verification is required for non-loopback connections.\n\
+             Provide the server's CA certificate with --ca-cert <path>.\n\
+             Example: vledger user --ca-cert /etc/vledger/ca.crt --server {addr} list"
+        );
+    };
 
     // Gather credentials for the admin user who is authorised to make changes.
     println!("Connecting to server at {addr} — admin credentials required.");
@@ -1150,13 +1278,7 @@ async fn cmd_user_network(addr: &str, action: UserAction) -> Result<()> {
     };
 
     // Connect.
-    let tls_config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))
-        .with_no_client_auth();
     let connector = TlsConnector::from(std::sync::Arc::new(tls_config));
-    let host_part = addr.split(':').next().unwrap_or("127.0.0.1");
-    let port: u16 = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
     let tcp = tokio::net::TcpStream::connect((host_part, port)).await
         .with_context(|| format!("Cannot connect to server at {addr}"))?;
     let server_name = ServerName::try_from(host_part.to_string())

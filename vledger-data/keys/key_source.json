@@ -1,4 +1,6 @@
 {
-  "backend": "env",
-  "var": "VectorLedger_MASTER_KEY"
+  "backend": "py_hsm",
+  "socket_path": "/tmp/pyhsm.sock",
+  "caller_id": "vledger",
+  "key_id": "vledger.master-key"
 }
