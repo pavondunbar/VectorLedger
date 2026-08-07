@@ -237,7 +237,7 @@ vledger self-test
 
 ---
 
-### Option 3 — Windows (PowerShell)
+### Windows (PowerShell)
 
 Run this in PowerShell 5.1+ or PowerShell 7+:
 
