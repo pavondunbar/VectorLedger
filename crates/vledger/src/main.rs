@@ -82,6 +82,17 @@ enum Commands {
         /// Attach Merkle proofs to every SELECT response.
         #[arg(long)]
         with_proofs: bool,
+        /// WAL sync mode: per_record | group_commit | no_sync (default: group_commit)
+        ///
+        /// - per_record   : fsync after every WAL record — safest, slowest
+        /// - group_commit : background flush every --group-commit-delay-ms — recommended
+        /// - no_sync      : never fsync — dev/test only, never use in production
+        #[arg(long, default_value = "group_commit")]
+        wal_sync_mode: String,
+        /// Group-commit flush interval in milliseconds (default: 2).
+        /// Only used when --wal-sync-mode=group_commit.
+        #[arg(long, default_value_t = 2)]
+        group_commit_delay_ms: u64,
     },
     /// Show database status.
     Status,
@@ -266,7 +277,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init { force, key_source, vault_addr, vault_mount, vault_path, kms_key_id, kms_region, pyhsm_socket, pyhsm_caller_id }
             => cmd_init(&cli.data_dir, force, &key_source, &vault_addr, &vault_mount, &vault_path, kms_key_id.as_deref(), &kms_region, pyhsm_socket.as_deref(), &pyhsm_caller_id).await,
-        Commands::Start { bind, pgwire, with_proofs } => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs).await,
+        Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms }
+            => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms).await,
         Commands::Status                             => cmd_status(&cli.data_dir).await,
         Commands::Verify                             => cmd_verify(&cli.data_dir).await,
         Commands::Sql { query, username, password, server } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref(), server.as_deref()).await,
@@ -403,7 +415,7 @@ async fn cmd_init(
 
 // ── start ─────────────────────────────────────────────────────────────────────
 
-async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool) -> Result<()> {
+async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool, wal_sync_mode: &str, group_commit_delay_ms: u64) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Data directory not found — run `vledger init` first.");
     }
@@ -441,6 +453,12 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     let config = vledger_server::ServerConfig {
         bind_addr: bind.to_string(),
         attach_proofs: with_proofs,
+        wal_sync_mode: wal_sync_mode.parse()
+            .unwrap_or_else(|e| {
+                eprintln!("⚠  Invalid --wal-sync-mode '{wal_sync_mode}': {e}. Defaulting to group_commit.");
+                vledger_wal::WalSyncMode::GroupCommit
+            }),
+        group_commit_delay_ms,
         ..Default::default()
     };
 
@@ -449,6 +467,13 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     println!("  Data dir   : {}", data_dir.display());
     println!("  Proofs     : {with_proofs}");
     println!("  Protocol   : newline-delimited JSON");
+    println!("  WAL sync   : {wal_sync_mode}{}",
+        if wal_sync_mode == "group_commit" {
+            format!("  (flush every {group_commit_delay_ms} ms)")
+        } else {
+            String::new()
+        }
+    );
     license.print_banner();
     if pgwire {
         println!("  PgWire     : 127.0.0.1:5432  (PostgreSQL wire protocol)");

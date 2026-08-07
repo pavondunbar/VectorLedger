@@ -127,6 +127,50 @@ Native client libraries are included for three languages, all in `clients/`:
 
 ---
 
+## Performance
+
+Benchmarked on Apple Silicon (MacBook, macOS) running in `group_commit`
+WAL mode with a mixed read/write workload (10 concurrent clients,
+1,000 transactions each, 70% INSERT / 30% SELECT):
+
+| Metric | Value |
+|---|---|
+| Throughput | **430 TPS** |
+| Min latency | **311 µs** |
+| p50 latency | 23 ms |
+| p95 latency | 36 ms |
+| p99 latency | **42 ms** |
+| Errors | 0 / 10,000 |
+
+These numbers represent a **conservative baseline on development
+hardware**. Production deployments on Linux with NVMe SSD are expected
+to deliver significantly higher throughput — fsync latency on NVMe
+(50–200 µs) is 10–50× faster than a laptop SSD, which is the primary
+bottleneck in the write path.
+
+### WAL sync modes
+
+VectorLedger ships with three WAL sync modes selectable at startup:
+
+| Mode | Durability | Typical use |
+|---|---|---|
+| `group_commit` | Up to one flush window of data loss on hard crash | **Default — recommended for most deployments** |
+| `per_record` | Zero data loss — every write fsynced immediately | Strict regulatory environments |
+| `no_sync` | None | Development and CI only |
+
+```bash
+# Start with default group commit (2 ms flush interval)
+vledger start
+
+# Start with per-record fsync (safest, lower TPS)
+vledger start --wal-sync-mode per_record
+
+# Tune the flush interval (lower = less exposure, higher TPS tradeoff)
+vledger start --wal-sync-mode group_commit --group-commit-delay-ms 5
+```
+
+---
+
 ## Architecture at a Glance
 
 ```

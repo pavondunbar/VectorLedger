@@ -92,10 +92,12 @@ impl SegmentReader {
             }
         };
 
-        // 3. Validate magic
+        // 3. Validate magic — a mismatch at this position means we've hit
+        // zero-padding or a torn write at the end of the segment.  Treat it
+        // as end-of-readable-data rather than a hard error.
         if header.magic != WAL_MAGIC {
             self.done = true;
-            return Some(Err(WalError::BadMagic));
+            return None;
         }
 
         // 4. Validate version
@@ -233,8 +235,10 @@ pub fn scan_last_sequence(wal_dir: &Path) -> Result<u64, WalError> {
                     last_seq = record.header.sequence;
                 }
             }
-            // Torn write at end of WAL — stop here
-            Err(WalError::ChecksumMismatch { .. } | WalError::TruncatedRecord { .. }) => break,
+            // Any of these mean we've hit the end of valid data — stop cleanly.
+            Err(WalError::ChecksumMismatch { .. }
+                | WalError::TruncatedRecord { .. }
+                | WalError::BadMagic) => break,
             Err(e) => return Err(e),
         }
     }

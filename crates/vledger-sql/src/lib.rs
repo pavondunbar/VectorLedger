@@ -37,7 +37,7 @@ pub mod planner;
 pub mod result;
 
 pub use error::SqlError;
-pub use executor::Executor;
+pub use executor::{Executor, ReadExecutor};
 pub use optimizer::explain as explain_plan;
 pub use planner::{AggFn, AggregateSpec, JoinSpec, JoinType, LogicalPlan, LogicalPlanBuilder,
                   WindowFn, WindowSpec};

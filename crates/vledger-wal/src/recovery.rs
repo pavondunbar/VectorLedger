@@ -64,8 +64,10 @@ pub fn recover(wal_dir: &Path) -> Result<RecoveryResult, WalError> {
 
     for result in reader {
         match result {
-            Err(WalError::ChecksumMismatch { .. } | WalError::TruncatedRecord { .. }) => {
-                warn!("Torn write detected — stopping recovery scan");
+            Err(WalError::ChecksumMismatch { .. }
+                | WalError::TruncatedRecord { .. }
+                | WalError::BadMagic) => {
+                warn!("Torn write / end of valid WAL data — stopping recovery scan");
                 torn_write_detected = true;
                 break;
             }

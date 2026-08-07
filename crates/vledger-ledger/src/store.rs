@@ -93,6 +93,9 @@ pub struct LedgerStore {
     // ── Process-exclusive advisory lock ──────────────────────────────────
     /// Held for the lifetime of this store.  Dropped when the store is dropped.
     _lock: Option<DataDirLock>,
+
+    // ── Data directory path (for WAL flusher) ─────────────────────────────
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl LedgerStore {
@@ -129,6 +132,7 @@ impl LedgerStore {
             next_account_page: 0,
             next_entry_page: 0,
             _lock: Some(lock),
+            data_dir: Some(data_dir.to_path_buf()),
         };
 
         store.replay_from_wal(&wal_dir)?;
@@ -595,6 +599,21 @@ impl LedgerStore {
     pub fn entries_merkle_root(&mut self) -> Result<vledger_crypto::Hash, LedgerError> {
         self.page_store.table_merkle_root(TABLE_ENTRIES)
             .map_err(|e| LedgerError::Serialization(e.to_string()))
+    }
+
+    /// Return the WAL directory path (used by the group-commit flusher).
+    pub fn wal_dir(&self) -> std::path::PathBuf {
+        if let Some(ref d) = self.data_dir {
+            return d.join("wal");
+        }
+        std::env::temp_dir().join("vledger-wal-fallback")
+    }
+
+    /// Return the `FlushState` handle from the WAL writer, if the WAL is
+    /// running in `GroupCommit` mode.  The server uses this to hand the
+    /// handle off to the background flusher task.
+    pub fn wal_flush_state(&self) -> Option<std::sync::Arc<vledger_wal::FlushState>> {
+        self.tx_manager.wal_flush_state()
     }
 }
 

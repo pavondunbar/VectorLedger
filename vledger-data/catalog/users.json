@@ -1,7 +1,7 @@
 {
   "admin": {
     "username": "admin",
-    "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$2T6i99ZThAiY7JBTbcCxcw$c67XiYRnRddErXF/0jFhh8EQPBzznTjIPKAcr12p5Vc",
+    "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$mUdvEohpFy93GGYFuIhCmw$6/hAdk7lCkCBdCPFNeFQasgzOumDOVoRrcsvy3QnBeY",
     "role": "admin",
     "enabled": true,
     "created_at": "2026-08-06T22:49:19.176193+00:00",

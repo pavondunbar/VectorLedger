@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vledger_ledger::LedgerStore;
@@ -59,7 +59,7 @@ impl IpBucket {
 /// The VectorLedger server.
 pub struct Server {
     config:     Arc<ServerConfig>,
-    ledger:     Arc<Mutex<LedgerStore>>,
+    ledger:     Arc<RwLock<LedgerStore>>,
     user_store: Arc<UserStore>,
 }
 
@@ -77,7 +77,7 @@ impl Server {
             });
         Self {
             config:     Arc::new(config),
-            ledger:     Arc::new(Mutex::new(ledger)),
+            ledger:     Arc::new(RwLock::new(ledger)),
             user_store: Arc::new(user_store),
         }
     }
@@ -90,7 +90,7 @@ impl Server {
     ) -> Self {
         Self {
             config:     Arc::new(config),
-            ledger:     Arc::new(Mutex::new(ledger)),
+            ledger:     Arc::new(RwLock::new(ledger)),
             user_store: Arc::new(user_store),
         }
     }
@@ -163,6 +163,36 @@ impl Server {
                     }
                 }
             });
+        }
+
+        // Group-commit background flusher — only started in GroupCommit mode.
+        {
+            use vledger_wal::WalSyncMode;
+            if self.config.wal_sync_mode == WalSyncMode::GroupCommit {
+                // Extract the wal_dir from the ledger's data directory.
+                // The WAL lives at <data_dir>/wal.
+                let wal_dir = {
+                    let guard = self.ledger.read().await;
+                    guard.wal_dir().to_path_buf()
+                };
+                // Borrow the FlushState from the WAL writer inside the ledger.
+                let flush_state = {
+                    let guard = self.ledger.read().await;
+                    guard.wal_flush_state()
+                };
+                if let Some(fs) = flush_state {
+                    vledger_wal::spawn_group_commit_flusher(
+                        wal_dir,
+                        fs,
+                        self.config.group_commit_delay_ms,
+                        shutdown.clone(),
+                    );
+                    info!(
+                        delay_ms = self.config.group_commit_delay_ms,
+                        "Group-commit WAL flusher started"
+                    );
+                }
+            }
         }
 
         // ── Accept loop ───────────────────────────────────────────────────

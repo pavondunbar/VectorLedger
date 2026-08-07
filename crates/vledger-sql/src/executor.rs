@@ -1,4 +1,16 @@
 //! SQL executor — runs a `LogicalPlan` against a `LedgerStore`.
+//!
+//! ## Read/write split
+//!
+//! `Executor` requires `&mut LedgerStore` and handles write plans
+//! (`PostEntry`, `CreateAccount`).
+//!
+//! `ReadExecutor` requires only `&LedgerStore` and handles all read-only
+//! plans (`ScanEntries`, `ScanAccounts`, `GetBalance`, `VerifyChain`,
+//! `Join`, `Aggregate`, `Window`).
+//!
+//! The server uses `RwLock::read()` for read plans and `RwLock::write()`
+//! for write plans, allowing concurrent reads without blocking each other.
 
 use hex;
 use uuid::Uuid;
@@ -9,41 +21,49 @@ use crate::error::SqlError;
 use crate::planner::{AccountSpec, AggFn, EntryFilter, EntrySpec, LogicalPlan};
 use crate::result::{LeafProof, MerkleProof, ProofStep, QueryResult, Row, Value};
 
-/// The SQL executor. Holds a mutable reference to the open `LedgerStore`.
-pub struct Executor<'a> {
-    ledger: &'a mut LedgerStore,
+// ── ReadExecutor — immutable borrow, all read-only plans ─────────────────────
+
+/// Read-only executor.  Requires only `&LedgerStore`.
+///
+/// The server acquires `RwLock::read()` before constructing this, allowing
+/// multiple concurrent read queries without any lock contention between them.
+pub struct ReadExecutor<'a> {
+    ledger: &'a LedgerStore,
     /// When `true`, every SELECT attaches a Merkle proof to the result.
     pub attach_proofs: bool,
 }
 
-impl<'a> Executor<'a> {
-    pub fn new(ledger: &'a mut LedgerStore) -> Self {
+impl<'a> ReadExecutor<'a> {
+    pub fn new(ledger: &'a LedgerStore) -> Self {
         Self { ledger, attach_proofs: false }
     }
 
-    pub fn with_proofs(ledger: &'a mut LedgerStore) -> Self {
+    pub fn with_proofs(ledger: &'a LedgerStore) -> Self {
         Self { ledger, attach_proofs: true }
     }
 
-    /// Execute a `LogicalPlan` and return the result.
-    pub fn execute(&mut self, plan: LogicalPlan) -> Result<QueryResult, SqlError> {
+    /// Execute a read-only `LogicalPlan`.
+    /// Returns `Err(SqlError::Unsupported)` if a write plan is passed.
+    pub fn execute(&self, plan: LogicalPlan) -> Result<QueryResult, SqlError> {
         match plan {
-            LogicalPlan::ScanEntries { filter }      => self.exec_scan_entries(filter),
-            LogicalPlan::ScanAccounts { filter }     => self.exec_scan_accounts(filter),
-            LogicalPlan::GetBalance { account_ref }  => self.exec_get_balance(&account_ref),
-            LogicalPlan::VerifyChain                 => self.exec_verify_chain(),
-            LogicalPlan::PostEntry(spec)             => self.exec_post_entry(spec),
-            LogicalPlan::CreateAccount(spec)         => self.exec_create_account(spec),
-            // Phase 3
-            LogicalPlan::Join(spec)      => self.exec_join(spec),
-            LogicalPlan::Aggregate(spec) => self.exec_aggregate(spec),
-            LogicalPlan::Window(spec)    => self.exec_window(spec),
+            LogicalPlan::ScanEntries { filter }     => self.exec_scan_entries(filter),
+            LogicalPlan::ScanAccounts { filter }    => self.exec_scan_accounts(filter),
+            LogicalPlan::GetBalance { account_ref } => self.exec_get_balance(&account_ref),
+            LogicalPlan::VerifyChain                => self.exec_verify_chain(),
+            LogicalPlan::Join(spec)                 => self.exec_join(spec),
+            LogicalPlan::Aggregate(spec)            => self.exec_aggregate(spec),
+            LogicalPlan::Window(spec)               => self.exec_window(spec),
+            LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_) =>
+                Err(SqlError::Unsupported(
+                    "write plans must be executed with Executor (requires &mut LedgerStore)".into()
+                )),
         }
     }
 
+
     // ── SELECT FROM ledger ────────────────────────────────────────────────
 
-    fn exec_scan_entries(&mut self, filter: Option<EntryFilter>) -> Result<QueryResult, SqlError> {
+    fn exec_scan_entries(&self, filter: Option<EntryFilter>) -> Result<QueryResult, SqlError> {
         let entries = self.ledger.all_entries();
 
         let cols = vec![
@@ -53,7 +73,6 @@ impl<'a> Executor<'a> {
             "chain_hash".into(), "lines".into(),
         ];
 
-        // Leaf data for Merkle proof = one leaf per entry (content_hash as bytes)
         let all_leaf_data: Vec<Vec<u8>> = entries.iter()
             .map(|e| e.content_hash.to_vec())
             .collect();
@@ -61,11 +80,11 @@ impl<'a> Executor<'a> {
         let filtered: Vec<(usize, _)> = entries.iter().enumerate().filter(|(_, e)| {
             match &filter {
                 None => true,
-                Some(EntryFilter::BySequence(seq))     => e.sequence == *seq,
-                Some(EntryFilter::ByExternalRef(r))    => e.external_ref.as_deref() == Some(r.as_str()),
-                Some(EntryFilter::ByDomain(d))         => &e.domain == d,
-                Some(EntryFilter::ByStatus(s))         => format!("{:?}", e.status).to_lowercase() == s.to_lowercase(),
-                Some(EntryFilter::Limit(_))            => true,
+                Some(EntryFilter::BySequence(seq))  => e.sequence == *seq,
+                Some(EntryFilter::ByExternalRef(r)) => e.external_ref.as_deref() == Some(r.as_str()),
+                Some(EntryFilter::ByDomain(d))      => &e.domain == d,
+                Some(EntryFilter::ByStatus(s))      => format!("{:?}", e.status).to_lowercase() == s.to_lowercase(),
+                Some(EntryFilter::Limit(_))         => true,
             }
         }).collect();
 
@@ -103,31 +122,31 @@ impl<'a> Executor<'a> {
         let mut result = QueryResult::rows(cols, rows, format!("{n} rows"));
 
         if self.attach_proofs && !all_leaf_data.is_empty() {
-            result.proof = Some(Self::build_merkle_proof_static(&all_leaf_data, &leaf_indices));
+            result.proof = Some(build_merkle_proof(&all_leaf_data, &leaf_indices));
         }
 
         Ok(result)
     }
 
+
     // ── SELECT FROM accounts ──────────────────────────────────────────────
 
-    fn exec_scan_accounts(&mut self, filter: Option<EntryFilter>) -> Result<QueryResult, SqlError> {
+    fn exec_scan_accounts(&self, filter: Option<EntryFilter>) -> Result<QueryResult, SqlError> {
         let cols = vec![
             "id".into(), "code".into(), "name".into(), "account_type".into(),
             "currency".into(), "status".into(), "domain".into(), "balance".into(),
         ];
 
+        // Collect first so we don't hold the iterator while calling balance().
         let accounts: Vec<_> = self.ledger.all_accounts().cloned().collect();
 
         let rows: Vec<Row> = accounts.iter()
             .filter(|a| match &filter {
                 None => true,
-                Some(EntryFilter::ByDomain(d)) if d.starts_with("__account_code:") => {
-                    a.code == d.trim_start_matches("__account_code:")
-                }
-                Some(EntryFilter::ByDomain(d)) if d.starts_with("__account_currency:") => {
-                    a.currency_code == d.trim_start_matches("__account_currency:")
-                }
+                Some(EntryFilter::ByDomain(d)) if d.starts_with("__account_code:") =>
+                    a.code == d.trim_start_matches("__account_code:"),
+                Some(EntryFilter::ByDomain(d)) if d.starts_with("__account_currency:") =>
+                    a.currency_code == d.trim_start_matches("__account_currency:"),
                 Some(EntryFilter::ByDomain(d)) => &a.domain == d,
                 _ => true,
             })
@@ -152,7 +171,7 @@ impl<'a> Executor<'a> {
 
     // ── SELECT BALANCE('…') ───────────────────────────────────────────────
 
-    fn exec_get_balance(&mut self, account_ref: &str) -> Result<QueryResult, SqlError> {
+    fn exec_get_balance(&self, account_ref: &str) -> Result<QueryResult, SqlError> {
         let acct_id = self.resolve_account(account_ref)?;
         let balance = self.ledger.balance(&acct_id);
         let cols = vec!["account".into(), "balance".into()];
@@ -165,10 +184,10 @@ impl<'a> Executor<'a> {
 
     // ── SELECT VERIFY_CHAIN() ─────────────────────────────────────────────
 
-    fn exec_verify_chain(&mut self) -> Result<QueryResult, SqlError> {
+    fn exec_verify_chain(&self) -> Result<QueryResult, SqlError> {
         match self.ledger.verify_chain_integrity() {
             Ok(()) => {
-                let n = self.ledger.entry_count();
+                let n   = self.ledger.entry_count();
                 let tip = hex::encode(self.ledger.chain_tip());
                 let cols = vec!["status".into(), "entries_verified".into(), "chain_tip".into()];
                 let rows = vec![Row::new(cols.clone(), vec![
@@ -182,6 +201,218 @@ impl<'a> Executor<'a> {
         }
     }
 
+
+    // ── JOIN ──────────────────────────────────────────────────────────────
+
+    fn exec_join(&self, spec: crate::planner::JoinSpec) -> Result<QueryResult, SqlError> {
+        use crate::planner::JoinType;
+        use std::collections::HashMap;
+
+        let left_result  = self.execute(*spec.left)?;
+        let right_result = self.execute(*spec.right)?;
+
+        let right_key_col = right_result.columns.iter()
+            .position(|c| c == "id" || c == "code")
+            .unwrap_or(0);
+
+        let mut right_map: HashMap<String, &Row> = HashMap::new();
+        for row in &right_result.rows {
+            if let Some(k) = row.values.get(right_key_col) {
+                right_map.insert(k.to_string(), row);
+            }
+        }
+
+        let mut out_cols = left_result.columns.clone();
+        for c in &right_result.columns {
+            if !out_cols.contains(c) { out_cols.push(format!("r_{c}")); }
+        }
+
+        let mut rows: Vec<Row> = Vec::new();
+        for left_row in &left_result.rows {
+            let join_key = left_row.get("account_id")
+                .or_else(|| left_row.values.first())
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+
+            let right_row = right_map.get(&join_key).copied();
+            match (spec.join_type, right_row) {
+                (_, Some(rr)) => {
+                    let mut vals = left_row.values.clone();
+                    for v in &rr.values { vals.push(v.clone()); }
+                    rows.push(Row::new(out_cols.clone(), vals));
+                }
+                (JoinType::LeftOuter, None) => {
+                    let mut vals = left_row.values.clone();
+                    for _ in &right_result.columns { vals.push(Value::Null); }
+                    rows.push(Row::new(out_cols.clone(), vals));
+                }
+                (JoinType::Inner, None) => {}
+            }
+        }
+
+        let n = rows.len();
+        Ok(QueryResult::rows(out_cols, rows, format!("{n} rows (join)")))
+    }
+
+    // ── AGGREGATE ─────────────────────────────────────────────────────────
+
+    fn exec_aggregate(&self, spec: crate::planner::AggregateSpec) -> Result<QueryResult, SqlError> {
+        use std::collections::HashMap;
+
+        let input = self.execute(*spec.input)?;
+        let col_idx = |name: &str| -> Option<usize> { input.columns.iter().position(|c| c == name) };
+
+        let mut groups: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
+        for row in &input.rows {
+            let key: Vec<String> = if spec.group_by.is_empty() {
+                vec!["__all__".into()]
+            } else {
+                spec.group_by.iter().map(|gb| {
+                    col_idx(gb).and_then(|i| row.values.get(i))
+                        .map(|v| v.to_string()).unwrap_or_default()
+                }).collect()
+            };
+            groups.entry(key).or_default().push(row);
+        }
+
+        let mut out_cols = spec.group_by.clone();
+        for agg in &spec.aggregates { out_cols.push(agg.alias.clone()); }
+
+        let mut result_rows: Vec<Row> = Vec::new();
+        let mut keys: Vec<Vec<String>> = groups.keys().cloned().collect();
+        keys.sort();
+
+        for key in &keys {
+            let group_rows = &groups[key];
+            let mut vals: Vec<Value> = if spec.group_by.is_empty() {
+                vec![]
+            } else {
+                key.iter().map(|k| Value::Text(k.clone())).collect()
+            };
+            for agg in &spec.aggregates {
+                vals.push(compute_aggregate(agg.func, col_idx(&agg.column), group_rows));
+            }
+            result_rows.push(Row::new(out_cols.clone(), vals));
+        }
+
+        let n = result_rows.len();
+        Ok(QueryResult::rows(out_cols, result_rows, format!("{n} groups")))
+    }
+
+
+    // ── WINDOW ────────────────────────────────────────────────────────────
+
+    fn exec_window(&self, spec: crate::planner::WindowSpec) -> Result<QueryResult, SqlError> {
+        use crate::planner::WindowFn;
+        use std::collections::HashMap;
+
+        let mut input = self.execute(*spec.input)?;
+        let col_idx = |name: &str| -> Option<usize> { input.columns.iter().position(|c| c == name) };
+        let value_col_idx = col_idx(&spec.column);
+
+        let partition_indices: Vec<usize> = spec.partition_by.iter()
+            .filter_map(|c| col_idx(c)).collect();
+
+        struct PartitionState { running_sum: i128, running_count: usize, row_number: u64 }
+        let mut partition_state: HashMap<Vec<String>, PartitionState> = HashMap::new();
+
+        let alias = spec.alias.clone();
+        input.columns.push(alias.clone());
+
+        for row in input.rows.iter_mut() {
+            row.columns.push(alias.clone());
+            let part_key: Vec<String> = partition_indices.iter()
+                .map(|&i| row.values.get(i).map(|v| v.to_string()).unwrap_or_default())
+                .collect();
+
+            let state = partition_state.entry(part_key).or_insert(
+                PartitionState { running_sum: 0, running_count: 0, row_number: 0 }
+            );
+            state.row_number += 1;
+
+            let raw_val: i128 = value_col_idx
+                .and_then(|i| row.values.get(i))
+                .and_then(|v| match v {
+                    Value::BigInt(n) => Some(*n),
+                    Value::Int(n)    => Some(*n as i128),
+                    _ => None,
+                })
+                .unwrap_or(0);
+
+            state.running_sum   += raw_val;
+            state.running_count += 1;
+
+            let result_val = match spec.window_fn {
+                WindowFn::RowNumber | WindowFn::Rank | WindowFn::DenseRank =>
+                    Value::BigInt(state.row_number as i128),
+                WindowFn::RunningSum => Value::BigInt(state.running_sum),
+                WindowFn::RunningAvg =>
+                    Value::BigInt(state.running_sum / state.running_count.max(1) as i128),
+                WindowFn::Lag  => Value::BigInt(state.running_sum - raw_val),
+                WindowFn::Lead => Value::BigInt(raw_val),
+            };
+            row.values.push(result_val);
+        }
+
+        let n = input.rows.len();
+        Ok(QueryResult::rows(input.columns, input.rows, format!("{n} rows (window)")))
+    }
+
+    // ── Account resolution ────────────────────────────────────────────────
+
+    fn resolve_account(&self, account_ref: &str) -> Result<Uuid, SqlError> {
+        if let Ok(id) = Uuid::parse_str(account_ref) {
+            if self.ledger.get_account(&id).is_some() { return Ok(id); }
+        }
+        self.ledger.all_accounts()
+            .find(|a| a.code == account_ref)
+            .map(|a| a.id)
+            .ok_or_else(|| SqlError::Execution(format!("account '{account_ref}' not found")))
+    }
+}
+
+
+// ── Executor — mutable borrow, write plans only ───────────────────────────────
+
+/// Write executor.  Requires `&mut LedgerStore`.
+///
+/// For read plans this delegates to a `ReadExecutor` built from the same
+/// `&LedgerStore` reference, so callers only need one entry point.
+pub struct Executor<'a> {
+    ledger: &'a mut LedgerStore,
+    pub attach_proofs: bool,
+}
+
+impl<'a> Executor<'a> {
+    pub fn new(ledger: &'a mut LedgerStore) -> Self {
+        Self { ledger, attach_proofs: false }
+    }
+
+    pub fn with_proofs(ledger: &'a mut LedgerStore) -> Self {
+        Self { ledger, attach_proofs: true }
+    }
+
+    /// Execute any `LogicalPlan`.
+    ///
+    /// Read plans are forwarded to `ReadExecutor` (which only borrows `&self.ledger`).
+    /// Write plans are handled directly here with `&mut self.ledger`.
+    pub fn execute(&mut self, plan: LogicalPlan) -> Result<QueryResult, SqlError> {
+        match plan {
+            // Write plans — require &mut LedgerStore.
+            LogicalPlan::PostEntry(spec)      => self.exec_post_entry(spec),
+            LogicalPlan::CreateAccount(spec)  => self.exec_create_account(spec),
+
+            // Read plans — delegate to ReadExecutor.
+            read_plan => {
+                let reader = ReadExecutor {
+                    ledger: self.ledger,
+                    attach_proofs: self.attach_proofs,
+                };
+                reader.execute(read_plan)
+            }
+        }
+    }
+
     // ── INSERT INTO ledger ────────────────────────────────────────────────
 
     fn exec_post_entry(&mut self, spec: EntrySpec) -> Result<QueryResult, SqlError> {
@@ -189,8 +420,7 @@ impl<'a> Executor<'a> {
         let credit_id = self.resolve_account(&spec.credit_account)?;
 
         let amount = Amount::new(spec.amount).ok_or_else(|| SqlError::InvalidValue {
-            field: "amount".into(),
-            reason: "must be non-zero".into(),
+            field: "amount".into(), reason: "must be non-zero".into(),
         })?;
 
         let mut builder = JournalEntryBuilder::new(&spec.description, &spec.domain)
@@ -217,7 +447,7 @@ impl<'a> Executor<'a> {
     // ── INSERT INTO accounts ──────────────────────────────────────────────
 
     fn exec_create_account(&mut self, spec: AccountSpec) -> Result<QueryResult, SqlError> {
-        let acct_type = Self::parse_account_type(&spec.account_type)?;
+        let acct_type = parse_account_type(&spec.account_type)?;
         let acct = Account::new(&spec.code, &spec.name, acct_type, &spec.currency, &spec.domain);
         let id = self.ledger.create_account(acct)?;
 
@@ -230,269 +460,79 @@ impl<'a> Executor<'a> {
         Ok(QueryResult::rows(cols, rows, format!("Account '{}' created", spec.code)))
     }
 
-    // ── Phase 3: JOIN ─────────────────────────────────────────────────────
-
-    fn exec_join(&mut self, spec: crate::planner::JoinSpec) -> Result<QueryResult, SqlError> {
-        use crate::planner::JoinType;
-
-        // Materialise both sides.
-        let left_result  = self.execute(*spec.left)?;
-        let right_result = self.execute(*spec.right)?;
-
-        // Build a lookup map from the right side keyed by "id" column.
-        use std::collections::HashMap;
-        let right_key_col = right_result.columns.iter()
-            .position(|c| c == "id" || c == "code")
-            .unwrap_or(0);
-
-        let mut right_map: HashMap<String, &Row> = HashMap::new();
-        for row in &right_result.rows {
-            if let Some(k) = row.values.get(right_key_col) {
-                right_map.insert(k.to_string(), row);
-            }
-        }
-
-        // Merge column names.
-        let mut out_cols = left_result.columns.clone();
-        for c in &right_result.columns {
-            if !out_cols.contains(c) {
-                out_cols.push(format!("r_{c}"));
-            }
-        }
-
-        let mut rows: Vec<Row> = Vec::new();
-
-        for left_row in &left_result.rows {
-            // Try to match the left row's `account_id` or first column to a
-            // right-side `id`.
-            let join_key = left_row.get("account_id")
-                .or_else(|| left_row.values.first())
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-
-            let right_row = right_map.get(&join_key).copied();
-
-            match (spec.join_type, right_row) {
-                (_, Some(rr)) => {
-                    let mut vals = left_row.values.clone();
-                    for v in &rr.values {
-                        vals.push(v.clone());
-                    }
-                    rows.push(Row::new(out_cols.clone(), vals));
-                }
-                (JoinType::LeftOuter, None) => {
-                    let mut vals = left_row.values.clone();
-                    for _ in &right_result.columns {
-                        vals.push(Value::Null);
-                    }
-                    rows.push(Row::new(out_cols.clone(), vals));
-                }
-                (JoinType::Inner, None) => {} // no match → skip row
-            }
-        }
-
-        let n = rows.len();
-        Ok(QueryResult::rows(out_cols, rows, format!("{n} rows (join)")))
-    }
-
-    // ── Phase 3: AGGREGATE ────────────────────────────────────────────────
-
-    fn exec_aggregate(&mut self, spec: crate::planner::AggregateSpec) -> Result<QueryResult, SqlError> {
-        use std::collections::HashMap;
-
-        // Materialise the input.
-        let input = self.execute(*spec.input)?;
-
-        // Find column indices.
-        let col_idx = |name: &str| -> Option<usize> {
-            input.columns.iter().position(|c| c == name)
-        };
-
-        // Group rows.
-        // Key = tuple of group-by column values as strings.
-        let mut groups: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
-        for row in &input.rows {
-            let key: Vec<String> = if spec.group_by.is_empty() {
-                vec!["__all__".into()]
-            } else {
-                spec.group_by.iter().map(|gb| {
-                    col_idx(gb)
-                        .and_then(|i| row.values.get(i))
-                        .map(|v| v.to_string())
-                        .unwrap_or_default()
-                }).collect()
-            };
-            groups.entry(key).or_default().push(row);
-        }
-
-        // Output columns = group_by cols + aggregate aliases.
-        let mut out_cols = spec.group_by.clone();
-        for agg in &spec.aggregates {
-            out_cols.push(agg.alias.clone());
-        }
-
-        let mut result_rows: Vec<Row> = Vec::new();
-        let mut keys: Vec<Vec<String>> = groups.keys().cloned().collect();
-        keys.sort(); // deterministic output order
-
-        for key in &keys {
-            let group_rows = &groups[key];
-            // Only include group-by key values if there actually are group-by columns
-            let mut vals: Vec<Value> = if spec.group_by.is_empty() {
-                vec![]
-            } else {
-                key.iter().map(|k| Value::Text(k.clone())).collect()
-            };
-
-            for agg in &spec.aggregates {
-                let agg_col_idx = col_idx(&agg.column);
-                let agg_val = compute_aggregate(agg.func, agg_col_idx, group_rows);
-                vals.push(agg_val);
-            }
-
-            result_rows.push(Row::new(out_cols.clone(), vals));
-        }
-
-        let n = result_rows.len();
-        Ok(QueryResult::rows(out_cols, result_rows, format!("{n} groups")))
-    }
-
-    // ── Phase 3: WINDOW FUNCTION ──────────────────────────────────────────
-
-    fn exec_window(&mut self, spec: crate::planner::WindowSpec) -> Result<QueryResult, SqlError> {
-        use crate::planner::WindowFn;
-        use std::collections::HashMap;
-
-        // Materialise input.
-        let mut input = self.execute(*spec.input)?;
-
-        let col_idx = |name: &str| -> Option<usize> {
-            input.columns.iter().position(|c| c == name)
-        };
-
-        let value_col_idx = col_idx(&spec.column);
-
-        // Build partition key for each row.
-        let partition_indices: Vec<usize> = spec.partition_by.iter()
-            .filter_map(|c| col_idx(c))
-            .collect();
-
-        // Assign partition buckets in row order, then compute the window fn.
-        // For ORDER BY within partition we use arrival order (already seq-ordered).
-        struct PartitionState {
-            running_sum: i128,
-            running_count: usize,
-            row_number: u64,
-        }
-        let mut partition_state: HashMap<Vec<String>, PartitionState> = HashMap::new();
-
-        let alias = spec.alias.clone();
-        input.columns.push(alias.clone());
-
-        for row in input.rows.iter_mut() {
-            // Also update the row's own columns vec to stay consistent
-            row.columns.push(alias.clone());
-            let part_key: Vec<String> = partition_indices.iter()
-                .map(|&i| row.values.get(i).map(|v| v.to_string()).unwrap_or_default())
-                .collect();
-
-            let state = partition_state.entry(part_key).or_insert(PartitionState {
-                running_sum: 0,
-                running_count: 0,
-                row_number: 0,
-            });
-            state.row_number += 1;
-
-            let raw_val: i128 = value_col_idx
-                .and_then(|i| row.values.get(i))
-                .and_then(|v| match v {
-                    Value::BigInt(n) => Some(*n),
-                    Value::Int(n)    => Some(*n as i128),
-                    _ => None,
-                })
-                .unwrap_or(0);
-
-            state.running_sum   += raw_val;
-            state.running_count += 1;
-
-            let result_val = match spec.window_fn {
-                WindowFn::RowNumber | WindowFn::Rank | WindowFn::DenseRank =>
-                    Value::BigInt(state.row_number as i128),
-                WindowFn::RunningSum =>
-                    Value::BigInt(state.running_sum),
-                WindowFn::RunningAvg =>
-                    Value::BigInt(state.running_sum / state.running_count.max(1) as i128),
-                WindowFn::Lag => {
-                    // LAG returns previous row's value; simplified: 0 for first row
-                    Value::BigInt(state.running_sum - raw_val)
-                }
-                WindowFn::Lead => {
-                    // LEAD is a lookahead — simplified: return current value
-                    Value::BigInt(raw_val)
-                }
-            };
-
-            row.values.push(result_val);
-        }
-
-        let n = input.rows.len();
-        Ok(QueryResult::rows(input.columns, input.rows, format!("{n} rows (window)")))
-    }
-
-    // ── Merkle proof builder ──────────────────────────────────────────────
-
-    fn build_merkle_proof_static(all_leaves: &[Vec<u8>], indices: &[usize]) -> MerkleProof {
-        let root = merkle_root(all_leaves);
-        let mut leaf_proofs = Vec::new();
-
-        for &idx in indices {
-            if idx >= all_leaves.len() { continue; }
-            if let Some(proof) = merkle_proof(all_leaves, idx) {
-                let path = proof.path.iter().map(|step| ProofStep {
-                    sibling: step.sibling,
-                    sibling_is_left: step.sibling_is_left,
-                }).collect();
-                leaf_proofs.push(LeafProof {
-                    leaf_index: proof.leaf_index,
-                    leaf_hash:  proof.leaf_hash,
-                    path,
-                });
-            }
-        }
-
-        MerkleProof { root, leaf_proofs, root_signature: None, signing_public_key: None }
-    }
-
-    // ── Account resolution ────────────────────────────────────────────────
+    // ── Account resolution (uses &self.ledger — read-only) ────────────────
 
     fn resolve_account(&self, account_ref: &str) -> Result<Uuid, SqlError> {
         if let Ok(id) = Uuid::parse_str(account_ref) {
-            if self.ledger.get_account(&id).is_some() {
-                return Ok(id);
-            }
+            if self.ledger.get_account(&id).is_some() { return Ok(id); }
         }
         self.ledger.all_accounts()
             .find(|a| a.code == account_ref)
             .map(|a| a.id)
             .ok_or_else(|| SqlError::Execution(format!("account '{account_ref}' not found")))
     }
+}
 
-    fn parse_account_type(s: &str) -> Result<AccountType, SqlError> {
-        match s.to_lowercase().as_str() {
-            "asset"     => Ok(AccountType::Asset),
-            "liability" => Ok(AccountType::Liability),
-            "equity"    => Ok(AccountType::Equity),
-            "income"    => Ok(AccountType::Income),
-            "expense"   => Ok(AccountType::Expense),
-            "contra"    => Ok(AccountType::Contra),
-            "suspense"  => Ok(AccountType::Suspense),
-            other => Err(SqlError::InvalidValue {
-                field: "account_type".into(),
-                reason: format!("unknown type '{other}'"),
-            }),
+
+// ── Shared free functions ─────────────────────────────────────────────────────
+
+fn build_merkle_proof(all_leaves: &[Vec<u8>], indices: &[usize]) -> MerkleProof {
+    let root = merkle_root(all_leaves);
+    let mut leaf_proofs = Vec::new();
+    for &idx in indices {
+        if idx >= all_leaves.len() { continue; }
+        if let Some(proof) = merkle_proof(all_leaves, idx) {
+            let path = proof.path.iter().map(|step| ProofStep {
+                sibling: step.sibling, sibling_is_left: step.sibling_is_left,
+            }).collect();
+            leaf_proofs.push(LeafProof {
+                leaf_index: proof.leaf_index,
+                leaf_hash:  proof.leaf_hash,
+                path,
+            });
+        }
+    }
+    MerkleProof { root, leaf_proofs, root_signature: None, signing_public_key: None }
+}
+
+fn parse_account_type(s: &str) -> Result<AccountType, SqlError> {
+    match s.to_lowercase().as_str() {
+        "asset"     => Ok(AccountType::Asset),
+        "liability" => Ok(AccountType::Liability),
+        "equity"    => Ok(AccountType::Equity),
+        "income"    => Ok(AccountType::Income),
+        "expense"   => Ok(AccountType::Expense),
+        "contra"    => Ok(AccountType::Contra),
+        "suspense"  => Ok(AccountType::Suspense),
+        other => Err(SqlError::InvalidValue {
+            field:  "account_type".into(),
+            reason: format!("unknown type '{other}'"),
+        }),
+    }
+}
+
+fn compute_aggregate(func: AggFn, col_idx: Option<usize>, rows: &[&Row]) -> Value {
+    let nums: Vec<i128> = rows.iter()
+        .filter_map(|r| col_idx.and_then(|i| r.values.get(i)))
+        .filter_map(|v| match v {
+            Value::BigInt(n) => Some(*n),
+            Value::Int(n)    => Some(*n as i128),
+            _ => None,
+        })
+        .collect();
+
+    match func {
+        AggFn::Count => Value::BigInt(rows.len() as i128),
+        AggFn::Sum   => Value::BigInt(nums.iter().sum()),
+        AggFn::Min   => Value::BigInt(nums.iter().copied().min().unwrap_or(0)),
+        AggFn::Max   => Value::BigInt(nums.iter().copied().max().unwrap_or(0)),
+        AggFn::Avg   => {
+            if nums.is_empty() { Value::Null }
+            else { Value::BigInt(nums.iter().sum::<i128>() / nums.len() as i128) }
         }
     }
 }
+
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 #[cfg(test)]
@@ -600,33 +640,30 @@ mod tests {
             assert_eq!(current, proof.root, "Merkle proof path must resolve to root");
         }
     }
-}
 
+    #[test]
+    fn read_executor_handles_scan_entries() {
+        let (_dir, mut ledger) = open_ledger();
+        setup_accounts(&mut ledger);
+        run(&mut ledger,
+            "INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain) \
+             VALUES ('Tx', 'CASH', 'REV', 100, 'USD', 'test')");
+        // ReadExecutor should work independently with &LedgerStore
+        let stmt = parse_one("SELECT * FROM ledger").unwrap();
+        let plan = LogicalPlanBuilder::plan(stmt).unwrap();
+        let result = ReadExecutor::new(&ledger).execute(plan).unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
 
-// ── Aggregate helpers (free functions) ───────────────────────────────────────
-
-/// Compute a single aggregate function over a group of rows.
-fn compute_aggregate(func: AggFn, col_idx: Option<usize>, rows: &[&Row]) -> Value {
-    let nums: Vec<i128> = rows.iter()
-        .filter_map(|r| col_idx.and_then(|i| r.values.get(i)))
-        .filter_map(|v| match v {
-            Value::BigInt(n) => Some(*n),
-            Value::Int(n)    => Some(*n as i128),
-            _                => None,
-        })
-        .collect();
-
-    match func {
-        AggFn::Count => Value::BigInt(rows.len() as i128),
-        AggFn::Sum   => Value::BigInt(nums.iter().sum()),
-        AggFn::Min   => Value::BigInt(nums.iter().copied().min().unwrap_or(0)),
-        AggFn::Max   => Value::BigInt(nums.iter().copied().max().unwrap_or(0)),
-        AggFn::Avg   => {
-            if nums.is_empty() {
-                Value::Null
-            } else {
-                Value::BigInt(nums.iter().sum::<i128>() / nums.len() as i128)
-            }
-        }
+    #[test]
+    fn read_executor_rejects_write_plans() {
+        let (_dir, ledger) = open_ledger();
+        let stmt = parse_one(
+            "INSERT INTO accounts (code, name, account_type, currency, domain) \
+             VALUES ('A', 'A', 'asset', 'USD', 'test')"
+        ).unwrap();
+        let plan = LogicalPlanBuilder::plan(stmt).unwrap();
+        let result = ReadExecutor::new(&ledger).execute(plan);
+        assert!(result.is_err());
     }
 }

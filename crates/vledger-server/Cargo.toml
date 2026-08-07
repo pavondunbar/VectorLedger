@@ -18,6 +18,7 @@ vledger-secrets = { workspace = true }
 vledger-crypto  = { workspace = true }
 vledger-ledger  = { workspace = true }
 vledger-sql     = { workspace = true }
+vledger-wal     = { workspace = true }
 tokio           = { workspace = true }
 tokio-util      = { workspace = true }
 rustls          = { workspace = true }

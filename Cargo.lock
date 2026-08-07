@@ -2267,6 +2267,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vledger-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "hex",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "vledger-compliance"
 version = "0.1.0"
 dependencies = [
@@ -2505,6 +2519,7 @@ dependencies = [
  "vledger-ledger",
  "vledger-secrets",
  "vledger-sql",
+ "vledger-wal",
 ]
 
 [[package]]
@@ -2554,6 +2569,8 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
  "vledger-crypto",

@@ -1,6 +1,7 @@
 //! Server configuration.
 
 use serde::{Deserialize, Serialize};
+use vledger_wal::WalSyncMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -17,35 +18,37 @@ pub struct ServerConfig {
     /// Attach Merkle proofs to every SELECT response.
     pub attach_proofs: bool,
     /// Whether to require authentication on every connection.
-    ///
-    /// **Default: `true`.  This field should always remain `true` in
-    /// production.**
-    ///
-    /// Setting this to `false` has *no effect* unless the crate is compiled
-    /// with `--features dev-no-auth` (Task #5).  In a production binary the
-    /// bypass path is compiled out entirely — authentication is always
-    /// enforced regardless of this field's value.
     pub require_auth: bool,
     /// Path to the catalog directory (for users.json and server secret).
     pub catalog_dir: Option<String>,
     /// Path to CA certificate PEM for mutual TLS client authentication.
-    /// When set, every client must present a certificate signed by this CA.
-    /// `None` → mTLS disabled (one-way TLS only).
     pub mtls_ca_cert: Option<String>,
+    /// WAL sync mode — controls when fsync is called.
+    ///
+    /// - `per_record`   — fsync after every record (safest, slowest)
+    /// - `group_commit` — background flush every `group_commit_delay_ms` ms (default, recommended)
+    /// - `no_sync`      — never fsync (dev/test only, never use in production)
+    pub wal_sync_mode: WalSyncMode,
+    /// Flush interval for group-commit mode (milliseconds).
+    /// Lower values reduce the data-loss window; higher values increase TPS.
+    /// Default: 2 ms.  Only used when `wal_sync_mode = group_commit`.
+    pub group_commit_delay_ms: u64,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind_addr:       "127.0.0.1:5433".into(),
-            max_connections: 128,
-            tls_cert_path:   None,
-            tls_key_path:    None,
-            tls_hostname:    "localhost".into(),
-            attach_proofs:   true,
-            require_auth:    true,
-            catalog_dir:     None,
-            mtls_ca_cert:    None,
+            bind_addr:              "127.0.0.1:5433".into(),
+            max_connections:        128,
+            tls_cert_path:          None,
+            tls_key_path:           None,
+            tls_hostname:           "localhost".into(),
+            attach_proofs:          false,
+            require_auth:           true,
+            catalog_dir:            None,
+            mtls_ca_cert:           None,
+            wal_sync_mode:          WalSyncMode::GroupCommit,
+            group_commit_delay_ms:  2,
         }
     }
 }

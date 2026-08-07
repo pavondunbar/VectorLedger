@@ -34,14 +34,14 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use vledger_ledger::LedgerStore;
-use vledger_sql::{executor::Executor, parser::parse_one, planner::LogicalPlanBuilder};
+use vledger_sql::{executor::{Executor, ReadExecutor}, parser::parse_one, planner::{LogicalPlan, LogicalPlanBuilder}};
 
 use crate::auth::{check_plan_privilege, Session, UserStore};
 use crate::config::ServerConfig;
@@ -66,7 +66,7 @@ const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 /// Handle a single TLS connection until the client disconnects or `shutdown` fires.
 pub async fn handle_connection(
     stream:     TlsStream<TcpStream>,
-    ledger:     Arc<Mutex<LedgerStore>>,
+    ledger:     Arc<RwLock<LedgerStore>>,
     config:     Arc<ServerConfig>,
     user_store: Arc<UserStore>,
     peer_addr:  std::net::SocketAddr,
@@ -270,7 +270,7 @@ pub async fn handle_connection(
 async fn execute_sql(
     sql:        &str,
     with_proof: bool,
-    ledger:     &Arc<Mutex<LedgerStore>>,
+    ledger:     &Arc<RwLock<LedgerStore>>,
     config:     &Arc<ServerConfig>,
     session:    &Session,
 ) -> Response {
@@ -283,22 +283,44 @@ async fn execute_sql(
         Err(e) => return Response::err(format!("Plan error: {e}")),
     };
 
-    // Fix #7: privilege check on the resolved LogicalPlan variant.
     if let Err(e) = check_plan_privilege(session, &plan) {
         return Response::err(format!("Permission denied: {e}"));
     }
 
-    let mut guard  = ledger.lock().await;
-    let attach     = config.attach_proofs || with_proof;
-    let result = if attach {
-        Executor::with_proofs(&mut *guard).execute(plan)
+    let attach = config.attach_proofs || with_proof;
+
+    // Write plans take an exclusive write lock.
+    // Read plans take a shared read lock — multiple concurrent SELECTs
+    // proceed without blocking each other.
+    let is_write = matches!(
+        plan,
+        LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_)
+    );
+
+    if is_write {
+        let mut guard = ledger.write().await;
+        let result = if attach {
+            Executor::with_proofs(&mut *guard).execute(plan)
+        } else {
+            Executor::new(&mut *guard).execute(plan)
+        };
+        drop(guard);
+        match result {
+            Ok(qr) => Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message),
+            Err(e) => Response::err(e.to_string()),
+        }
     } else {
-        Executor::new(&mut *guard).execute(plan)
-    };
-    drop(guard);
-    match result {
-        Ok(qr) => Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message),
-        Err(e) => Response::err(e.to_string()),
+        let guard = ledger.read().await;
+        let result = if attach {
+            ReadExecutor::with_proofs(&*guard).execute(plan)
+        } else {
+            ReadExecutor::new(&*guard).execute(plan)
+        };
+        drop(guard);
+        match result {
+            Ok(qr) => Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message),
+            Err(e) => Response::err(e.to_string()),
+        }
     }
 }
 

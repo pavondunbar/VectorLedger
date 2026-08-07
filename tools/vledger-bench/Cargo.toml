@@ -1,0 +1,22 @@
+[package]
+name        = "vledger-bench"
+description = "TPS benchmark tool for VectorLedger"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[[bin]]
+name = "vledger-bench"
+path = "src/main.rs"
+
+[dependencies]
+tokio          = { workspace = true }
+serde_json     = { workspace = true }
+anyhow         = { workspace = true }
+clap           = { workspace = true }
+tokio-rustls   = { workspace = true }
+rustls         = { workspace = true }
+hex            = { workspace = true }
+chrono         = { workspace = true }

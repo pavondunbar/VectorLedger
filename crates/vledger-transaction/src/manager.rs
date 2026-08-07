@@ -218,4 +218,10 @@ impl TransactionManager {
         let seq = self.wal.checkpoint(0)?;
         Ok(seq)
     }
+
+    /// Return the WAL's `FlushState` handle (for the group-commit flusher).
+    /// Returns `None` if the WAL is not in `GroupCommit` mode.
+    pub fn wal_flush_state(&self) -> Option<std::sync::Arc<vledger_wal::FlushState>> {
+        self.wal.flush_state.clone()
+    }
 }

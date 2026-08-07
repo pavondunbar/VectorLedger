@@ -55,7 +55,7 @@ pub mod recovery;
 
 pub use error::WalError;
 pub use record::{WalRecord, RecordType};
-pub use writer::WalWriter;
+pub use writer::{WalWriter, WalSyncMode, FlushState, spawn_group_commit_flusher};
 pub use reader::WalReader;
 pub use recovery::recover;
 
