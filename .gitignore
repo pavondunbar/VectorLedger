@@ -1,14 +1,40 @@
 # Rust build artifacts
 /target/
 
-# VectorGuard Labs license signing private key — NEVER commit this
+# VectorGuard Labs — internal tools: license key generator and license server
+# These are never distributed to customers. Keep in a separate private repo.
+/tools/vledger-license-gen/
+/tools/vledger-license-server/
+
+# VectorGuard Labs license signing keys — NEVER commit
 /.vgl-keys/
 license_signing_key.hex
+*.hex
 
-# Local data directories
+# Local database data directories — contain secrets, WAL, user accounts
 /vledger-data/
 /vledger-data-*/
+/vgdb-data/
+/vgdb-data-*/
+*.lockfile
+*.wal
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
 
 # Environment / secrets
 .env
 *.env
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

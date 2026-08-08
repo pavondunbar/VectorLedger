@@ -1,2 +1,0 @@
-In production, the master key is stored in an HSM (PKCS#11 or AWS CloudHSM).
-This file is a placeholder only.  Delete it before deploying to production.
