@@ -1,0 +1,58 @@
+[package]
+name        = "vledger-license-server"
+description = "VectorGuard Labs license issuance server — Stripe webhook integration and customer license delivery"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[[bin]]
+name = "vledger-license-server"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio          = { workspace = true }
+
+# HTTP server
+axum           = { workspace = true }
+tower          = { workspace = true }
+tower-http     = { workspace = true }
+
+# Serialization
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+
+# Crypto — license signing
+ed25519-dalek  = { workspace = true }
+hex            = { workspace = true }
+hmac           = { workspace = true }
+sha2           = { workspace = true }
+rand           = { workspace = true }
+
+# Stripe HMAC-SHA256 webhook verification
+hmac-sha256    = { workspace = true }
+
+# Base64 for download tokens
+base64         = { workspace = true }
+
+# SQLite
+rusqlite       = { workspace = true }
+
+# HTTP client — Resend email API
+reqwest        = { workspace = true }
+
+# Time
+chrono         = { workspace = true }
+
+# UUID
+uuid           = { workspace = true }
+
+# Error handling
+thiserror      = { workspace = true }
+anyhow         = { workspace = true }
+
+# Logging
+tracing        = { workspace = true }
+tracing-subscriber = { workspace = true }

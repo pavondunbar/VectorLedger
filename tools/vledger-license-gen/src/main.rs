@@ -16,9 +16,16 @@
 //!   --private-key ./vgl-license-keys/license_signing_key.hex \
 //!   --licensee "Acme Corp" \
 //!   --email ops@acme.com \
-//!   --tier growth \
+//!   --tier starter \
 //!   --expires 2027-08-06 \
 //!   --output ./acme-license.json
+//!
+//! # Tiers and default feature sets:
+//! #   free       — no gated features ($0/month)
+//! #   starter    — pgwire ($99/month)
+//! #   growth     — pgwire, replication, compliance_report,
+//! #                audit_export_unlimited ($399/month)
+//! #   enterprise — all features + hsm + multi_node ($999/month)
 //!
 //! # Verify a license file (without needing the private key)
 //! vledger-license-gen verify \
@@ -73,7 +80,7 @@ enum Commands {
         #[arg(long)]
         email: String,
 
-        /// License tier: free, growth, enterprise.
+        /// License tier: free, starter, growth, enterprise.
         #[arg(long)]
         tier: String,
 
@@ -169,9 +176,9 @@ fn cmd_issue(
     output:           PathBuf,
 ) -> Result<()> {
     // Validate tier.
-    let _valid_tiers = ["free", "growth", "enterprise"];
+    let _valid_tiers = ["free", "starter", "growth", "enterprise"];
     if !_valid_tiers.contains(&tier.as_str()) {
-        anyhow::bail!("Unknown tier '{}' — use: free, growth, enterprise", tier);
+        anyhow::bail!("Unknown tier '{}' — use: free, starter, growth, enterprise", tier);
     }
 
     // Validate expiry date.
@@ -312,6 +319,9 @@ fn cmd_verify(public_key_path: PathBuf, license_path: PathBuf) -> Result<()> {
 
 fn default_features_for_tier(tier: &str) -> Vec<String> {
     match tier {
+        "starter" => vec![
+            "pgwire".into(),
+        ],
         "growth" => vec![
             "pgwire".into(),
             "replication".into(),

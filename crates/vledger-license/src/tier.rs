@@ -55,9 +55,13 @@ impl std::str::FromStr for Feature {
 pub enum LicenseTier {
     /// Free tier — core ledger only, single node, 30-day audit export.
     Free,
-    /// Growth tier — pgwire, replication, full compliance reports.
+    /// Starter tier — adds PostgreSQL wire protocol, 90-day audit export.
+    /// Single node, no replication. $99/month.
+    Starter,
+    /// Growth tier — pgwire, replication, unlimited audit export, full
+    /// compliance reports. $399/month.
     Growth,
-    /// Enterprise tier — all features, multi-node, unlimited.
+    /// Enterprise tier — all features, hardware HSM, multi-node. $999/month.
     Enterprise,
 }
 
@@ -66,6 +70,7 @@ impl LicenseTier {
     pub fn display_name(&self) -> &'static str {
         match self {
             LicenseTier::Free       => "Free",
+            LicenseTier::Starter    => "Starter",
             LicenseTier::Growth     => "Growth",
             LicenseTier::Enterprise => "Enterprise",
         }
@@ -77,6 +82,12 @@ impl LicenseTier {
         match self {
             LicenseTier::Free => vec![
                 // Core features always available — no gating.
+            ],
+            LicenseTier::Starter => vec![
+                // PostgreSQL wire protocol — the key unlock for Starter.
+                // No replication, no compliance report, 90-day audit export
+                // (enforced at export time by checking the license tier).
+                Feature::PgWire,
             ],
             LicenseTier::Growth => vec![
                 Feature::PgWire,
@@ -107,9 +118,10 @@ impl std::str::FromStr for LicenseTier {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "free"       => Ok(LicenseTier::Free),
+            "starter"    => Ok(LicenseTier::Starter),
             "growth"     => Ok(LicenseTier::Growth),
             "enterprise" => Ok(LicenseTier::Enterprise),
-            other => Err(format!("unknown tier '{other}' — use: free, growth, enterprise")),
+            other => Err(format!("unknown tier '{other}' — use: free, starter, growth, enterprise")),
         }
     }
 }

@@ -863,7 +863,7 @@ Show the active license tier, features, and expiry.
 vledger license --data-dir <PATH>
 ```
 
-Place a signed `license.json` in your data directory to unlock paid features. If no file is present, the engine runs in Free tier. See the [Licensing](#licensing) section for the full tier comparison and feature list.
+Place the signed `license.json` file provided by VectorGuard Labs into your data directory to unlock paid features. If no file is present, the engine runs in Free tier. See the [Licensing](#licensing) section for the full tier comparison, feature list, and pricing.
 
 ### `vledger user`
 
@@ -1068,19 +1068,36 @@ vledger init --key-source pyhsm --pyhsm-socket 127.0.0.1:7777
 
 VectorLedger uses a tiered license model. The binary enforces feature availability at startup by verifying a signed `license.json` file in your data directory. If no license file is present, the engine runs in **Free** tier mode.
 
-### Tiers
+Licenses are issued by VectorGuard Labs. After purchasing a subscription at [vectorguardlabs.com/pricing](https://vectorguardlabs.com/pricing), your `license.json` is generated automatically and delivered to the email address on your account.
 
-| Feature | Free | Growth | Enterprise |
-|---|---|---|---|
-| Core ledger + SQL REPL | ✓ | ✓ | ✓ |
-| Self-tests | ✓ | ✓ | ✓ |
-| Backup & restore | ✓ | ✓ | ✓ |
-| Compliance reports | ✓ | ✓ | ✓ |
-| PostgreSQL wire protocol (`--pgwire`) | ✗ | ✓ | ✓ |
-| WAL replication | ✗ | ✓ | ✓ |
-| HSM PKCS#11 integration | ✗ | ✗ | ✓ |
-| Unlimited audit log export | ✗ | ✓ | ✓ |
-| Multi-node deployment | ✗ | ✗ | ✓ |
+### Pricing
+
+| Tier | Price | Best for |
+|---|---|---|
+| **Free** | $0 / month | Development, evaluation, internal tools |
+| **Starter** | $99 / month | Early-stage teams that need PostgreSQL client compatibility |
+| **Growth** | $399 / month | Production fintechs and SaaS companies under SOC 2 or PCI-DSS |
+| **Enterprise** | $999 / month | Banks, payment processors, PCI-DSS Level 1, hardware HSM requirements |
+
+Annual billing available on all paid tiers — pay for 10 months, get 12.
+Contact [sales@vectorguardlabs.com](mailto:sales@vectorguardlabs.com) for multi-instance or custom pricing.
+
+### What each tier includes
+
+| Feature | Free | Starter | Growth | Enterprise |
+|---|---|---|---|---|
+| Core ledger + SQL REPL | ✓ | ✓ | ✓ | ✓ |
+| AES-256-GCM encryption at rest | ✓ | ✓ | ✓ | ✓ |
+| BLAKE3 hash chain + Merkle proofs | ✓ | ✓ | ✓ | ✓ |
+| Four-eyes dual-control workflow | ✓ | ✓ | ✓ | ✓ |
+| WORM audit log + chain verification | ✓ | ✓ | ✓ | ✓ |
+| Backup & restore | ✓ | ✓ | ✓ | ✓ |
+| Audit log export (date range) | 30 days | 90 days | Unlimited | Unlimited |
+| PostgreSQL wire protocol (`--pgwire`) | ✗ | ✓ | ✓ | ✓ |
+| WAL replication (hot standby) | ✗ | ✗ | ✓ | ✓ |
+| Compliance reports (SOC 2 / PCI-DSS) | ✗ | ✗ | ✓ | ✓ |
+| Hardware HSM PKCS#11 integration | ✗ | ✗ | ✗ | ✓ |
+| Multi-node deployment | ✗ | ✗ | ✗ | ✓ |
 
 ### Installing a license
 
@@ -1098,7 +1115,7 @@ Check the active license at any time:
 vledger license --data-dir ./vledger-data
 ```
 
-Example output:
+Example output (Growth tier):
 
 ```
 ── VectorLedger License ────────────────────────
@@ -1118,11 +1135,18 @@ Example output:
     ✗ multi_node
 ```
 
-### Attempting to use a gated feature without a license
+### Attempting to use a gated feature without entitlement
 
 ```
 $ vledger start --data-dir ./vledger-data --pgwire
 Error: Feature 'pgwire' is not available on your Free license.
+Upgrade at https://vectorguardlabs.com/pricing
+
+$ vledger start --data-dir ./vledger-data --pgwire   # on Starter
+✓ pgwire enabled
+
+$ vledger start --data-dir ./vledger-data            # replication on Starter
+Error: Feature 'replication' is not available on your Starter license.
 Upgrade at https://vectorguardlabs.com/pricing
 ```
 
@@ -1144,7 +1168,7 @@ Before putting VectorLedger in front of production traffic:
 - [ ] Volume encryption enabled on the disk hosting `vledger-data/`
 - [ ] Replace the self-signed TLS certificate with a CA-signed one — place it at `keys/server.crt` and `keys/server.key`, then start with `--tls-cert-path` and `--tls-key-path`
 - [ ] Configure replication with a secondary node (`replication.json`) or document a backup-based HA strategy
-- [ ] Install a valid `license.json` in the data directory (`vledger license` to confirm tier and expiry)
+- [ ] Install a valid `license.json` for your paid tier — Free tier does not include replication or compliance reports (`vledger license --data-dir ./vledger-data` to confirm tier and expiry)
 - [ ] Test a full backup and restore drill: `vledger backup` → `vledger restore` → `vledger verify`
 - [ ] Schedule regular `vledger backup` runs (cron or your orchestrator)
 - [ ] Schedule regular `vledger verify` runs (recommended: after each backup)

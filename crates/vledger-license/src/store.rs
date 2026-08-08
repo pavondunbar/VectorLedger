@@ -32,7 +32,7 @@ pub struct LicenseFile {
     pub licensee:   String,
     /// Contact email for the license.
     pub email:      String,
-    /// License tier: free, growth, enterprise.
+    /// License tier: free, starter, growth, enterprise.
     pub tier:       String,
     /// ISO 8601 date when the license was issued (YYYY-MM-DD).
     pub issued_at:  String,

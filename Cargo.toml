@@ -20,6 +20,7 @@ members = [
     "crates/vledger-license",
     "crates/vledger",
     "tools/vledger-license-gen",
+    "tools/vledger-license-server",
     "tools/vledger-bench",
 ]
 
@@ -110,6 +111,20 @@ windows-sys    = { version = "0.59.0", features = [
     "Win32_System_Console",
     "Win32_System_IO",
 ] }
+
+# HTTP server
+axum           = { version = "0.7.9",  features = ["macros"] }
+tower          = { version = "0.5.2" }
+tower-http     = { version = "0.6.4",  features = ["trace", "cors"] }
+
+# SQLite (via rusqlite — pure Rust bindings, bundled libsqlite3)
+rusqlite       = { version = "0.31.0", features = ["bundled"] }
+
+# Stripe webhook / HMAC-SHA256 verification
+hmac-sha256    = { version = "1.1.7" }
+
+# One-time token generation
+base64         = { version = "0.22.1" }
 
 # Internal crates
 vledger-crypto      = { path = "crates/vledger-crypto" }
