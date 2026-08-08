@@ -377,12 +377,11 @@ main() {
     bold ""
     bold "  VectorLedger ${version} is ready."
     bold ""
-    bold "  Quick start:"
-    printf "    export VectorLedger_MASTER_KEY=\"\$(openssl rand -hex 32)\"\n"
-    printf "    vledger init\n"
-    printf "    vledger start\n"
+    bold "  Quick start (requires PyHSM daemon running first):"
+    printf "    vledger init --key-source pyhsm\n"
+    printf "    vledger start --data-dir ./vledger-data\n"
     bold ""
-    bold "  Full documentation: https://github.com/${REPO}#readme"
+    bold "  Full setup guide: https://github.com/${REPO}#quick-start"
     bold ""
 }
 

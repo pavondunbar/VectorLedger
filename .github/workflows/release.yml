@@ -1,0 +1,178 @@
+# .github/workflows/release.yml
+#
+# Builds release binaries for all supported platforms and uploads them to
+# a GitHub Release whenever a version tag is pushed.
+#
+# Trigger:
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+# Produces per-release assets:
+#   vledger-v0.1.0-linux-x86_64.tar.gz
+#   vledger-v0.1.0-linux-aarch64.tar.gz
+#   vledger-v0.1.0-macos-x86_64.tar.gz
+#   vledger-v0.1.0-macos-aarch64.tar.gz
+#   vledger-v0.1.0-checksums.txt
+#
+# After this workflow completes, the install.sh one-liner works for all
+# supported platforms.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write   # required to create and upload release assets
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+
+  # ── Build matrix ───────────────────────────────────────────────────────────
+  build:
+    name: Build — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target:    x86_64-unknown-linux-gnu
+            os:        ubuntu-22.04
+            platform:  linux-x86_64
+            cross:     false
+
+          - target:    aarch64-unknown-linux-gnu
+            os:        ubuntu-22.04
+            platform:  linux-aarch64
+            cross:     true        # use cross for Linux ARM64
+
+          - target:    x86_64-apple-darwin
+            os:        macos-13    # Intel runner
+            platform:  macos-x86_64
+            cross:     false
+
+          - target:    aarch64-apple-darwin
+            os:        macos-14    # Apple Silicon runner
+            platform:  macos-aarch64
+            cross:     false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cache compiled dependencies between runs — dramatically speeds up
+      # subsequent releases when only vledger itself changed.
+      - name: Cache cargo registry and build artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # cross is a drop-in Cargo wrapper that uses Docker to cross-compile
+      # for targets that don't run on the host machine (e.g. ARM64 on x86).
+      - name: Install cross (ARM64 Linux only)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # Build the vledger binary in release mode.
+      # panic = "abort" and strip = true are already set in the workspace
+      # Cargo.toml [profile.release] section, so the binary is small and
+      # doesn't unwind on panic.
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: |
+          cargo build --release --package vledger --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: |
+          cross build --release --package vledger --target ${{ matrix.target }}
+
+      # Strip debug symbols on Linux to reduce binary size.
+      # macOS uses the system strip which is available on all runners.
+      - name: Strip binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          strip target/${{ matrix.target }}/release/vledger || true
+
+      - name: Strip binary (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          strip target/${{ matrix.target }}/release/vledger || true
+
+      # Package into a tar.gz archive.
+      # The archive contains only the vledger binary at the root so
+      # install.sh can find it with: find "$tmpdir" -type f -name "vledger"
+      - name: Package archive
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          PLATFORM="${{ matrix.platform }}"
+          ARCHIVE="vledger-${VERSION}-${PLATFORM}.tar.gz"
+
+          cp target/${{ matrix.target }}/release/vledger ./vledger
+          tar -czf "${ARCHIVE}" vledger
+          rm -f vledger
+
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      # Upload the archive as an artefact so the checksum job can collect
+      # all four archives and produce one checksums.txt.
+      - name: Upload archive artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+  # ── Checksums + GitHub Release ─────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Download all four platform archives into the current directory.
+      - name: Download all build artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./dist
+          merge-multiple: true
+
+      # Produce a single checksums.txt listing every archive.
+      # Format matches what install.sh expects:
+      #   <sha256>  <filename>
+      - name: Generate checksums.txt
+        working-directory: ./dist
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          CHECKSUM_FILE="vledger-${VERSION}-checksums.txt"
+          sha256sum vledger-*.tar.gz > "${CHECKSUM_FILE}"
+          echo "Generated checksums:"
+          cat "${CHECKSUM_FILE}"
+
+      # Create (or update) the GitHub Release and upload all assets.
+      # The release body is the tag's annotation message if the tag was
+      # annotated; otherwise a placeholder.
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/vledger-*.tar.gz
+            dist/vledger-*-checksums.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
