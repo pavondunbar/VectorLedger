@@ -19,8 +19,6 @@ members = [
     "crates/vledger-secrets",
     "crates/vledger-license",
     "crates/vledger",
-    "tools/vledger-license-gen",
-    "tools/vledger-license-server",
     "tools/vledger-bench",
 ]
 

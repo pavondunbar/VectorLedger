@@ -98,26 +98,54 @@ resolve_version() {
     fi
 
     info "Fetching latest release version from GitHub..."
+
+    local raw=""
     if command -v curl >/dev/null 2>&1; then
-        version=$(curl --proto '=https' --tlsv1.2 -sSf \
+        raw=$(curl --proto '=https' --tlsv1.2 -sSf \
+            --max-time 10 \
             -H "Accept: application/vnd.github+json" \
-            "${RELEASES_API}" \
-            | grep '"tag_name"' \
-            | head -1 \
-            | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+            "${RELEASES_API}" 2>/dev/null || true)
     elif command -v wget >/dev/null 2>&1; then
-        version=$(wget -qO- \
+        raw=$(wget -qO- --timeout=10 \
             --header "Accept: application/vnd.github+json" \
-            "${RELEASES_API}" \
-            | grep '"tag_name"' \
-            | head -1 \
-            | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+            "${RELEASES_API}" 2>/dev/null || true)
     else
         die "Neither curl nor wget is available. Please install one and try again."
     fi
 
+    # Check for API errors (rate limit, 404, etc.)
+    if echo "$raw" | grep -q '"message"'; then
+        local api_msg
+        api_msg=$(echo "$raw" | grep '"message"' | head -1 | sed 's/.*"message": *"\([^"]*\)".*/\1/')
+        warn "GitHub API returned an error: ${api_msg}"
+        die "Could not determine the latest release version.
+
+  This usually means:
+    1. The GitHub Actions release workflow is still running (wait ~10 minutes
+       after pushing a tag, then try again), or
+    2. No GitHub Release has been published yet for this repository.
+
+  Fix: set VLEDGER_VERSION explicitly:
+    curl --proto '=https' --tlsv1.2 -sSf \\
+      https://raw.githubusercontent.com/${REPO}/main/install.sh \\
+      | VLEDGER_VERSION=v1.0.0 bash"
+    fi
+
+    version=$(echo "$raw" \
+        | grep '"tag_name"' \
+        | head -1 \
+        | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+
     if [ -z "$version" ]; then
-        die "Could not determine the latest release version. Check your internet connection or set VLEDGER_VERSION manually."
+        die "Could not determine the latest release version.
+
+  This usually means the GitHub Actions release workflow has not finished yet.
+  Wait a few minutes after pushing a version tag, then retry.
+
+  Or set the version explicitly:
+    curl --proto '=https' --tlsv1.2 -sSf \\
+      https://raw.githubusercontent.com/${REPO}/main/install.sh \\
+      | VLEDGER_VERSION=v1.0.0 bash"
     fi
 
     echo "$version"
@@ -264,6 +292,8 @@ build_from_source() {
     rust_version=$(rustc --version 2>/dev/null | awk '{print $2}')
     info "Rust version: ${rust_version}"
 
+    # Initialise tmpdir immediately so the EXIT trap can always clean it up,
+    # even if a subsequent command exits early.
     local tmpdir
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' EXIT
@@ -274,7 +304,11 @@ build_from_source() {
         2>&1 | tail -2
 
     info "Building release binary (this may take a few minutes)..."
-    cargo build --release --manifest-path "${tmpdir}/vectorledger/Cargo.toml" \
+    # Build only the vledger binary package — not the entire workspace.
+    # The workspace contains internal-only tools that are not present in
+    # customer-facing releases.
+    cargo build --release \
+        --manifest-path "${tmpdir}/vectorledger/Cargo.toml" \
         --package vledger
 
     install_binary "${tmpdir}/vectorledger/target/release/${BINARY}" "$install_dir"
@@ -327,6 +361,8 @@ main() {
     local checksum_url="${RELEASES_DOWNLOAD}/${version}/${checksum_name}"
 
     # ── Download to a temp directory ─────────────────────────────────────
+    # Initialise tmpdir before anything else so the EXIT trap always fires
+    # cleanly even if a download or extraction step exits early.
     local tmpdir
     tmpdir=$(mktemp -d)
     # Always clean up on exit
