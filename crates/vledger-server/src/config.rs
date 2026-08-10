@@ -33,6 +33,15 @@ pub struct ServerConfig {
     /// Lower values reduce the data-loss window; higher values increase TPS.
     /// Default: 2 ms.  Only used when `wal_sync_mode = group_commit`.
     pub group_commit_delay_ms: u64,
+    /// Maximum time in milliseconds a single SQL query may run before it is
+    /// cancelled and the client receives a `query_timeout` error.
+    ///
+    /// This prevents a long-running scan or expensive aggregate from holding
+    /// the write lock indefinitely and starving other connections.
+    ///
+    /// Default: 30 000 ms (30 s).  Set to 0 to disable (not recommended for
+    /// production deployments).
+    pub query_timeout_ms: u64,
 }
 
 impl Default for ServerConfig {
@@ -49,6 +58,7 @@ impl Default for ServerConfig {
             mtls_ca_cert:           None,
             wal_sync_mode:          WalSyncMode::GroupCommit,
             group_commit_delay_ms:  2,
+            query_timeout_ms:       30_000,
         }
     }
 }

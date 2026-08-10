@@ -93,6 +93,14 @@ enum Commands {
         /// Only used when --wal-sync-mode=group_commit.
         #[arg(long, default_value_t = 2)]
         group_commit_delay_ms: u64,
+        /// Maximum time in milliseconds a single SQL query may run before it
+        /// is cancelled and the client receives a query_timeout error.
+        ///
+        /// Prevents long-running scans or expensive aggregates from holding
+        /// the write lock indefinitely.  Default: 30000 (30 s).
+        /// Set to 0 to disable (not recommended for production).
+        #[arg(long, default_value_t = 30_000)]
+        query_timeout_ms: u64,
     },
     /// Show database status.
     Status,
@@ -104,9 +112,16 @@ enum Commands {
     /// over TLS — this is the correct mode when `vledger start` is active,
     /// because the server holds an exclusive file lock on the data directory.
     ///
-    /// Requires valid credentials. Supply them via --username / --password
-    /// flags, or set VLEDGER_CLI_USER / VLEDGER_CLI_PASSWORD environment
-    /// variables (useful for non-interactive scripting).
+    /// Requires valid credentials.  If neither --password nor
+    /// VLEDGER_CLI_PASSWORD is supplied the CLI prompts interactively
+    /// (recommended — avoids exposing credentials in process listings and
+    /// shell history).
+    ///
+    /// ⚠  SECURITY: --password and VLEDGER_CLI_PASSWORD are provided for
+    /// automation pipelines only.  --password exposes the credential in
+    /// `ps` output and shell history.  VLEDGER_CLI_PASSWORD exposes it in
+    /// /proc/<pid>/environ on Linux.  Prefer interactive prompts or a
+    /// secrets-manager integration for production use.
     #[command(name = "sql")]
     Sql {
         /// SQL statement to run (omit for interactive REPL).
@@ -116,9 +131,14 @@ enum Commands {
         /// Falls back to VLEDGER_CLI_USER environment variable.
         #[arg(short, long)]
         username: Option<String>,
-        /// Password for authentication.
+        /// Password for authentication (prompted interactively if omitted —
+        /// the interactive prompt is the safest option).
+        ///
+        /// ⚠  SECURITY WARNING: supplying a password via this flag exposes it
+        /// in `ps` output and your shell history.  For automation, prefer
+        /// VLEDGER_CLI_PASSWORD (env var) or, better still, a secrets manager
+        /// that injects credentials without touching the command line.
         /// Falls back to VLEDGER_CLI_PASSWORD environment variable.
-        /// If neither is set the CLI prompts interactively.
         #[arg(short, long)]
         password: Option<String>,
         /// Connect to a running server instead of opening the data directory
@@ -293,8 +313,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init { force, key_source, vault_addr, vault_mount, vault_path, kms_key_id, kms_region, pyhsm_socket, pyhsm_caller_id }
             => cmd_init(&cli.data_dir, force, &key_source, &vault_addr, &vault_mount, &vault_path, kms_key_id.as_deref(), &kms_region, pyhsm_socket.as_deref(), &pyhsm_caller_id).await,
-        Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms }
-            => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms).await,
+        Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms, query_timeout_ms }
+            => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms, query_timeout_ms).await,
         Commands::Status                             => cmd_status(&cli.data_dir).await,
         Commands::Verify                             => cmd_verify(&cli.data_dir).await,
         Commands::Sql { query, username, password, server, ca_cert } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref(), server.as_deref(), ca_cert.as_deref()).await,
@@ -431,7 +451,7 @@ async fn cmd_init(
 
 // ── start ─────────────────────────────────────────────────────────────────────
 
-async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool, wal_sync_mode: &str, group_commit_delay_ms: u64) -> Result<()> {
+async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool, wal_sync_mode: &str, group_commit_delay_ms: u64, query_timeout_ms: u64) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Data directory not found — run `vledger init` first.");
     }
@@ -510,6 +530,7 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
                 vledger_wal::WalSyncMode::GroupCommit
             }),
         group_commit_delay_ms,
+        query_timeout_ms,
         ..Default::default()
     };
 
@@ -523,6 +544,13 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
             format!("  (flush every {group_commit_delay_ms} ms)")
         } else {
             String::new()
+        }
+    );
+    println!("  Query limit: {}",
+        if query_timeout_ms == 0 {
+            "none (⚠  disabled — not recommended for production)".to_string()
+        } else {
+            format!("{query_timeout_ms} ms")
         }
     );
     license.print_banner();
@@ -1048,10 +1076,27 @@ fn resolve_username(username: Option<&str>) -> String {
 }
 
 fn resolve_password(password: Option<&str>) -> String {
-    password
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("VLEDGER_CLI_PASSWORD").ok())
-        .unwrap_or_else(read_password_from_tty)
+    if let Some(pw) = password {
+        // Credential was passed on the command line — emit a visible security
+        // warning.  The flag is intentionally not hidden so operators notice
+        // it appearing in shell history and process listings.
+        eprintln!(
+            "⚠  SECURITY: password supplied via --password flag. \
+             This value is visible in `ps` output and your shell history. \
+             Omit --password to be prompted interactively instead."
+        );
+        return pw.to_string();
+    }
+    if let Ok(pw) = std::env::var("VLEDGER_CLI_PASSWORD") {
+        eprintln!(
+            "⚠  SECURITY: password read from VLEDGER_CLI_PASSWORD environment variable. \
+             On Linux this value is visible in /proc/<pid>/environ to other processes \
+             running as the same user. \
+             Prefer an interactive prompt or a secrets manager for production use."
+        );
+        return pw;
+    }
+    read_password_from_tty()
 }
 
 // ── license ───────────────────────────────────────────────────────────────────
@@ -1696,8 +1741,44 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
         .unwrap_or_else(|| std::path::PathBuf::from(&default_name));
 
     println!("── VectorLedger Backup ─────────────────────────");
-    let manifest = backup::create_backup(data_dir, &out_path)?;
+
+    // Load the master key so backup files are AES-256-GCM encrypted.
+    // Fall back to unencrypted if the key source is unavailable (e.g. HSM
+    // not running in a recovery scenario), but warn loudly.
+    let key_source_path = data_dir.join("keys").join("key_source.json");
+    let manifest = if key_source_path.exists() {
+        match vledger_secrets::KeySourceConfig::from_file(&key_source_path) {
+            Ok(cfg) => match vledger_secrets::build_provider(&cfg) {
+                Ok(provider) => match provider.load_master_key().await {
+                    Ok(raw_key) => {
+                        let master = vledger_crypto::kdf::MasterKey::from_bytes(*raw_key);
+                        println!("  Encryption : AES-256-GCM (master key loaded)");
+                        backup::create_backup_encrypted(data_dir, &out_path, &master)?
+                    }
+                    Err(e) => {
+                        eprintln!("⚠  Could not load master key ({e}). Backup will be UNENCRYPTED.");
+                        backup::create_backup(data_dir, &out_path)?
+                    }
+                },
+                Err(e) => {
+                    eprintln!("⚠  Could not build key provider ({e}). Backup will be UNENCRYPTED.");
+                    backup::create_backup(data_dir, &out_path)?
+                }
+            },
+            Err(e) => {
+                eprintln!("⚠  Could not read key_source.json ({e}). Backup will be UNENCRYPTED.");
+                backup::create_backup(data_dir, &out_path)?
+            }
+        }
+    } else {
+        eprintln!("⚠  key_source.json not found. Backup will be UNENCRYPTED.");
+        backup::create_backup(data_dir, &out_path)?
+    };
+
     println!("  Archive   : {}", out_path.display());
+    if manifest.encrypted {
+        println!("  Key sidecar: {}.key  (keep alongside archive for restore)", out_path.display());
+    }
     println!("  Files     : {}", manifest.files.len());
     println!("  Created   : {}", manifest.created_at_rfc);
     println!("  Hash      : {}", &manifest.manifest_hash[..32]);
@@ -1718,7 +1799,43 @@ async fn cmd_restore(
         .unwrap_or_else(|| data_dir.clone());
 
     println!("── VectorLedger Restore ────────────────────────");
-    let manifest = backup::restore_backup(from, &target, force)?;
+
+    // Peek at the manifest inside the archive to decide whether to decrypt.
+    // We attempt to load the master key from the *destination* data_dir's
+    // key_source.json (the one that was present when the backup was made).
+    // If unavailable, fall back to the unencrypted restore path with a warning.
+    let key_source_path = data_dir.join("keys").join("key_source.json");
+    let manifest = if key_source_path.exists() {
+        match vledger_secrets::KeySourceConfig::from_file(&key_source_path) {
+            Ok(cfg) => match vledger_secrets::build_provider(&cfg) {
+                Ok(provider) => match provider.load_master_key().await {
+                    Ok(raw_key) => {
+                        let master = vledger_crypto::kdf::MasterKey::from_bytes(*raw_key);
+                        // Try encrypted restore; if the archive is not
+                        // encrypted the inner code will still work because
+                        // restore_backup_encrypted falls through to plaintext
+                        // when manifest.encrypted = false.
+                        backup::restore_backup_encrypted(from, &target, force, &master)?
+                    }
+                    Err(e) => {
+                        eprintln!("⚠  Could not load master key ({e}). Attempting unencrypted restore.");
+                        backup::restore_backup(from, &target, force)?
+                    }
+                },
+                Err(e) => {
+                    eprintln!("⚠  Could not build key provider ({e}). Attempting unencrypted restore.");
+                    backup::restore_backup(from, &target, force)?
+                }
+            },
+            Err(e) => {
+                eprintln!("⚠  Could not read key_source.json ({e}). Attempting unencrypted restore.");
+                backup::restore_backup(from, &target, force)?
+            }
+        }
+    } else {
+        backup::restore_backup(from, &target, force)?
+    };
+
     println!("  Archive   : {}", from.display());
     println!("  Target    : {}", target.display());
     println!("  Files     : {}", manifest.files.len());

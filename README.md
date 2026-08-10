@@ -39,7 +39,8 @@ VectorLedger makes tampering **cryptographically detectable**:
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
 
 ### Write-Ahead Log (WAL)
-- Every write is **fsync'd** before returning `Ok` — no silent data loss on crash
+- **Per-record mode** fsyncs every WAL record before returning `Ok` — zero data loss on crash
+- **Group-commit mode** (default) flushes the WAL on a configurable background interval (default 2 ms); up to one flush window of writes may be lost on a hard crash
 - **CRC-32** integrity check on every WAL record plus a **BLAKE3** hash on every row payload — two independent integrity layers
 - **Crash recovery** replays committed transactions and discards uncommitted ones deterministically
 - **Torn write detection** — recovery stops at the point of corruption rather than applying partial records
@@ -142,11 +143,10 @@ WAL mode with a mixed read/write workload (10 concurrent clients,
 | p99 latency | **42 ms** |
 | Errors | 0 / 10,000 |
 
-These numbers represent a **conservative baseline on development
-hardware**. Production deployments on Linux with NVMe SSD are expected
-to deliver significantly higher throughput — fsync latency on NVMe
-(50–200 µs) is 10–50× faster than a laptop SSD, which is the primary
-bottleneck in the write path.
+These numbers represent a **conservative baseline on development hardware**.
+Production performance has not yet been independently characterized on server-class hardware.
+The primary bottleneck in the write path is fsync latency, which varies significantly
+between storage devices and operating systems.
 
 ### WAL sync modes
 

@@ -1,7 +1,8 @@
 # .github/workflows/ci.yml
 #
 # Runs on every push to main and every pull request.
-# Checks: format, clippy lints, full test suite, cargo audit.
+# Checks: format, clippy lints, full test suite, cargo audit,
+#         dependency review (PR-only), and secret scanning (gitleaks).
 
 name: CI
 
@@ -16,6 +17,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # ── Build, test, lint ───────────────────────────────────────────────────────
   test:
     name: Test — ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -48,8 +50,9 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # ── Known CVE audit (cargo-audit) ──────────────────────────────────────────
   audit:
-    name: Security audit
+    name: Security audit (cargo-audit)
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -59,7 +62,50 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version "0.21.2" --locked
 
       - name: Run audit
         run: cargo audit
+
+  # ── Dependency review (PR-only) ─────────────────────────────────────────────
+  # Flags newly introduced dependencies that have known vulnerabilities,
+  # non-permissive licences, or are on the OSS malicious-package block-list.
+  # Runs only on pull requests so it has a before/after diff to compare.
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          # Fail if any newly added dependency has a known vulnerability.
+          fail-on-severity: moderate
+          # Deny licences that are incompatible with BUSL-1.1 or proprietary use.
+          deny-licenses: GPL-2.0, GPL-3.0, LGPL-2.0, LGPL-2.1, LGPL-3.0, AGPL-3.0
+
+  # ── Secret scanning (gitleaks) ──────────────────────────────────────────────
+  # Scans every commit in the push/PR for accidentally committed secrets:
+  # API keys, private keys, tokens, connection strings, etc.
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        # Fetch full history so gitleaks can scan all commits in the push,
+        # not just the HEAD snapshot.
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is only required for private repos on the paid
+          # gitleaks plan.  Public repos and the default OSS rule-set are free.
+          # Uncomment and add the secret if this repo is private:
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}

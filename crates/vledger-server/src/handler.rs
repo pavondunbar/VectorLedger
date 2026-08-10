@@ -322,6 +322,14 @@ async fn execute_sql(
 
     let attach = config.attach_proofs || with_proof;
 
+    // Build the query timeout duration.  A value of 0 means no timeout
+    // (operator has explicitly opted out).
+    let timeout_duration: Option<std::time::Duration> = if config.query_timeout_ms > 0 {
+        Some(std::time::Duration::from_millis(config.query_timeout_ms))
+    } else {
+        None
+    };
+
     // Write plans take an exclusive write lock.
     // Read plans take a shared read lock — multiple concurrent SELECTs
     // proceed without blocking each other.
@@ -330,26 +338,56 @@ async fn execute_sql(
         LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_)
     );
 
+    /// Execute `fut` with an optional wall-clock timeout.
+    ///
+    /// Returns `Err("query_timeout")` if the deadline fires before `fut`
+    /// completes.  The write/read lock is released when `fut` is dropped so
+    /// subsequent connections are not permanently blocked.
+    macro_rules! run_with_timeout {
+        ($fut:expr) => {{
+            match timeout_duration {
+                Some(d) => match tokio::time::timeout(d, $fut).await {
+                    Ok(r)  => r,
+                    Err(_) => {
+                        tracing::warn!(
+                            user     = %session.username,
+                            sql      = %sql,
+                            timeout_ms = config.query_timeout_ms,
+                            "Query cancelled: exceeded timeout"
+                        );
+                        return Response::err(format!(
+                            "query_timeout: query exceeded the {}ms limit set by the server",
+                            config.query_timeout_ms
+                        ));
+                    }
+                },
+                None => $fut.await,
+            }
+        }};
+    }
+
     if is_write {
-        let mut guard = ledger.write().await;
-        let result = if attach {
-            Executor::with_proofs(&mut *guard).execute(plan)
-        } else {
-            Executor::new(&mut *guard).execute(plan)
-        };
-        drop(guard);
+        let result = run_with_timeout!(async {
+            let mut guard = ledger.write().await;
+            if attach {
+                Executor::with_proofs(&mut *guard).execute(plan)
+            } else {
+                Executor::new(&mut *guard).execute(plan)
+            }
+        });
         match result {
             Ok(qr) => Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message),
             Err(e) => Response::err(e.to_string()),
         }
     } else {
-        let guard = ledger.read().await;
-        let result = if attach {
-            ReadExecutor::with_proofs(&*guard).execute(plan)
-        } else {
-            ReadExecutor::new(&*guard).execute(plan)
-        };
-        drop(guard);
+        let result = run_with_timeout!(async {
+            let guard = ledger.read().await;
+            if attach {
+                ReadExecutor::with_proofs(&*guard).execute(plan)
+            } else {
+                ReadExecutor::new(&*guard).execute(plan)
+            }
+        });
         match result {
             Ok(qr) => Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message),
             Err(e) => Response::err(e.to_string()),

@@ -141,24 +141,88 @@ impl JournalEntry {
     }
 
     /// Compute the canonical bytes used for content hashing.
-    /// Stable and deterministic — all fields that identify the entry
-    /// semantically, excluding the hash fields themselves.
+    ///
+    /// ## Design
+    /// Every security-relevant field is included so that altering *any*
+    /// metadata invalidates `content_hash` and thereby the entire hash chain
+    /// from this entry forward.
+    ///
+    /// ## Encoding rules (prevent field-boundary collisions)
+    /// Variable-length fields (strings, optional values, repeated groups) are
+    /// always length-prefixed with a 4-byte little-endian `u32`.  Without this,
+    /// two different field combinations can produce identical byte sequences —
+    /// for example `["ab", "c"]` and `["a", "bc"]` would be indistinguishable
+    /// if concatenated without delimiters.
+    ///
+    /// Fixed-width fields (UUIDs, i64, i128, u8 booleans, timestamps) are
+    /// written raw with no prefix — their width is already unambiguous.
+    ///
+    /// The schema version byte is written first so that a future field addition
+    /// produces a hash that is distinct from all previous versions.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        // Use a deterministic serialization of the identity fields
-        let mut buf = Vec::new();
-        buf.extend_from_slice(self.id.as_bytes());
-        buf.extend_from_slice(&self.sequence.to_le_bytes());
-        buf.extend_from_slice(self.description.as_bytes());
-        buf.extend_from_slice(&self.effective_at.timestamp_nanos_opt().unwrap_or(0).to_le_bytes());
-        if let Some(ref ext) = self.external_ref {
-            buf.extend_from_slice(ext.as_bytes());
+        // Helper: write a length-prefixed byte slice.
+        fn write_bytes(buf: &mut Vec<u8>, data: &[u8]) {
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(data);
         }
+        // Helper: write an optional length-prefixed byte slice.
+        // Absence is encoded as length=0xFFFF_FFFF (sentinel) so that
+        // Some("") and None produce different byte sequences.
+        fn write_opt_bytes(buf: &mut Vec<u8>, data: Option<&[u8]>) {
+            match data {
+                Some(d) => write_bytes(buf, d),
+                None    => buf.extend_from_slice(&u32::MAX.to_le_bytes()),
+            }
+        }
+
+        let mut buf = Vec::with_capacity(256);
+
+        // ── Schema version — bump if the canonical format ever changes ────
+        buf.push(0x01u8);
+
+        // ── Fixed-width identity fields ───────────────────────────────────
+        buf.extend_from_slice(self.id.as_bytes());                              // 16 bytes
+        buf.extend_from_slice(&self.sequence.to_le_bytes());                    //  8 bytes
+        buf.push(self.status as u8);                                            //  1 byte
+        buf.extend_from_slice(
+            &self.effective_at.timestamp_nanos_opt().unwrap_or(0).to_le_bytes() //  8 bytes
+        );
+        buf.extend_from_slice(
+            &self.posted_at.timestamp_nanos_opt().unwrap_or(0).to_le_bytes()    //  8 bytes
+        );
+
+        // ── Variable-length identity fields (length-prefixed) ─────────────
+        write_bytes(&mut buf, self.description.as_bytes());
+        write_bytes(&mut buf, self.domain.as_bytes());
+        write_opt_bytes(&mut buf, self.external_ref.as_deref().map(str::as_bytes));
+        write_opt_bytes(&mut buf, self.idempotency_key.as_deref().map(str::as_bytes));
+
+        // ── Reversal relationships (fixed-width UUID or sentinel) ─────────
+        // 16 bytes each; absent → 16 zero bytes followed by a 0x00 presence flag,
+        // present → UUID bytes followed by a 0x01 presence flag.
+        match self.reverses_entry_id {
+            Some(id) => { buf.extend_from_slice(id.as_bytes()); buf.push(0x01); }
+            None     => { buf.extend_from_slice(&[0u8; 16]);    buf.push(0x00); }
+        }
+        match self.reversed_by_entry_id {
+            Some(id) => { buf.extend_from_slice(id.as_bytes()); buf.push(0x01); }
+            None     => { buf.extend_from_slice(&[0u8; 16]);    buf.push(0x00); }
+        }
+
+        // ── Approval metadata (length-prefixed) ───────────────────────────
+        write_opt_bytes(&mut buf, self.approved_by.as_deref().map(str::as_bytes));
+
+        // ── Journal lines (length-prefixed group count + per-line fields) ─
+        buf.extend_from_slice(&(self.lines.len() as u32).to_le_bytes());
         for line in &self.lines {
-            buf.extend_from_slice(line.account_id.as_bytes());
-            buf.extend_from_slice(&line.amount.as_i64().to_le_bytes());
-            buf.push(line.dr_cr as u8);
-            buf.extend_from_slice(line.currency_code.as_bytes());
+            buf.extend_from_slice(line.id.as_bytes());                          // 16 bytes
+            buf.extend_from_slice(line.account_id.as_bytes());                  // 16 bytes
+            buf.extend_from_slice(&line.amount.as_i64().to_le_bytes());         //  8 bytes
+            buf.push(line.dr_cr as u8);                                         //  1 byte
+            write_bytes(&mut buf, line.currency_code.as_bytes());
+            write_opt_bytes(&mut buf, line.memo.as_deref().map(str::as_bytes));
         }
+
         buf
     }
 
@@ -336,5 +400,51 @@ mod tests {
         // Tamper with description
         entry.description = "tampered".to_string();
         assert!(!entry.verify_hashes());
+    }
+
+    #[test]
+    fn tampered_domain_fails_hash_verify() {
+        let mut entry = make_balanced_entry();
+        entry.sequence = 1;
+        entry.finalize_hashes(&ZERO_HASH);
+        // domain is now in canonical_bytes — altering it must break the hash
+        entry.domain = "other-domain".to_string();
+        assert!(!entry.verify_hashes());
+    }
+
+    #[test]
+    fn tampered_status_fails_hash_verify() {
+        let mut entry = make_balanced_entry();
+        entry.sequence = 1;
+        entry.finalize_hashes(&ZERO_HASH);
+        // status is now in canonical_bytes — altering it must break the hash
+        entry.status = EntryStatus::Reversed;
+        assert!(!entry.verify_hashes());
+    }
+
+    #[test]
+    fn canonical_bytes_field_boundary_collision_resistance() {
+        // Two entries whose variable-length fields would collide without
+        // length prefixes must produce different canonical bytes.
+        let amt = Amount::new(10000).unwrap();
+        let acct = Uuid::new_v4();
+        let acct2 = Uuid::new_v4();
+
+        let mut e1 = JournalEntryBuilder::new("ab", "c-domain")
+            .debit(acct, amt, "USD").credit(acct2, amt, "USD").build();
+        e1.sequence = 1;
+
+        let mut e2 = JournalEntryBuilder::new("a", "bc-domain")
+            .debit(acct, amt, "USD").credit(acct2, amt, "USD").build();
+        e2.sequence = 1;
+        // Force identical timestamps so only the string fields differ
+        e2.effective_at = e1.effective_at;
+        e2.posted_at    = e1.posted_at;
+
+        assert_ne!(
+            e1.canonical_bytes(),
+            e2.canonical_bytes(),
+            "length-prefixed encoding must distinguish different field splits"
+        );
     }
 }

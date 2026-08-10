@@ -21,6 +21,22 @@
 //!   └─ update in-memory indexes
 //! ```
 //!
+//! ## Reversal design (append-only, atomic)
+//!
+//! Original entries are **never mutated**.  A reversal is represented by two
+//! new appended records written inside a **single WAL transaction**:
+//!
+//! 1. A `JournalEntry` with `status = Reversal` and `reverses_entry_id = original.id`.
+//! 2. A `ReversalEvent` linking `original_id → reversal_id`.
+//!
+//! The `Reversed` status of an original entry is **derived** from the
+//! `reversal_event_index` at query time — it is never stored by mutating the
+//! original row.  Because both records are committed atomically, there is no
+//! window in which one exists without the other.
+//!
+//! On restart, WAL replay rebuilds both the entry list and the reversal event
+//! index deterministically.
+//!
 //! On restart, `LedgerStore::open()` replays the WAL and rebuilds all
 //! in-memory state deterministically.
 
@@ -49,6 +65,12 @@ use crate::lockfile::DataDirLock;
 const TABLE_ACCOUNTS: u32 = 0;
 /// table_id=1 — journal entries
 const TABLE_ENTRIES: u32 = 1;
+/// table_id=2 — reversal relationship events (append-only, never updated)
+///
+/// Storing these as first-class WAL records ensures the link between an
+/// original entry and its reversal is durable and atomic with the reversal
+/// entry itself.  The original entry is never modified.
+const TABLE_REVERSAL_EVENTS: u32 = 2;
 
 // ── Serialization helpers ─────────────────────────────────────────────────────
 
@@ -61,6 +83,25 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, LedgerError
     bincode::serde::decode_from_slice(bytes, bincode::config::standard())
         .map(|(v, _)| v)
         .map_err(|e: bincode::error::DecodeError| LedgerError::Serialization(e.to_string()))
+}
+
+
+// ── ReversalEvent ─────────────────────────────────────────────────────────────
+
+/// An immutable, append-only record that binds an original entry to its
+/// reversal.  Written atomically alongside the reversal `JournalEntry` in a
+/// single WAL transaction — the original entry is **never modified**.
+///
+/// The `Reversed` status of an original entry is derived at query time by
+/// checking whether its `id` appears in `LedgerStore::reversal_event_index`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReversalEvent {
+    /// The entry that was reversed.
+    pub original_entry_id: Uuid,
+    /// The newly appended reversal entry.
+    pub reversal_entry_id: Uuid,
+    /// UTC timestamp when the reversal was posted.
+    pub reversed_at: chrono::DateTime<Utc>,
 }
 
 
@@ -85,6 +126,13 @@ pub struct LedgerStore {
     next_sequence: AtomicU64,
     last_chain_hash: Hash,
     idempotency_keys: std::collections::HashSet<String>,
+
+    // ── Reversal event index ──────────────────────────────────────────────
+    /// Maps original_entry_id → reversal_entry_id.
+    ///
+    /// Rebuilt from `TABLE_REVERSAL_EVENTS` during WAL replay.
+    /// Used to derive `EntryStatus::Reversed` without mutating original rows.
+    reversal_event_index: HashMap<Uuid, Uuid>,
 
     // ── Page cursors ──────────────────────────────────────────────────────
     next_account_page: u64,
@@ -129,6 +177,7 @@ impl LedgerStore {
             next_sequence: AtomicU64::new(1),
             last_chain_hash: ZERO_HASH,
             idempotency_keys: std::collections::HashSet::new(),
+            reversal_event_index: HashMap::new(),
             next_account_page: 0,
             next_entry_page: 0,
             _lock: Some(lock),
@@ -186,6 +235,13 @@ impl LedgerStore {
                             TABLE_ENTRIES => {
                                 let entry: JournalEntry = decode(&payload.row_data)?;
                                 self.apply_entry(entry);
+                            }
+                            TABLE_REVERSAL_EVENTS => {
+                                let event: ReversalEvent = decode(&payload.row_data)?;
+                                self.reversal_event_index.insert(
+                                    event.original_entry_id,
+                                    event.reversal_entry_id,
+                                );
                             }
                             _ => {}
                         }
@@ -269,6 +325,47 @@ impl LedgerStore {
         self.tx_manager.commit(tx_id)?;
 
         Ok((page_id, slot_id))
+    }
+
+    /// Write **two** rows from **two** different tables in a single atomic WAL
+    /// transaction.
+    ///
+    /// Used by `reverse_entry` to commit the reversal `JournalEntry` and the
+    /// `ReversalEvent` atomically — either both are durable or neither is.
+    fn persist_row_pair(
+        &mut self,
+        table_a:   u32,
+        data_a:    &[u8],
+        prev_a:    Option<vledger_crypto::Hash>,
+        table_b:   u32,
+        data_b:    &[u8],
+    ) -> Result<(), LedgerError> {
+        // Write both pages first.
+        let cursor_a = self.next_entry_page;
+        let (page_id_a, slot_id_a, next_a) =
+            self.write_to_page(table_a, data_a, cursor_a)?;
+        self.next_entry_page = next_a;
+
+        // Reversal events use the entry cursor as well (same page namespace
+        // is fine — table_id distinguishes them logically).
+        let cursor_b = self.next_entry_page;
+        let (page_id_b, slot_id_b, next_b) =
+            self.write_to_page(table_b, data_b, cursor_b)?;
+        self.next_entry_page = next_b;
+
+        // Single WAL transaction — both mutations committed together.
+        let tx_id = self.tx_manager.begin(Some("reversal".to_string()))?;
+        self.tx_manager.add_mutation(
+            tx_id, table_a, page_id_a, slot_id_a,
+            MutationKind::Insert, data_a.to_vec(), prev_a,
+        )?;
+        self.tx_manager.add_mutation(
+            tx_id, table_b, page_id_b, slot_id_b,
+            MutationKind::Insert, data_b.to_vec(), None,
+        )?;
+        self.tx_manager.commit(tx_id)?;
+
+        Ok(())
     }
 
     /// Write `row_data` into a fresh page for `table_id`.
@@ -433,8 +530,23 @@ impl LedgerStore {
     }
 
 
-    /// Reverse a posted entry. Creates a mirror entry that cancels it out.
-    /// The original entry's status is updated to `Reversed`.
+    /// Reverse a posted entry by appending a mirror entry and a `ReversalEvent`.
+    ///
+    /// ## Append-only guarantee
+    /// The original entry is **never modified**.  Two new records are written:
+    /// 1. A `JournalEntry` with `status = Reversal` (mirrors and cancels the
+    ///    original's financial effect).
+    /// 2. A `ReversalEvent` that links `original_id → reversal_id`.
+    ///
+    /// Both records are committed in a **single WAL transaction** — they are
+    /// either both durable or neither is.  There is no window in which the
+    /// reversal entry exists without its relationship event, or vice versa.
+    ///
+    /// ## Deriving `Reversed` status
+    /// Callers that need to know whether an entry has been reversed should
+    /// call `LedgerStore::is_reversed(entry_id)` — the status is derived from
+    /// the `reversal_event_index` built during WAL replay, not from a mutable
+    /// field on the original entry.
     pub fn reverse_entry(
         &mut self,
         entry_id: Uuid,
@@ -444,73 +556,115 @@ impl LedgerStore {
         let original_idx = self.entries.iter().position(|e| e.id == entry_id)
             .ok_or_else(|| LedgerError::EntryNotFound(entry_id.to_string()))?;
 
+        // Only Posted entries may be reversed.
         match self.entries[original_idx].status {
             EntryStatus::Posted => {}
             other => return Err(LedgerError::CannotReverse(entry_id.to_string(), other)),
         }
-        if self.entries[original_idx].reversed_by_entry_id.is_some() {
+        // Derive Reversed status from the event index (not a mutable field).
+        if self.reversal_event_index.contains_key(&entry_id) {
+            let reversal_id = self.reversal_event_index[&entry_id];
             return Err(LedgerError::AlreadyReversed(
                 entry_id.to_string(),
-                self.entries[original_idx].reversed_by_entry_id.unwrap().to_string(),
+                reversal_id.to_string(),
             ));
         }
 
-        // Build reversal lines by flipping Dr/Cr
-        let reversal_lines: Vec<JournalLine> = self.entries[original_idx].lines.iter().map(|line| {
+        // Build reversal lines by flipping Dr/Cr.
+        let reversal_lines: Vec<JournalLine> = self.entries[original_idx]
+            .lines.iter().map(|line| {
             JournalLine {
                 id: Uuid::new_v4(),
                 account_id: line.account_id,
                 currency_code: line.currency_code.clone(),
                 amount: line.amount,
-                dr_cr: match line.dr_cr { DrCr::Debit => DrCr::Credit, DrCr::Credit => DrCr::Debit },
+                dr_cr: match line.dr_cr {
+                    DrCr::Debit  => DrCr::Credit,
+                    DrCr::Credit => DrCr::Debit,
+                },
                 memo: Some(format!("Reversal of line {}", line.id)),
             }
         }).collect();
 
-        let domain_str = domain.into();
+        let domain_str  = domain.into();
+        let desc_str    = description.into();
         let mut reversal = JournalEntry {
-            id: Uuid::new_v4(),
-            sequence: 0,
-            status: EntryStatus::Reversal,
-            description: description.into(),
-            lines: reversal_lines,
-            effective_at: Utc::now(),
-            posted_at: Utc::now(),
-            external_ref: None,
-            idempotency_key: None,
-            reverses_entry_id: Some(entry_id),
+            id:                  Uuid::new_v4(),
+            sequence:            0,
+            status:              EntryStatus::Reversal,
+            description:         desc_str,
+            lines:               reversal_lines,
+            effective_at:        Utc::now(),
+            posted_at:           Utc::now(),
+            external_ref:        None,
+            idempotency_key:     None,
+            reverses_entry_id:   Some(entry_id),
             reversed_by_entry_id: None,
-            domain: domain_str,
-            content_hash: ZERO_HASH,
-            prev_hash: ZERO_HASH,
-            chain_hash: ZERO_HASH,
-            approved_by: None,
+            domain:              domain_str,
+            content_hash:        ZERO_HASH,
+            prev_hash:           ZERO_HASH,
+            chain_hash:          ZERO_HASH,
+            approved_by:         None,
         };
 
         let seq = self.next_sequence.fetch_add(1, Ordering::SeqCst);
-        reversal.sequence = seq;
+        reversal.sequence  = seq;
         reversal.posted_at = Utc::now();
         reversal.finalize_hashes(&self.last_chain_hash);
 
-        let bytes = encode(&reversal)?;
-        self.persist_row(TABLE_ENTRIES, &bytes, MutationKind::Insert, Some(reversal.prev_hash))?;
-
-        self.last_chain_hash = reversal.chain_hash;
         let reversal_id = reversal.id;
+        let event = ReversalEvent {
+            original_entry_id: entry_id,
+            reversal_entry_id: reversal_id,
+            reversed_at:       reversal.posted_at,
+        };
+
+        // Serialize both records before touching durable state.
+        let reversal_bytes = encode(&reversal)?;
+        let event_bytes    = encode(&event)?;
+        let prev_hash      = Some(reversal.prev_hash);
+
+        // Atomic: both records committed in a single WAL transaction.
+        self.persist_row_pair(
+            TABLE_ENTRIES,         &reversal_bytes, prev_hash,
+            TABLE_REVERSAL_EVENTS, &event_bytes,
+        )?;
+
+        // Update in-memory state — only after durable commit.
+        self.last_chain_hash = reversal.chain_hash;
+
+        // Register the reversal event index.
+        self.reversal_event_index.insert(entry_id, reversal_id);
+
+        // Index the reversal entry itself.
         let reversal_idx = self.entries.len();
         for line in &reversal.lines {
-            self.account_entry_index.entry(line.account_id).or_default().push(reversal_idx);
+            self.account_entry_index
+                .entry(line.account_id)
+                .or_default()
+                .push(reversal_idx);
         }
         self.entries.push(reversal);
 
-        // Persist updated original (mark reversed)
-        self.entries[original_idx].status = EntryStatus::Reversed;
-        self.entries[original_idx].reversed_by_entry_id = Some(reversal_id);
-        let orig_bytes = encode(&self.entries[original_idx])?;
-        self.persist_row(TABLE_ENTRIES, &orig_bytes, MutationKind::Update, None)?;
-
-        info!(original_entry = %entry_id, reversal_entry = %reversal_id, "Entry reversed");
+        info!(
+            original_entry = %entry_id,
+            reversal_entry = %reversal_id,
+            "Entry reversed (append-only, atomic)"
+        );
         Ok(&self.entries[reversal_idx])
+    }
+
+    /// Returns `true` if `entry_id` has been reversed.
+    ///
+    /// Status is derived from the immutable `reversal_event_index` — the
+    /// original entry row is never mutated.
+    pub fn is_reversed(&self, entry_id: &Uuid) -> bool {
+        self.reversal_event_index.contains_key(entry_id)
+    }
+
+    /// Returns the ID of the reversal entry for `entry_id`, if any.
+    pub fn reversed_by(&self, entry_id: &Uuid) -> Option<Uuid> {
+        self.reversal_event_index.get(entry_id).copied()
     }
 
 
@@ -532,8 +686,12 @@ impl LedgerStore {
         let mut credits: i128 = 0;
         for &idx in indices {
             let entry = &self.entries[idx];
+            // Include Posted entries (regardless of whether they have been
+            // reversed — the reversal entry offsets them financially).
+            // Include Reversal entries (they cancel the original).
+            // Exclude PendingApproval and Rejected entries.
             if !matches!(entry.status,
-                EntryStatus::Posted | EntryStatus::Reversal | EntryStatus::Reversed) {
+                EntryStatus::Posted | EntryStatus::Reversal) {
                 continue;
             }
             for line in &entry.lines {
@@ -708,6 +866,97 @@ mod tests {
         store.reverse_entry(eid, "Reversal", "test").unwrap();
         assert_eq!(store.balance(&cash), 0);
         assert_eq!(store.balance(&revenue), 0);
+    }
+
+    #[test]
+    fn reversal_is_append_only_original_not_mutated() {
+        let (_dir, mut store) = open_tmp();
+        let (cash, revenue) = add_accounts(&mut store);
+        let amt = Amount::new(10000).unwrap();
+        let e = JournalEntryBuilder::new("Original", "test")
+            .debit(cash, amt, "USD").credit(revenue, amt, "USD").build();
+        let posted = store.post_entry(e).unwrap();
+        let eid = posted.id;
+
+        // Capture the original entry's bytes BEFORE reversal.
+        let original_chain_hash_before = store.all_entries()[0].chain_hash;
+        let original_status_before     = store.all_entries()[0].status;
+
+        store.reverse_entry(eid, "Reversal", "test").unwrap();
+
+        // Original entry must be completely unchanged.
+        let original_after = store.all_entries().iter().find(|e| e.id == eid).unwrap();
+        assert_eq!(original_after.chain_hash, original_chain_hash_before,
+            "original entry chain_hash must not change after reversal");
+        assert_eq!(original_after.status, original_status_before,
+            "original entry status must not be mutated — use is_reversed() instead");
+
+        // Reversed status is derived from the event index, not a mutable field.
+        assert!(store.is_reversed(&eid),
+            "is_reversed() must return true after reversal");
+        assert!(store.reversed_by(&eid).is_some(),
+            "reversed_by() must return the reversal entry id");
+    }
+
+    #[test]
+    fn double_reversal_rejected() {
+        let (_dir, mut store) = open_tmp();
+        let (cash, revenue) = add_accounts(&mut store);
+        let amt = Amount::new(500).unwrap();
+        let e = JournalEntryBuilder::new("Sale", "test")
+            .debit(cash, amt, "USD").credit(revenue, amt, "USD").build();
+        let posted = store.post_entry(e).unwrap();
+        let eid = posted.id;
+        store.reverse_entry(eid, "Rev 1", "test").unwrap();
+        let result = store.reverse_entry(eid, "Rev 2", "test");
+        assert!(result.is_err(), "double reversal must be rejected");
+    }
+
+    #[test]
+    fn reversal_survives_wal_replay() {
+        let dir = TempDir::new().unwrap();
+        let data_path = dir.path();
+        std::fs::create_dir_all(data_path.join("wal")).unwrap();
+        std::fs::create_dir_all(data_path.join("pages")).unwrap();
+
+        let (original_id, reversal_id) = {
+            let mut store = LedgerStore::open(data_path).unwrap();
+            let cash = store.create_account(Account::new(
+                "CASH", "Cash", AccountType::Asset, "USD", "test")).unwrap();
+            let rev  = store.create_account(Account::new(
+                "REV",  "Revenue", AccountType::Income, "USD", "test")).unwrap();
+            let amt  = Amount::new(9900).unwrap();
+            let e    = JournalEntryBuilder::new("Sale", "test")
+                .debit(cash, amt, "USD").credit(rev, amt, "USD").build();
+            let posted  = store.post_entry(e).unwrap();
+            let eid     = posted.id;
+            let rev_entry = store.reverse_entry(eid, "Void sale", "test").unwrap();
+            let rid = rev_entry.id;
+            (eid, rid)
+        };
+
+        // Reopen — reversal_event_index must be rebuilt from WAL.
+        let store2 = LedgerStore::open(data_path).unwrap();
+        assert!(store2.is_reversed(&original_id),
+            "is_reversed must survive WAL replay");
+        assert_eq!(store2.reversed_by(&original_id), Some(reversal_id),
+            "reversed_by must return correct reversal id after replay");
+        // Balance should be zero.
+        let entries = store2.all_entries();
+        let cash_id = entries.iter()
+            .find(|e| e.reverses_entry_id == Some(original_id))
+            .map(|_| {
+                // Find cash account via the original debit line
+                entries.iter()
+                    .find(|e| e.id == original_id)
+                    .and_then(|e| e.lines.iter().find(|l| l.dr_cr == crate::entry::DrCr::Debit))
+                    .map(|l| l.account_id)
+            })
+            .flatten();
+        if let Some(cid) = cash_id {
+            assert_eq!(store2.balance(&cid), 0, "balance must be zero after reversal replay");
+        }
+        store2.verify_chain_integrity().unwrap();
     }
 
     #[test]
