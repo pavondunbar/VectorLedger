@@ -1,6 +1,6 @@
 # VectorLedger
 
-**A cryptographically verifiable financial database engine built for institutions that can't afford to trust their own database.**
+**A cryptographically verifiable database engine built for institutions that can't afford to trust their own database.**
 
 VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof that the returned data has not been modified since it was written. Corrections to past records are impossible — even by a DBA with full disk access.
 
