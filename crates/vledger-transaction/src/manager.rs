@@ -243,9 +243,55 @@ impl TransactionManager {
     }
 
     /// Issue a WAL checkpoint.
+    ///
+    /// This calls `fsync` and returns the current WAL sequence number but does
+    /// **not** embed a Merkle root or signature.  Prefer
+    /// `checkpoint_signed` when a `PageStore` root is available.
     pub fn checkpoint(&mut self) -> Result<u64, TxError> {
         let seq = self.wal.checkpoint(0)?;
         Ok(seq)
+    }
+
+    /// Issue a WAL checkpoint that embeds the page Merkle root and an optional
+    /// Ed25519 signature into the WAL record.
+    ///
+    /// The caller is responsible for computing `page_merkle_root` via
+    /// `PageStore::table_merkle_root`.  The signing key stored on this manager
+    /// is used automatically when present.
+    ///
+    /// Steps:
+    /// 1. `fsync` the WAL (all previously committed records are now durable).
+    /// 2. Append a `Checkpoint` WAL record containing:
+    ///    - `page_merkle_root` — passed in by the caller.
+    ///    - `last_committed_sequence` — the WAL sequence at fsync time.
+    ///    - `root_signature` — Ed25519 over `root || seq.to_le_bytes()` (when signed).
+    ///    - `signer_pubkey`  — public key of the signer.
+    pub fn checkpoint_signed(
+        &mut self,
+        page_merkle_root: [u8; 32],
+    ) -> Result<u64, TxError> {
+        let seq = self.wal.checkpoint_with_merkle_root(
+            page_merkle_root,
+            self.signing_key.as_ref(),
+        )?;
+        Ok(seq)
+    }
+
+    /// Returns the Ed25519 public key bytes of the signing key, if present.
+    pub fn signing_pubkey(&self) -> Option<[u8; 32]> {
+        self.signing_key.as_ref().map(|sk| sk.public_key().to_bytes())
+    }
+
+    /// Sign `message` with the signing key.
+    ///
+    /// Returns `Some((signature_64_bytes, pubkey_32_bytes))` when signing is
+    /// enabled, `None` otherwise.
+    pub fn sign_bytes(&self, message: &[u8]) -> Option<([u8; 64], [u8; 32])> {
+        self.signing_key.as_ref().map(|sk| {
+            let sig    = sk.sign(message);
+            let pubkey = sk.public_key().to_bytes();
+            (sig, pubkey)
+        })
     }
 
     /// Return the WAL's `FlushState` handle (for the group-commit flusher).

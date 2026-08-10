@@ -204,8 +204,8 @@ vledger start --wal-sync-mode group_commit --group-commit-delay-ms 5
 │                     │      │                                  │
 │          ┌──────────▼──┐ ┌─▼────────────┐                  │
 │          │  WAL Writer  │ │  Page Store  │                  │
-│          │  fsync every │ │  AES-256-GCM │                  │
-│          │  commit      │ │  per-table   │                  │
+│          │  group_commit│ │  AES-256-GCM │                  │
+│          │  (default)   │ │  per-table   │                  │
 │          │  CRC-32      │ │  encryption  │                  │
 │          └─────────────┘ └──────────────┘                  │
 │                                                              │

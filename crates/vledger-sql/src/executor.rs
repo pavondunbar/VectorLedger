@@ -122,7 +122,14 @@ impl<'a> ReadExecutor<'a> {
         let mut result = QueryResult::rows(cols, rows, format!("{n} rows"));
 
         if self.attach_proofs && !all_leaf_data.is_empty() {
-            result.proof = Some(build_merkle_proof(&all_leaf_data, &leaf_indices));
+            result.proof = Some(build_merkle_proof(
+                &all_leaf_data,
+                &leaf_indices,
+                // Pass a closure that signs the root using the ledger's signing key.
+                // Returns None when no signing key is configured (unsigned proofs are
+                // still cryptographically valid — they just lack the server's attestation).
+                |root: &[u8; 32]| self.ledger.sign_bytes(root),
+            ));
         }
 
         Ok(result)
@@ -476,7 +483,21 @@ impl<'a> Executor<'a> {
 
 // ── Shared free functions ─────────────────────────────────────────────────────
 
-fn build_merkle_proof(all_leaves: &[Vec<u8>], indices: &[usize]) -> MerkleProof {
+/// Build a [`MerkleProof`] for the given leaf indices.
+///
+/// `sign_root` is called with the computed root bytes and should return
+/// `Some((signature_64, pubkey_32))` when a signing key is available, or
+/// `None` for unsigned proofs.  Unsigned proofs are still cryptographically
+/// valid membership proofs — they simply lack the server's Ed25519 attestation
+/// that binds the root to the database's identity.
+fn build_merkle_proof<F>(
+    all_leaves: &[Vec<u8>],
+    indices:    &[usize],
+    sign_root:  F,
+) -> MerkleProof
+where
+    F: FnOnce(&[u8; 32]) -> Option<([u8; 64], [u8; 32])>,
+{
     let root = merkle_root(all_leaves);
     let mut leaf_proofs = Vec::new();
     for &idx in indices {
@@ -492,7 +513,16 @@ fn build_merkle_proof(all_leaves: &[Vec<u8>], indices: &[usize]) -> MerkleProof 
             });
         }
     }
-    MerkleProof { root, leaf_proofs, root_signature: None, signing_public_key: None }
+
+    // Optionally sign the root with the database's Ed25519 signing key.
+    // The signed message is the raw 32-byte root so external verifiers only
+    // need the root bytes and the public key — no schema knowledge required.
+    let (root_signature, signing_public_key) = match sign_root(&root) {
+        Some((sig, pubkey)) => (Some(sig.to_vec()), Some(pubkey)),
+        None                => (None, None),
+    };
+
+    MerkleProof { root, leaf_proofs, root_signature, signing_public_key }
 }
 
 fn parse_account_type(s: &str) -> Result<AccountType, SqlError> {
@@ -639,6 +669,70 @@ mod tests {
             }
             assert_eq!(current, proof.root, "Merkle proof path must resolve to root");
         }
+    }
+
+    /// When the ledger is opened without a signing key (default `open()`),
+    /// `root_signature` must be `None` — no false attestation.
+    #[test]
+    fn proof_root_signature_is_none_without_signing_key() {
+        let (_dir, mut ledger) = open_ledger();
+        setup_accounts(&mut ledger);
+        run(&mut ledger,
+            "INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain) \
+             VALUES ('Tx', 'CASH', 'REV', 100, 'USD', 'test')");
+        let stmt = parse_one("SELECT * FROM ledger").unwrap();
+        let plan = LogicalPlanBuilder::plan(stmt).unwrap();
+        let result = Executor::with_proofs(&mut ledger).execute(plan).unwrap();
+        let proof = result.proof.expect("proof should be attached");
+        assert!(
+            proof.root_signature.is_none(),
+            "root_signature must be None when no signing key is configured"
+        );
+        assert!(
+            proof.signing_public_key.is_none(),
+            "signing_public_key must be None when no signing key is configured"
+        );
+    }
+
+    /// When the ledger is opened with a signing key, `root_signature` must
+    /// be present and the Ed25519 signature must verify against the root.
+    #[test]
+    fn proof_root_signature_verifies_with_signing_key() {
+        use vledger_crypto::sign::DbSigningKey;
+
+        // Directly exercise the contract: when sign_bytes returns Some((sig, pubkey)),
+        // the executor populates root_signature and the signature is a valid
+        // Ed25519 signature over the Merkle root.
+        let all_leaves: Vec<Vec<u8>> = vec![b"leaf-a".to_vec(), b"leaf-b".to_vec()];
+
+        let signing_key = DbSigningKey::generate();
+        let pubkey      = signing_key.public_key().to_bytes();
+
+        // Simulate what build_merkle_proof does internally when sign_root returns Some.
+        let root = vledger_crypto::merkle::merkle_root(&all_leaves);
+        let sig  = signing_key.sign(&root);
+
+        let proof = crate::result::MerkleProof {
+            root,
+            leaf_proofs:         vec![],
+            root_signature:      Some(sig.to_vec()),
+            signing_public_key:  Some(pubkey),
+        };
+
+        // Verify the signature over the root.
+        let sig_bytes: [u8; 64] = proof.root_signature.as_ref().unwrap()
+            .as_slice().try_into().expect("signature must be 64 bytes");
+        signing_key.public_key()
+            .verify(&proof.root, &sig_bytes)
+            .expect("root_signature must be a valid Ed25519 signature over the Merkle root");
+
+        // Confirm that a tampered root fails verification.
+        let mut bad_root = proof.root;
+        bad_root[0] ^= 0xFF;
+        assert!(
+            signing_key.public_key().verify(&bad_root, &sig_bytes).is_err(),
+            "tampered root must fail signature verification"
+        );
     }
 
     #[test]

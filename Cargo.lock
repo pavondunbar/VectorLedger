@@ -2668,6 +2668,7 @@ dependencies = [
  "chrono",
  "crc32fast",
  "ed25519-dalek",
+ "hex",
  "hkdf",
  "proptest",
  "rand 0.8.7",

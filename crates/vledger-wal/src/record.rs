@@ -158,11 +158,25 @@ pub struct CommitPayload {
 }
 
 /// Payload for [`RecordType::Checkpoint`].
+///
+/// Written by [`WalWriter::checkpoint_with_merkle_root`] after an fsync.
+/// The `root_signature` field (when present) is an Ed25519 signature over
+/// `page_merkle_root || last_committed_sequence.to_le_bytes()` (40 bytes),
+/// produced with the same `DbSigningKey` used for commit signing.
+/// Verifiers can use the embedded `signer_pubkey` without out-of-band key
+/// distribution.  Empty `Vec` fields indicate an unsigned / legacy record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointPayload {
-    /// Sequence number of the last committed record before this checkpoint.
+    /// Sequence number of the last committed WAL record before this checkpoint.
     pub last_committed_sequence: u64,
-    /// BLAKE3 Merkle root of all page hashes at checkpoint time.
+    /// BLAKE3 Merkle root of all entry page hashes at checkpoint time.
     pub page_merkle_root: [u8; 32],
+    /// Ed25519 signature over `page_merkle_root || last_committed_sequence.to_le_bytes()`.
+    /// Empty when signing is disabled.
+    #[serde(default)]
+    pub root_signature: Vec<u8>,
+    /// Ed25519 public key of the signer (32 bytes).  Empty when unsigned.
+    #[serde(default)]
+    pub signer_pubkey: Vec<u8>,
 }
 

@@ -452,7 +452,8 @@ impl LedgerStore {
             }
         }
 
-        // 3. Account-level validation
+        // 3. Per-line account-level validation (existence, status, currency, four-eyes).
+        //    Exposure limits and balance checks are done in aggregate below.
         for line in &entry.lines {
             let acct = self.accounts.get(&line.account_id)
                 .ok_or_else(|| LedgerError::AccountNotFound(line.account_id.to_string()))?;
@@ -468,32 +469,86 @@ impl LedgerStore {
             if acct.require_four_eyes && entry.approved_by.is_none() {
                 return Err(LedgerError::FourEyesRequired);
             }
-            if let Some(limit) = acct.exposure_limit {
-                if matches!(line.dr_cr, DrCr::Debit) && line.amount.as_i64() > limit {
-                    return Err(LedgerError::ExposureLimitExceeded {
-                        account_id: line.account_id.to_string(),
-                        limit: limit as i128,
-                        attempted: line.amount.as_i128(),
-                    });
-                }
-            }
         }
 
-        // 4. Non-negative balance check (Asset/Expense accounts on credit)
-        for line in &entry.lines {
-            let acct = self.accounts.get(&line.account_id).unwrap();
-            let is_debit_normal = matches!(
-                acct.account_type,
-                AccountType::Asset | AccountType::Expense
-            );
-            if acct.require_non_negative_balance && is_debit_normal {
-                if matches!(line.dr_cr, DrCr::Credit) {
-                    let current = self.balance(&line.account_id);
-                    if current - line.amount.as_i128() < 0 {
+        // 4. Aggregate financial invariants — evaluated over the TOTAL effect of
+        //    the whole entry on each account, not line-by-line.
+        //
+        //    A multi-line entry can have several credit lines against the same
+        //    account.  Checking each line independently against the current
+        //    balance (before any of the entry's lines have posted) would miss
+        //    cases where the aggregate credit exceeds the balance even though
+        //    each individual line does not.  The correct rule is:
+        //
+        //      projected balance = current_balance + total_entry_delta_for_account
+        //
+        //    and the invariant must hold on the *projected* balance, not on
+        //    each line in isolation.
+        {
+            // Accumulate the net delta (in minor units) this entry will apply to
+            // each account.  Positive = net debit effect, negative = net credit
+            // effect (for debit-normal accounts a credit reduces the balance).
+            use std::collections::HashMap as HM;
+
+            // net_debit_delta[account_id] = Σ debit_amounts − Σ credit_amounts
+            // (positive → balance will increase; negative → balance will decrease)
+            let mut net_debit_delta: HM<AccountId, i128> = HM::new();
+            for line in &entry.lines {
+                let delta: i128 = match line.dr_cr {
+                    DrCr::Debit  =>  line.amount.as_i128(),
+                    DrCr::Credit => -line.amount.as_i128(),
+                };
+                *net_debit_delta.entry(line.account_id).or_insert(0) += delta;
+            }
+
+            // Also accumulate the total debit amount per account for the
+            // exposure-limit check.
+            let mut total_debit: HM<AccountId, i128> = HM::new();
+            for line in &entry.lines {
+                if matches!(line.dr_cr, DrCr::Debit) {
+                    *total_debit.entry(line.account_id).or_insert(0)
+                        += line.amount.as_i128();
+                }
+            }
+
+            for (account_id, &delta) in &net_debit_delta {
+                let acct = self.accounts.get(account_id).unwrap(); // existence checked above
+
+                // ── Exposure-limit check (aggregate debits) ───────────────
+                // The limit is compared against the SUM of all debit lines
+                // in this entry for this account, not against each line
+                // individually.
+                if let Some(limit) = acct.exposure_limit {
+                    let agg_debit = total_debit.get(account_id).copied().unwrap_or(0);
+                    if agg_debit > limit as i128 {
+                        return Err(LedgerError::ExposureLimitExceeded {
+                            account_id: account_id.to_string(),
+                            limit: limit as i128,
+                            attempted: agg_debit,
+                        });
+                    }
+                }
+
+                // ── Non-negative balance check (aggregate delta) ──────────
+                // Only applies to debit-normal (Asset / Expense) accounts
+                // that have the constraint enabled.  A negative `delta` means
+                // this entry is a net credit against the account, which
+                // reduces the balance.
+                let is_debit_normal = matches!(
+                    acct.account_type,
+                    AccountType::Asset | AccountType::Expense
+                );
+                if acct.require_non_negative_balance && is_debit_normal && delta < 0 {
+                    let current = self.balance(account_id);
+                    // delta is negative (net credit), so: projected = current + delta
+                    let projected = current + delta;
+                    if projected < 0 {
                         return Err(LedgerError::InsufficientFunds {
-                            account_id: line.account_id.to_string(),
-                            balance: current,
-                            debit: line.amount.as_i128(),
+                            account_id: account_id.to_string(),
+                            balance:    current,
+                            // Report the magnitude of the net credit that caused
+                            // the shortfall so the error message is useful.
+                            debit:      (-delta),
                         });
                     }
                 }
@@ -749,14 +804,38 @@ impl LedgerStore {
     }
 
     /// Force a WAL checkpoint.
+    ///
+    /// Computes the BLAKE3 Merkle root over all journal-entry pages, then
+    /// calls `TransactionManager::checkpoint_signed` which:
+    /// 1. fsyncs the WAL (all committed records become durable).
+    /// 2. Appends a `Checkpoint` WAL record containing the Merkle root and,
+    ///    when a signing key is configured, an Ed25519 signature over
+    ///    `page_merkle_root || last_committed_sequence.to_le_bytes()`.
+    ///
+    /// Returns the WAL sequence number at the time of the checkpoint.
     pub fn checkpoint(&mut self) -> Result<u64, LedgerError> {
-        Ok(self.tx_manager.checkpoint()?)
+        // Compute the Merkle root over all durable entry pages.
+        // Returns ZERO_HASH when no pages exist yet (empty ledger).
+        let root = self.page_store
+            .table_merkle_root(TABLE_ENTRIES)
+            .map_err(|e| LedgerError::Serialization(e.to_string()))?;
+
+        Ok(self.tx_manager.checkpoint_signed(root)?)
     }
 
-    /// Compute the Merkle root over all journal entry pages.
-    pub fn entries_merkle_root(&mut self) -> Result<vledger_crypto::Hash, LedgerError> {
-        self.page_store.table_merkle_root(TABLE_ENTRIES)
-            .map_err(|e| LedgerError::Serialization(e.to_string()))
+    /// Returns the Ed25519 public key of the database signing key, if signing
+    /// is enabled.  Used by the SQL executor to populate `MerkleProof`.
+    pub fn signing_pubkey(&self) -> Option<[u8; 32]> {
+        self.tx_manager.signing_pubkey()
+    }
+
+    /// Sign `message` with the database signing key.
+    ///
+    /// Returns `Some((signature, pubkey))` when a signing key is configured,
+    /// `None` otherwise.  Used by the SQL executor to sign Merkle roots
+    /// attached to query results.
+    pub fn sign_bytes(&self, message: &[u8]) -> Option<([u8; 64], [u8; 32])> {
+        self.tx_manager.sign_bytes(message)
     }
 
     /// Return the WAL directory path (used by the group-commit flusher).
@@ -957,6 +1036,95 @@ mod tests {
             assert_eq!(store2.balance(&cid), 0, "balance must be zero after reversal replay");
         }
         store2.verify_chain_integrity().unwrap();
+    }
+
+    // ── Aggregate financial invariant tests ──────────────────────────────
+
+    /// A single credit line that would not individually overdraw the account
+    /// but where two credit lines in the same entry together do overdraw it
+    /// must be rejected.
+    ///
+    /// Account balance: $100 (10000 minor units)
+    /// Entry: Credit $60 + Credit $60 → aggregate effect = -$120 → rejected
+    #[test]
+    fn aggregate_balance_check_rejects_multi_line_overdraw() {
+        let (_dir, mut store) = open_tmp();
+        let (cash, revenue) = add_accounts(&mut store);
+
+        // Fund cash with $100
+        let fund = Amount::new(10000).unwrap();
+        let e = JournalEntryBuilder::new("Fund", "test")
+            .debit(cash, fund, "USD").credit(revenue, fund, "USD").build();
+        store.post_entry(e).unwrap();
+        assert_eq!(store.balance(&cash), 10000);
+
+        // Add a second revenue account to make the balancing entry work
+        let revenue2 = store.create_account(crate::account::Account::new(
+            "4002", "Revenue2", crate::account::AccountType::Income, "USD", "test")).unwrap();
+
+        // Try to post an entry with two $60 credits against cash (total $120 out)
+        // Each individual credit would pass the old per-line check ($100 - $60 >= 0)
+        // but the aggregate check must catch that $100 - $120 < 0.
+        let sixty = Amount::new(6000).unwrap();
+        let bad_entry = JournalEntryBuilder::new("Double credit overdraw", "test")
+            .credit(cash, sixty, "USD")
+            .credit(cash, sixty, "USD")
+            .debit(revenue, sixty, "USD")
+            .debit(revenue2, sixty, "USD")
+            .build();
+        let result = store.post_entry(bad_entry);
+        assert!(
+            matches!(result, Err(LedgerError::InsufficientFunds { .. })),
+            "aggregate overdraw must be rejected, got: {:?}", result
+        );
+        // Balance must be unchanged after the rejection.
+        assert_eq!(store.balance(&cash), 10000);
+    }
+
+    /// A single-line credit that exceeds the balance must still be rejected.
+    #[test]
+    fn single_line_overdraw_still_rejected() {
+        let (_dir, mut store) = open_tmp();
+        let (cash, revenue) = add_accounts(&mut store);
+
+        let fund = Amount::new(5000).unwrap();
+        let e = JournalEntryBuilder::new("Fund", "test")
+            .debit(cash, fund, "USD").credit(revenue, fund, "USD").build();
+        store.post_entry(e).unwrap();
+
+        let too_much = Amount::new(9000).unwrap();
+        let bad = JournalEntryBuilder::new("Overdraw", "test")
+            .credit(cash, too_much, "USD").debit(revenue, too_much, "USD").build();
+        assert!(matches!(store.post_entry(bad), Err(LedgerError::InsufficientFunds { .. })));
+    }
+
+    /// Aggregate exposure-limit: sum of all debit lines to an account in one
+    /// entry must not exceed the limit, even if each individual line is below it.
+    #[test]
+    fn aggregate_exposure_limit_check() {
+        let (_dir, mut store) = open_tmp();
+
+        // Create an account with a $50 (5000) exposure limit
+        let mut acct = crate::account::Account::new(
+            "RISK", "Risky Account", crate::account::AccountType::Asset, "USD", "test");
+        acct.exposure_limit = Some(5000);
+        let risk_id = store.create_account(acct).unwrap();
+
+        let counterpart = store.create_account(crate::account::Account::new(
+            "CTR", "Counterpart", crate::account::AccountType::Liability, "USD", "test")).unwrap();
+
+        // Individual debits of $30 each are below the $50 limit.
+        // Combined $60 must exceed the $50 limit.
+        let thirty = Amount::new(3000).unwrap();
+        let bad = JournalEntryBuilder::new("Aggregate exposure exceeded", "test")
+            .debit(risk_id,   thirty, "USD")
+            .debit(risk_id,   thirty, "USD")
+            .credit(counterpart, Amount::new(6000).unwrap(), "USD")
+            .build();
+        assert!(
+            matches!(store.post_entry(bad), Err(LedgerError::ExposureLimitExceeded { .. })),
+            "aggregate exposure limit must be enforced"
+        );
     }
 
     #[test]

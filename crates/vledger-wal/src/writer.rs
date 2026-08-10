@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::WalError;
 use crate::encrypt::{derive_segment_key, encrypt_record};
-use crate::record::{RecordHeader, RecordType, WalRecord};
+use crate::record::{CheckpointPayload, RecordHeader, RecordType, WalRecord};
 use crate::segment::Segment;
 use crate::{DEFAULT_SEGMENT_SIZE, WAL_MAGIC, WAL_VERSION};
 
@@ -397,6 +397,66 @@ impl WalWriter {
         let seq = self.sequence.load(Ordering::SeqCst);
         self.sync()?;
         debug!(sequence = seq, "WAL checkpoint");
+        Ok(seq)
+    }
+
+    /// Force a checkpoint and write a [`CheckpointPayload`] record to the WAL.
+    ///
+    /// This is the richer variant used by [`LedgerStore::checkpoint`]:
+    ///
+    /// 1. `fsync` the active segment (same as `checkpoint`).
+    /// 2. Append a `Checkpoint` record that embeds:
+    ///    - `last_committed_sequence` — the WAL position at checkpoint time.
+    ///    - `page_merkle_root`        — the BLAKE3 Merkle root over all entry
+    ///      pages, computed by the caller from [`PageStore::table_merkle_root`].
+    ///    - `root_signature`          — optional Ed25519 signature over
+    ///      `page_merkle_root || last_committed_sequence.to_le_bytes()` using
+    ///      the database signing key.
+    ///    - `signer_pubkey`           — the signing key's public key (32 bytes),
+    ///      so verifiers do not need out-of-band key distribution.
+    ///
+    /// The record is written **after** the fsync so that the root represents
+    /// data that is already durable on disk.
+    ///
+    /// Passing `signing_key = None` writes the checkpoint without a signature
+    /// (backwards-compatible with dev / unsigned deployments).
+    pub fn checkpoint_with_merkle_root(
+        &mut self,
+        page_merkle_root: [u8; 32],
+        signing_key:       Option<&vledger_crypto::sign::DbSigningKey>,
+    ) -> Result<u64, WalError> {
+        // 1. fsync first — the root must cover only already-durable data.
+        let seq = self.sequence.load(Ordering::SeqCst);
+        self.sync()?;
+
+        // 2. Optionally sign the root.
+        //    Signed message: page_merkle_root (32 bytes) || seq.to_le_bytes() (8 bytes) = 40 bytes.
+        let (root_signature, signer_pubkey) = if let Some(sk) = signing_key {
+            let mut msg = Vec::with_capacity(40);
+            msg.extend_from_slice(&page_merkle_root);
+            msg.extend_from_slice(&seq.to_le_bytes());
+            let sig    = sk.sign(&msg);
+            let pubkey = sk.public_key().to_bytes();
+            (sig.to_vec(), pubkey.to_vec())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        // 3. Write the Checkpoint record (tx_id = 0 — not transaction-bound).
+        let payload = CheckpointPayload {
+            last_committed_sequence: seq,
+            page_merkle_root,
+            root_signature,
+            signer_pubkey,
+        };
+        self.append_record(0, RecordType::Checkpoint, &payload)?;
+
+        info!(
+            sequence         = seq,
+            root             = hex::encode(page_merkle_root),
+            signed           = signing_key.is_some(),
+            "WAL checkpoint with Merkle root written"
+        );
         Ok(seq)
     }
 }
