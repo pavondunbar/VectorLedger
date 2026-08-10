@@ -1,0 +1,29 @@
+# VectorLedger Security Contact
+# https://securitytxt.org
+#
+# This file follows the security.txt specification (RFC 9116).
+# Place this file at https://vectorguardlabs.com/.well-known/security.txt
+# and at https://github.com/vectorguardlabs/vectorledger/.well-known/security.txt
+
+Contact: mailto:security@vectorguardlabs.com
+Contact: https://vectorguardlabs.com/security
+
+# PGP key for encrypted vulnerability reports.
+# Fingerprint: (update with your actual key fingerprint before publishing)
+# Encryption: https://vectorguardlabs.com/pgp-key.asc
+
+Preferred-Languages: en
+
+# We aim to acknowledge reports within 2 business days and resolve
+# critical vulnerabilities within 90 days.
+Policy: https://vectorguardlabs.com/security/policy
+
+# Canonical URL for this file.
+Canonical: https://vectorguardlabs.com/.well-known/security.txt
+Canonical: https://raw.githubusercontent.com/vectorguardlabs/vectorledger/main/.well-known/security.txt
+
+# Scope: the VectorLedger database engine and its official client SDKs.
+# Out of scope: third-party integrations, hosted deployments not operated
+# by VectorGuard Labs.
+
+Expires: 2027-01-01T00:00:00.000Z

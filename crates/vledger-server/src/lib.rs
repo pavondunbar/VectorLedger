@@ -4,12 +4,14 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod handler;
+pub mod metrics;
 pub mod protocol;
 pub mod tls;
 
 pub use auth::{Role, UserStore, Session, check_plan_privilege};
 pub use config::ServerConfig;
 pub use error::ServerError;
+pub use metrics::{Metrics, run_metrics_server};
 
 use std::collections::HashMap;
 use std::net::IpAddr;

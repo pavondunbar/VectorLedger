@@ -1,0 +1,1 @@
+SELECT ROW_NUMBER() OVER () AS rn FROM ledger

@@ -24,6 +24,10 @@ pub mod entry;
 pub mod error;
 pub mod lockfile;
 pub mod store;
+#[cfg(test)]
+mod crash_tests;
+#[cfg(test)]
+mod concurrent_tests;
 
 pub use account::{Account, AccountId, AccountType};
 pub use amount::Amount;

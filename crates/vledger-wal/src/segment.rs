@@ -70,6 +70,14 @@ impl Segment {
         let metadata = file.metadata()?;
         let write_offset = metadata.len();
 
+        // Seek to the end so that subsequent writes append rather than
+        // overwriting existing records from the beginning of the file.
+        if !sealed {
+            use std::io::Seek;
+            use std::io::SeekFrom;
+            (&file).seek(SeekFrom::End(0))?;
+        }
+
         Ok(Self {
             path,
             index,

@@ -83,24 +83,19 @@ enum Commands {
         #[arg(long)]
         with_proofs: bool,
         /// WAL sync mode: per_record | group_commit | no_sync (default: group_commit)
-        ///
-        /// - per_record   : fsync after every WAL record — safest, slowest
-        /// - group_commit : background flush every --group-commit-delay-ms — recommended
-        /// - no_sync      : never fsync — dev/test only, never use in production
         #[arg(long, default_value = "group_commit")]
         wal_sync_mode: String,
         /// Group-commit flush interval in milliseconds (default: 2).
-        /// Only used when --wal-sync-mode=group_commit.
         #[arg(long, default_value_t = 2)]
         group_commit_delay_ms: u64,
         /// Maximum time in milliseconds a single SQL query may run before it
         /// is cancelled and the client receives a query_timeout error.
-        ///
-        /// Prevents long-running scans or expensive aggregates from holding
-        /// the write lock indefinitely.  Default: 30000 (30 s).
-        /// Set to 0 to disable (not recommended for production).
         #[arg(long, default_value_t = 30_000)]
         query_timeout_ms: u64,
+        /// Bind address for the Prometheus metrics HTTP server.
+        /// Set to empty string to disable.
+        #[arg(long, default_value = "127.0.0.1:9090")]
+        metrics_addr: String,
     },
     /// Show database status.
     Status,
@@ -236,6 +231,16 @@ enum Commands {
         #[arg(long, global = true)]
         ca_cert: Option<String>,
     },
+    /// Verify a backup archive without restoring it (manifest + hash check).
+    #[command(name = "backup-verify")]
+    BackupVerify {
+        /// Path to the .tar archive to verify.
+        #[arg(short = 'f', long)]
+        from: PathBuf,
+        /// Verify encrypted file contents (requires master key from key_source.json).
+        #[arg(long, default_value = "true")]
+        decrypt: bool,
+    },
     /// Show the active license tier, features, and expiry.
     #[command(name = "license")]
     License,
@@ -313,8 +318,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init { force, key_source, vault_addr, vault_mount, vault_path, kms_key_id, kms_region, pyhsm_socket, pyhsm_caller_id }
             => cmd_init(&cli.data_dir, force, &key_source, &vault_addr, &vault_mount, &vault_path, kms_key_id.as_deref(), &kms_region, pyhsm_socket.as_deref(), &pyhsm_caller_id).await,
-        Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms, query_timeout_ms }
-            => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms, query_timeout_ms).await,
+        Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms, query_timeout_ms, metrics_addr }
+            => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms, query_timeout_ms, &metrics_addr).await,
         Commands::Status                             => cmd_status(&cli.data_dir).await,
         Commands::Verify                             => cmd_verify(&cli.data_dir).await,
         Commands::Sql { query, username, password, server, ca_cert } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref(), server.as_deref(), ca_cert.as_deref()).await,
@@ -328,6 +333,7 @@ async fn main() -> Result<()> {
         Commands::ComplianceReport { standard, format, output } => cmd_compliance_report(&cli.data_dir, &standard, &format, output.as_deref()).await,
         Commands::User { action, ca_cert } => cmd_user(&cli.data_dir, action, ca_cert.as_deref()).await,
         Commands::License          => cmd_license(&cli.data_dir),
+        Commands::BackupVerify { from, decrypt } => cmd_backup_verify(&cli.data_dir, &from, decrypt).await,
     }
 }
 
@@ -451,7 +457,7 @@ async fn cmd_init(
 
 // ── start ─────────────────────────────────────────────────────────────────────
 
-async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool, wal_sync_mode: &str, group_commit_delay_ms: u64, query_timeout_ms: u64) -> Result<()> {
+async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool, wal_sync_mode: &str, group_commit_delay_ms: u64, query_timeout_ms: u64, metrics_addr: &str) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Data directory not found — run `vledger init` first.");
     }
@@ -553,6 +559,9 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
             format!("{query_timeout_ms} ms")
         }
     );
+    if !metrics_addr.is_empty() {
+        println!("  Metrics    : http://{metrics_addr}/metrics  (Prometheus)");
+    }
     license.print_banner();
     if pgwire {
         println!("  PgWire     : 127.0.0.1:5432  (PostgreSQL wire protocol)");
@@ -607,6 +616,18 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
         tokio::spawn(async move {
             if let Err(e) = pg_server.run(pg_token).await {
                 tracing::error!("PgWire server error: {e}");
+            }
+        });
+    }
+
+    // ── Prometheus metrics server ─────────────────────────────────────────
+    if !metrics_addr.is_empty() {
+        let metrics     = vledger_server::Metrics::new();
+        let metrics_tok = shutdown.clone();
+        let addr        = metrics_addr.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = vledger_server::run_metrics_server(addr, metrics, metrics_tok).await {
+                tracing::warn!("Metrics server error: {e}");
             }
         });
     }
@@ -1097,6 +1118,59 @@ fn resolve_password(password: Option<&str>) -> String {
         return pw;
     }
     read_password_from_tty()
+}
+
+// ── backup-verify ─────────────────────────────────────────────────────────────
+
+async fn cmd_backup_verify(
+    data_dir: &PathBuf,
+    from:     &std::path::Path,
+    decrypt:  bool,
+) -> Result<()> {
+    if !from.exists() {
+        anyhow::bail!("Archive not found: {}", from.display());
+    }
+
+    // Optionally load master key for decrypting encrypted file content.
+    let master_key_opt: Option<vledger_crypto::kdf::MasterKey> = if decrypt {
+        let key_source_path = data_dir.join("keys").join("key_source.json");
+        if key_source_path.exists() {
+            match vledger_secrets::KeySourceConfig::from_file(&key_source_path) {
+                Ok(cfg) => match vledger_secrets::build_provider(&cfg) {
+                    Ok(provider) => match provider.load_master_key().await {
+                        Ok(raw_key) => Some(vledger_crypto::kdf::MasterKey::from_bytes(*raw_key)),
+                        Err(e) => {
+                            eprintln!("⚠  Could not load master key ({e}) — verifying manifest only.");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("⚠  Could not build key provider ({e}) — verifying manifest only.");
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("⚠  Could not read key_source.json ({e}) — verifying manifest only.");
+                    None
+                }
+            }
+        } else {
+            eprintln!("⚠  key_source.json not found — verifying manifest only.");
+            None
+        }
+    } else {
+        None
+    };
+
+    let report = backup::verify_backup(from, master_key_opt.as_ref())
+        .context("Backup verification failed")?;
+
+    report.print_summary();
+
+    if !report.is_ok() {
+        anyhow::bail!("Backup verification FAILED");
+    }
+    Ok(())
 }
 
 // ── license ───────────────────────────────────────────────────────────────────

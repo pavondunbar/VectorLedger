@@ -133,6 +133,11 @@ pub enum MutationKind {
 }
 
 /// Payload for [`RecordType::Commit`].
+///
+/// The `signature` field is an Ed25519 signature over
+/// `tx_hash || record_count_le4` produced by the database signing key
+/// (`vledger-crypto::sign::DbSigningKey`).  It is verified during WAL
+/// recovery before any committed transaction is replayed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitPayload {
     /// Number of Data records committed in this transaction.
@@ -140,6 +145,16 @@ pub struct CommitPayload {
     /// BLAKE3 hash of all Data payload hashes in sequence — a per-transaction
     /// integrity root.
     pub tx_hash: [u8; 32],
+    /// Ed25519 signature over `tx_hash || record_count.to_le_bytes()`.
+    /// Empty `Vec` when signing is disabled (dev / legacy recovery).
+    /// Exactly 64 bytes when present.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+    /// Ed25519 public key of the signer (32 bytes), embedded so verifiers
+    /// can check authenticity without out-of-band key distribution.
+    /// Empty `Vec` when signing is disabled.
+    #[serde(default)]
+    pub signer_pubkey: Vec<u8>,
 }
 
 /// Payload for [`RecordType::Checkpoint`].

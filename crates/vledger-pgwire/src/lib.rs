@@ -21,5 +21,8 @@
 pub mod codec;
 pub mod messages;
 pub mod server;
+#[cfg(test)]
+mod malformed_tests;
 
+pub use codec::{read_startup, read_message};
 pub use server::{PgWireConfig, PgWireServer};

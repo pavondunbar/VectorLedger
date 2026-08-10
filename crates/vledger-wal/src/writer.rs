@@ -30,6 +30,7 @@ use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::error::WalError;
+use crate::encrypt::{derive_segment_key, encrypt_record};
 use crate::record::{RecordHeader, RecordType, WalRecord};
 use crate::segment::Segment;
 use crate::{DEFAULT_SEGMENT_SIZE, WAL_MAGIC, WAL_VERSION};
@@ -168,13 +169,24 @@ pub struct WalWriter {
     /// Shared flush state used by the group-commit background task.
     /// `None` when sync_mode != GroupCommit.
     pub flush_state:    Option<Arc<FlushState>>,
+    /// Optional master key for AES-256-GCM per-segment encryption.
+    /// When `Some`, every record is encrypted before being written to disk.
+    /// When `None`, records are written in plaintext (dev / legacy mode).
+    encryption_key:     Option<[u8; 32]>,
 }
 
 impl WalWriter {
     /// Open (or create) the WAL at `wal_dir` with the default sync mode
     /// (`GroupCommit`).
     pub fn open(wal_dir: &Path) -> Result<Self, WalError> {
-        Self::open_with_options(wal_dir, DEFAULT_SEGMENT_SIZE, WalSyncMode::default())
+        Self::open_with_options(wal_dir, DEFAULT_SEGMENT_SIZE, WalSyncMode::default(), None)
+    }
+
+    /// Open with encryption enabled.  All records written through this writer
+    /// will be AES-256-GCM encrypted on disk.  Pass the database master key —
+    /// per-segment keys are derived automatically via HKDF.
+    pub fn open_encrypted(wal_dir: &Path, master_key: [u8; 32]) -> Result<Self, WalError> {
+        Self::open_with_options(wal_dir, DEFAULT_SEGMENT_SIZE, WalSyncMode::default(), Some(master_key))
     }
 
     /// Open with explicit options.
@@ -182,6 +194,7 @@ impl WalWriter {
         wal_dir:          &Path,
         segment_max_size: u64,
         sync_mode:        WalSyncMode,
+        master_key:       Option<[u8; 32]>,
     ) -> Result<Self, WalError> {
         std::fs::create_dir_all(wal_dir)?;
 
@@ -195,7 +208,7 @@ impl WalWriter {
             let path = wal_dir.join(crate::segment::segment_filename(last_idx));
             info!(segment = last_idx, "Resuming WAL from existing segment");
             let seg = Segment::open(path, last_idx, segment_max_size, false)?;
-            let last_seq = crate::reader::scan_last_sequence(wal_dir)?;
+            let last_seq = crate::reader::scan_last_sequence(wal_dir, master_key.as_ref())?;
             (seg, last_idx + 1, last_seq)
         };
 
@@ -205,7 +218,8 @@ impl WalWriter {
             None
         };
 
-        info!(sync_mode = %sync_mode, "WAL opened");
+        let encrypted = master_key.is_some();
+        info!(sync_mode = %sync_mode, encrypted, "WAL opened");
 
         Ok(Self {
             wal_dir: wal_dir.to_path_buf(),
@@ -215,6 +229,7 @@ impl WalWriter {
             next_segment_index,
             sync_mode,
             flush_state,
+            encryption_key: master_key,
         })
     }
 
@@ -259,40 +274,67 @@ impl WalWriter {
         let crc32       = compute_crc(&header_bytes, &payload);
         let record_size = header_bytes.len() + payload.len() + 4;
 
-        // Roll segment if needed.
-        if !self.active_segment.has_space(record_size) {
-            self.roll_segment()?;
+        // If encryption is enabled, encrypt the entire plaintext record
+        // (header + payload + crc32) and write the encrypted blob instead.
+        if let Some(master_key) = self.encryption_key {
+            // Assemble the plaintext record bytes
+            let mut plaintext = Vec::with_capacity(header_bytes.len() + payload.len() + 4);
+            plaintext.extend_from_slice(&header_bytes);
+            plaintext.extend_from_slice(&payload);
+            plaintext.extend_from_slice(&crc32.to_le_bytes());
+
+            let seg_key = derive_segment_key(&master_key, self.active_segment.index)?;
+            let blob    = encrypt_record(&seg_key, &plaintext, self.active_segment.index)?;
+
+            // Roll if needed for the encrypted blob.
+            if !self.active_segment.has_space(blob.len()) {
+                self.roll_segment()?;
+                // Re-derive key for new segment after roll.
+                let seg_key2 = derive_segment_key(&master_key, self.active_segment.index)?;
+                let blob2    = encrypt_record(&seg_key2, &plaintext, self.active_segment.index)?;
+                let blob_len = blob2.len();
+                let file = self.active_segment.file.as_mut()
+                    .ok_or_else(|| WalError::Io(std::io::Error::other("no file after roll")))?;
+                file.write_all(&blob2)?;
+                self.active_segment.write_offset += blob_len as u64;
+            } else {
+                let blob_len = blob.len();
+                let file = self.active_segment.file.as_mut()
+                    .ok_or_else(|| WalError::Io(std::io::Error::other("no file")))?;
+                file.write_all(&blob)?;
+                self.active_segment.write_offset += blob_len as u64;
+            }
+        } else {
+            // Plaintext path.
+            if !self.active_segment.has_space(record_size) {
+                self.roll_segment()?;
+            }
+            let file = self.active_segment.file.as_mut()
+                .ok_or_else(|| WalError::Io(std::io::Error::other("Segment file handle missing")))?;
+            file.write_all(&header_bytes)?;
+            file.write_all(&payload)?;
+            file.write_all(&crc32.to_le_bytes())?;
+            self.active_segment.write_offset += record_size as u64;
         }
 
-        let file = self
-            .active_segment
-            .file
-            .as_mut()
-            .ok_or_else(|| WalError::Io(std::io::Error::other("Segment file handle missing")))?;
-
-        file.write_all(&header_bytes)?;
-        file.write_all(&payload)?;
-        file.write_all(&crc32.to_le_bytes())?;
-
-        // Sync behaviour depends on mode.
-        match self.sync_mode {
-            WalSyncMode::PerRecord => {
-                file.sync_all()?;
-            }
-            WalSyncMode::GroupCommit => {
-                // Mark dirty so the background flusher knows there is work.
-                if let Some(ref fs) = self.flush_state {
-                    fs.dirty.store(true, Ordering::Release);
+        // Sync behaviour depends on mode — applied after the write regardless
+        // of whether the record was encrypted.
+        {
+            let file = self.active_segment.file.as_ref()
+                .ok_or_else(|| WalError::Io(std::io::Error::other("Segment file handle missing for sync")))?;
+            match self.sync_mode {
+                WalSyncMode::PerRecord => { file.sync_all()?; }
+                WalSyncMode::GroupCommit => {
+                    if let Some(ref fs) = self.flush_state {
+                        fs.dirty.store(true, Ordering::Release);
+                    }
+                }
+                WalSyncMode::NoSync => {
+                    #[cfg(debug_assertions)]
+                    debug!("WAL no_sync mode — write not fsynced");
                 }
             }
-            WalSyncMode::NoSync => {
-                // Intentionally no fsync.
-                #[cfg(debug_assertions)]
-                debug!("WAL no_sync mode — write not fsynced");
-            }
         }
-
-        self.active_segment.write_offset += record_size as u64;
 
         debug!(
             tx_id,
@@ -300,6 +342,7 @@ impl WalWriter {
             record_type = ?record_type,
             payload_bytes = payload.len(),
             sync_mode   = %self.sync_mode,
+            encrypted   = self.encryption_key.is_some(),
             "WAL record appended"
         );
 

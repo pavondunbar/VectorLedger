@@ -13,9 +13,9 @@
 #   vledger-v0.1.0-macos-x86_64.tar.gz
 #   vledger-v0.1.0-macos-aarch64.tar.gz
 #   vledger-v0.1.0-checksums.txt
-#
-# After this workflow completes, the install.sh one-liner works for all
-# supported platforms.
+#   vledger-v0.1.0-checksums.txt.sig    ← cosign signature over checksums
+#   vledger-v0.1.0-sbom.cdx.json        ← CycloneDX SBOM
+#   vledger-v0.1.0-sbom.cdx.json.sig    ← cosign signature over SBOM
 
 name: Release
 
@@ -25,7 +25,8 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
-  contents: write   # required to create and upload release assets
+  contents: write     # create and upload release assets
+  id-token:  write    # required by cosign for keyless signing (OIDC)
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,7 +34,7 @@ env:
 
 jobs:
 
-  # ── Build matrix ───────────────────────────────────────────────────────────
+  # ── Build matrix ─────────────────────────────────────────────────────────
   build:
     name: Build — ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -41,25 +42,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target:    x86_64-unknown-linux-gnu
-            os:        ubuntu-22.04
-            platform:  linux-x86_64
-            cross:     false
+          - target:   x86_64-unknown-linux-gnu
+            os:       ubuntu-22.04
+            platform: linux-x86_64
+            cross:    false
 
-          - target:    aarch64-unknown-linux-gnu
-            os:        ubuntu-22.04
-            platform:  linux-aarch64
-            cross:     true        # use cross for Linux ARM64
+          - target:   aarch64-unknown-linux-gnu
+            os:       ubuntu-22.04
+            platform: linux-aarch64
+            cross:    true
 
-          - target:    x86_64-apple-darwin
-            os:        macos-13    # Intel runner
-            platform:  macos-x86_64
-            cross:     false
+          - target:   x86_64-apple-darwin
+            os:       macos-13
+            platform: macos-x86_64
+            cross:    false
 
-          - target:    aarch64-apple-darwin
-            os:        macos-14    # Apple Silicon runner
-            platform:  macos-aarch64
-            cross:     false
+          - target:   aarch64-apple-darwin
+            os:       macos-14
+            platform: macos-aarch64
+            cross:    false
 
     steps:
       - name: Checkout
@@ -70,63 +71,42 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Cache compiled dependencies between runs — dramatically speeds up
-      # subsequent releases when only vledger itself changed.
-      - name: Cache cargo registry and build artefacts
+      - name: Cache
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      # cross is a drop-in Cargo wrapper that uses Docker to cross-compile
-      # for targets that don't run on the host machine (e.g. ARM64 on x86).
       - name: Install cross (ARM64 Linux only)
         if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --version "0.2.5" --locked
 
-      # Build the vledger binary in release mode.
-      # panic = "abort" and strip = true are already set in the workspace
-      # Cargo.toml [profile.release] section, so the binary is small and
-      # doesn't unwind on panic.
       - name: Build (native)
         if: "!matrix.cross"
-        run: |
-          cargo build --release --package vledger --target ${{ matrix.target }}
+        run: cargo build --release --package vledger --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
-        run: |
-          cross build --release --package vledger --target ${{ matrix.target }}
+        run: cross build --release --package vledger --target ${{ matrix.target }}
 
-      # Strip debug symbols on Linux to reduce binary size.
-      # macOS uses the system strip which is available on all runners.
       - name: Strip binary (Linux)
         if: runner.os == 'Linux'
-        run: |
-          strip target/${{ matrix.target }}/release/vledger || true
+        run: strip target/${{ matrix.target }}/release/vledger || true
 
       - name: Strip binary (macOS)
         if: runner.os == 'macOS'
-        run: |
-          strip target/${{ matrix.target }}/release/vledger || true
+        run: strip target/${{ matrix.target }}/release/vledger || true
 
-      # Package into a tar.gz archive.
-      # The archive contains only the vledger binary at the root so
-      # install.sh can find it with: find "$tmpdir" -type f -name "vledger"
       - name: Package archive
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME}"
           PLATFORM="${{ matrix.platform }}"
           ARCHIVE="vledger-${VERSION}-${PLATFORM}.tar.gz"
-
           cp target/${{ matrix.target }}/release/vledger ./vledger
           tar -czf "${ARCHIVE}" vledger
           rm -f vledger
-
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
-      # Upload the archive as an artefact so the checksum job can collect
-      # all four archives and produce one checksums.txt.
       - name: Upload archive artefact
         uses: actions/upload-artifact@v4
         with:
@@ -134,44 +114,116 @@ jobs:
           path: ${{ env.ARCHIVE }}
           retention-days: 1
 
-  # ── Checksums + GitHub Release ─────────────────────────────────────────────
+  # ── SBOM generation ───────────────────────────────────────────────────────
+  # Generates a CycloneDX Software Bill of Materials from Cargo.lock.
+  # cargo-cyclonedx produces a machine-readable SBOM that auditors and
+  # vulnerability scanners (Grype, OSV-Scanner, Dependency-Track) can ingest.
+  sbom:
+    name: Generate SBOM (CycloneDX)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version "0.5.5" --locked
+
+      - name: Generate SBOM
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          # Generate workspace-level CycloneDX JSON SBOM.
+          cargo cyclonedx --format json --all --output-cdx
+          # cargo-cyclonedx writes bom.json by default; rename to versioned name.
+          mv bom.json "vledger-${VERSION}-sbom.cdx.json"
+          echo "SBOM=vledger-${VERSION}-sbom.cdx.json" >> "$GITHUB_ENV"
+
+      - name: Upload SBOM artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ${{ env.SBOM }}
+          retention-days: 1
+
+  # ── Checksums + signed releases + GitHub Release ──────────────────────────
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, sbom]
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Download all four platform archives into the current directory.
       - name: Download all build artefacts
         uses: actions/download-artifact@v4
         with:
           path: ./dist
           merge-multiple: true
 
-      # Produce a single checksums.txt listing every archive.
-      # Format matches what install.sh expects:
-      #   <sha256>  <filename>
+      # ── SHA-256 checksums ─────────────────────────────────────────────────
       - name: Generate checksums.txt
         working-directory: ./dist
         run: |
           VERSION="${GITHUB_REF_NAME}"
           CHECKSUM_FILE="vledger-${VERSION}-checksums.txt"
-          sha256sum vledger-*.tar.gz > "${CHECKSUM_FILE}"
+          sha256sum vledger-*.tar.gz "vledger-${VERSION}-sbom.cdx.json" \
+            > "${CHECKSUM_FILE}"
           echo "Generated checksums:"
           cat "${CHECKSUM_FILE}"
 
-      # Create (or update) the GitHub Release and upload all assets.
-      # The release body is the tag's annotation message if the tag was
-      # annotated; otherwise a placeholder.
+      # ── Cosign keyless signing (Task #17) ─────────────────────────────────
+      # Signs the checksums file and SBOM using sigstore's keyless signing
+      # (GitHub Actions OIDC identity).  Verifiers can check:
+      #   cosign verify-blob \
+      #     --certificate vledger-v0.1.0-checksums.txt.sig.pem \
+      #     --signature   vledger-v0.1.0-checksums.txt.sig \
+      #     vledger-v0.1.0-checksums.txt
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Sign checksums.txt
+        working-directory: ./dist
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          CHECKSUM_FILE="vledger-${VERSION}-checksums.txt"
+          cosign sign-blob \
+            --yes \
+            --output-signature "${CHECKSUM_FILE}.sig" \
+            --output-certificate "${CHECKSUM_FILE}.sig.pem" \
+            "${CHECKSUM_FILE}"
+
+      - name: Sign SBOM
+        working-directory: ./dist
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          SBOM_FILE="vledger-${VERSION}-sbom.cdx.json"
+          cosign sign-blob \
+            --yes \
+            --output-signature "${SBOM_FILE}.sig" \
+            --output-certificate "${SBOM_FILE}.sig.pem" \
+            "${SBOM_FILE}"
+
+      # ── GitHub Release ────────────────────────────────────────────────────
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/vledger-*.tar.gz
             dist/vledger-*-checksums.txt
+            dist/vledger-*-checksums.txt.sig
+            dist/vledger-*-checksums.txt.sig.pem
+            dist/vledger-*-sbom.cdx.json
+            dist/vledger-*-sbom.cdx.json.sig
+            dist/vledger-*-sbom.cdx.json.sig.pem
           generate_release_notes: true
           fail_on_unmatched_files: true
         env:

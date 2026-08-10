@@ -40,4 +40,13 @@ pub enum WalError {
 
     #[error("Transaction {0} not found in WAL")]
     TransactionNotFound(u64),
+
+    #[error("WAL encryption failed: {0}")]
+    Encryption(String),
+
+    #[error("WAL decryption failed — wrong key, corrupted ciphertext, or wrong segment")]
+    Decryption,
+
+    #[error("WAL commit signature verification failed at sequence {sequence}: {reason}")]
+    SignatureInvalid { sequence: u64, reason: String },
 }

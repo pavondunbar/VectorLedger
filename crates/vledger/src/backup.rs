@@ -632,3 +632,229 @@ fn set_mode_600(path: &Path) {
     #[cfg(not(unix))]
     { let _ = path; }
 }
+
+
+// ── External backup integrity verification ────────────────────────────────────
+
+/// Verify a backup archive without restoring it to disk.
+///
+/// This performs:
+/// 1. Reads `MANIFEST.json` from the archive.
+/// 2. Verifies the manifest hash (tamper check on the file list itself).
+/// 3. If the archive is encrypted and `master` is `Some`, decrypts every
+///    file entry and verifies its BLAKE3 hash against the manifest.
+/// 4. If `master` is `None` and the archive is encrypted, reports the file
+///    list and manifest hash only (cannot verify encrypted content).
+///
+/// Returns a `VerifyReport` describing the outcome.
+pub fn verify_backup(
+    archive_path: &Path,
+    master:       Option<&MasterKey>,
+) -> Result<VerifyReport, anyhow::Error> {
+    use std::io::Read;
+
+    // ── First pass: extract and validate MANIFEST ─────────────────────────
+    let archive_file = std::fs::File::open(archive_path)
+        .with_context(|| format!("Cannot open archive: {}", archive_path.display()))?;
+    let mut archive: tar::Archive<&std::fs::File> = tar::Archive::new(&archive_file);
+
+    let manifest: BackupManifest = {
+        let mut found: Option<BackupManifest> = None;
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            if entry.path()?.to_string_lossy() == "MANIFEST.json" {
+                let mut buf = String::new();
+                entry.read_to_string(&mut buf)?;
+                found = Some(serde_json::from_str(&buf).context("Parse MANIFEST.json")?);
+                break;
+            }
+        }
+        found.context("MANIFEST.json not found in archive")?
+    };
+
+    let manifest_ok = manifest.verify();
+
+    // ── Second pass: verify per-file hashes if decryption is possible ─────
+    let backup_key: Option<vledger_crypto::encrypt::EncryptionKey> = if manifest.encrypted {
+        match master {
+            Some(m) => {
+                // Re-derive the backup key from the .key sidecar
+                let sidecar_path = {
+                    let name = archive_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let mut p = archive_path.to_path_buf();
+                    p.set_file_name(format!("{name}.key"));
+                    p
+                };
+                if sidecar_path.exists() {
+                    // Use the existing read_key_sidecar via the restore path
+                    Some(read_key_sidecar(archive_path, m)?)
+                } else {
+                    None // Cannot decrypt without sidecar
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let mut file_results: Vec<FileVerifyResult> = Vec::new();
+
+    if backup_key.is_some() || !manifest.encrypted {
+        let archive_file2 = std::fs::File::open(archive_path)?;
+        let mut archive2  = tar::Archive::new(archive_file2);
+
+        for entry in archive2.entries()? {
+            let mut entry = entry?;
+            let entry_name = entry.path()?.to_string_lossy().to_string();
+            if entry_name == "MANIFEST.json" { continue; }
+
+            let logical_name = if manifest.encrypted && entry_name.ends_with(".enc") {
+                entry_name[..entry_name.len() - 4].to_string()
+            } else {
+                entry_name.clone()
+            };
+
+            let expected_hash = match manifest.files.get(&logical_name) {
+                Some(h) => h.clone(),
+                None    => {
+                    file_results.push(FileVerifyResult {
+                        path:    logical_name,
+                        status:  FileVerifyStatus::NotInManifest,
+                        reason:  None,
+                    });
+                    continue;
+                }
+            };
+
+            let mut raw = Vec::new();
+            entry.read_to_end(&mut raw)?;
+
+            let plain = if let Some(ref key) = backup_key {
+                match vledger_crypto::encrypt::decrypt(key, &raw, Some(logical_name.as_bytes())) {
+                    Ok(p)  => p,
+                    Err(_) => {
+                        file_results.push(FileVerifyResult {
+                            path:   logical_name,
+                            status: FileVerifyStatus::DecryptionFailed,
+                            reason: None,
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                raw
+            };
+
+            let actual_hash = hex::encode(blake3::hash(&plain).as_bytes());
+            if actual_hash == expected_hash {
+                file_results.push(FileVerifyResult {
+                    path:   logical_name,
+                    status: FileVerifyStatus::Ok,
+                    reason: None,
+                });
+            } else {
+                file_results.push(FileVerifyResult {
+                    path:   logical_name.clone(),
+                    status: FileVerifyStatus::HashMismatch,
+                    reason: Some(format!(
+                        "expected {}, got {}", &expected_hash[..16], &actual_hash[..16]
+                    )),
+                });
+            }
+        }
+    }
+
+    let failed_files = file_results.iter()
+        .filter(|r| r.status != FileVerifyStatus::Ok)
+        .count();
+
+    Ok(VerifyReport {
+        archive_path:      archive_path.to_path_buf(),
+        vledger_version:   manifest.vledger_version.clone(),
+        created_at:        manifest.created_at_rfc.clone(),
+        encrypted:         manifest.encrypted,
+        manifest_hash:     manifest.manifest_hash.clone(),
+        manifest_hash_ok:  manifest_ok,
+        total_files:       manifest.files.len(),
+        content_verified:  !file_results.is_empty(),
+        file_results,
+        failed_files,
+    })
+}
+
+/// Status of a single file's verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileVerifyStatus {
+    /// File hash matched.
+    Ok,
+    /// File hash did not match the manifest.
+    HashMismatch,
+    /// File could not be decrypted (wrong key or corrupt ciphertext).
+    DecryptionFailed,
+    /// File was present in the archive but absent from the manifest.
+    NotInManifest,
+}
+
+/// Per-file verification result.
+#[derive(Debug, Clone)]
+pub struct FileVerifyResult {
+    pub path:   String,
+    pub status: FileVerifyStatus,
+    pub reason: Option<String>,
+}
+
+/// Complete report from `verify_backup`.
+#[derive(Debug)]
+pub struct VerifyReport {
+    pub archive_path:      std::path::PathBuf,
+    pub vledger_version:   String,
+    pub created_at:        String,
+    pub encrypted:         bool,
+    pub manifest_hash:     String,
+    pub manifest_hash_ok:  bool,
+    pub total_files:       usize,
+    pub content_verified:  bool,
+    pub file_results:      Vec<FileVerifyResult>,
+    pub failed_files:      usize,
+}
+
+impl VerifyReport {
+    /// `true` if every verifiable check passed.
+    pub fn is_ok(&self) -> bool {
+        self.manifest_hash_ok && self.failed_files == 0
+    }
+
+    /// Print a human-readable summary to stdout.
+    pub fn print_summary(&self) {
+        println!("── VectorLedger Backup Verification ────────────");
+        println!("  Archive   : {}", self.archive_path.display());
+        println!("  Version   : {}", self.vledger_version);
+        println!("  Created   : {}", self.created_at);
+        println!("  Encrypted : {}", self.encrypted);
+        println!("  Files     : {}", self.total_files);
+        println!("  Manifest  : {}",
+            if self.manifest_hash_ok { "✓ OK" } else { "✗ TAMPERED" });
+
+        if self.content_verified {
+            let ok_count   = self.file_results.iter().filter(|r| r.status == FileVerifyStatus::Ok).count();
+            let fail_count = self.failed_files;
+            println!("  Content   : {ok_count} OK, {fail_count} FAILED");
+            for r in &self.file_results {
+                if r.status != FileVerifyStatus::Ok {
+                    println!("    ✗ {} — {:?}{}", r.path, r.status,
+                        r.reason.as_deref().map(|s| format!(": {s}")).unwrap_or_default());
+                }
+            }
+        } else if self.encrypted {
+            println!("  Content   : skipped (no master key — manifest-only verify)");
+        }
+
+        println!("  Result    : {}", if self.is_ok() { "✓ PASS" } else { "✗ FAIL" });
+        println!("──────────────────────────────────────────────────");
+    }
+}

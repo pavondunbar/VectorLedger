@@ -28,6 +28,7 @@
 //! ```
 
 pub mod config;
+pub mod divergence;
 pub mod error;
 pub mod primary;
 pub mod protocol;
@@ -36,6 +37,10 @@ pub mod secret;
 pub mod tls;
 
 pub use config::{ReplicationConfig, ReplicationRole};
+pub use divergence::{
+    DivergenceCheckpoint, DivergenceReport,
+    build_checkpoint, compute_wal_chain_hash, verify_checkpoint,
+};
 pub use error::ReplicationError;
 pub use primary::WalShipper;
 pub use replica::{ReplicaApplier, WalReceiver};

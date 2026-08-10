@@ -18,6 +18,12 @@ uuid           = { workspace = true }
 crc32fast      = { workspace = true }
 tokio          = { workspace = true }
 tokio-util     = { workspace = true }
+aes-gcm        = { workspace = true }
+hkdf           = { workspace = true }
+sha2           = { workspace = true }
+rand           = { workspace = true }
+rand_core      = { workspace = true }
+ed25519-dalek  = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.20.0"

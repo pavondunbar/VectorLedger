@@ -36,11 +36,24 @@ pub struct TransactionManager {
     committed_idempotency_keys: HashSet<String>,
     /// Highest committed tx_id — used as the snapshot boundary for new txns.
     last_committed_tx_id: u64,
+    /// Optional Ed25519 signing key embedded into every CommitPayload.
+    /// When `None`, commits are written with zero signature/pubkey fields
+    /// (backwards-compatible dev/test mode).
+    signing_key: Option<vledger_crypto::sign::DbSigningKey>,
 }
 
 impl TransactionManager {
     /// Open the transaction manager backed by a WAL at `wal_dir`.
     pub fn open(wal_dir: &Path) -> Result<Self, TxError> {
+        Self::open_with_signing(wal_dir, None)
+    }
+
+    /// Open with an Ed25519 signing key.  Every CommitPayload will include
+    /// a signature over `tx_hash || record_count.to_le_bytes()`.
+    pub fn open_with_signing(
+        wal_dir:    &Path,
+        signing_key: Option<vledger_crypto::sign::DbSigningKey>,
+    ) -> Result<Self, TxError> {
         let wal = WalWriter::open(wal_dir)?;
 
         // Recover the WAL to determine the highest committed tx_id and
@@ -60,7 +73,8 @@ impl TransactionManager {
         info!(
             last_committed_tx_id,
             next_tx_id,
-            recovered_txns = recovery.committed.len(),
+            recovered_txns  = recovery.committed.len(),
+            signing_enabled = signing_key.is_some(),
             "TransactionManager initialized"
         );
 
@@ -70,6 +84,7 @@ impl TransactionManager {
             active: HashMap::new(),
             committed_idempotency_keys: HashSet::new(),
             last_committed_tx_id,
+            signing_key,
         })
     }
 
@@ -171,10 +186,24 @@ impl TransactionManager {
             self.wal.append_record(tx_id, RecordType::Data, &payload)?;
         }
 
+        // Build the signed commit message: tx_hash || record_count_le4
+        let (signature, signer_pubkey) = if let Some(ref sk) = self.signing_key {
+            let mut msg = Vec::with_capacity(36);
+            msg.extend_from_slice(&tx_hash);
+            msg.extend_from_slice(&mutation_count.to_le_bytes());
+            let sig    = sk.sign(&msg);
+            let pubkey = sk.public_key().to_bytes();
+            (sig.to_vec(), pubkey.to_vec())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
         // Write Commit record
         let commit_payload = CommitPayload {
             record_count: mutation_count,
             tx_hash,
+            signature,
+            signer_pubkey,
         };
         self.wal.append_record(tx_id, RecordType::Commit, &commit_payload)?;
 

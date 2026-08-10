@@ -34,3 +34,6 @@ hex             = { workspace = true }
 argon2          = { workspace = true }
 rand            = { workspace = true }
 blake3          = { workspace = true }
+axum            = { workspace = true }
+anyhow          = { workspace = true }
+rustls-pemfile  = { workspace = true }

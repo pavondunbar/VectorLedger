@@ -1,0 +1,43 @@
+[package]
+name    = "vledger-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# cargo-fuzz requires a nightly toolchain and is invoked via:
+#   cargo +nightly fuzz run fuzz_wal_recovery
+#   cargo +nightly fuzz run fuzz_sql_parser
+#   cargo +nightly fuzz run fuzz_pgwire_codec
+#
+# Install cargo-fuzz:
+#   cargo install cargo-fuzz
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys   = "0.4"
+vledger-wal     = { path = "../crates/vledger-wal" }
+vledger-sql     = { path = "../crates/vledger-sql" }
+vledger-pgwire  = { path = "../crates/vledger-pgwire" }
+vledger-ledger  = { path = "../crates/vledger-ledger" }
+vledger-crypto  = { path = "../crates/vledger-crypto" }
+tempfile        = "3.20.0"
+
+[[bin]]
+name  = "fuzz_wal_recovery"
+path  = "fuzz_targets/fuzz_wal_recovery.rs"
+test  = false
+doc   = false
+
+[[bin]]
+name  = "fuzz_sql_parser"
+path  = "fuzz_targets/fuzz_sql_parser.rs"
+test  = false
+doc   = false
+
+[[bin]]
+name  = "fuzz_pgwire_codec"
+path  = "fuzz_targets/fuzz_pgwire_codec.rs"
+test  = false
+doc   = false

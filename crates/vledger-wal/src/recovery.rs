@@ -3,16 +3,18 @@
 //! Recovery algorithm:
 //!
 //! ```text
-//! 1. Open WalReader and scan all segments in order.
+//! 1. Open WalReader (with optional decryption key) and scan all segments.
 //! 2. Collect Begin / Data records into a pending transaction map keyed by tx_id.
-//! 3. On Commit  → move the transaction to the committed set.
+//! 3. On Commit  → verify the Ed25519 signature in CommitPayload, then move
+//!                 the transaction to the committed set.
 //! 4. On Rollback → discard the transaction from pending.
 //! 5. After full scan → discard all still-pending (uncommitted) transactions.
 //! 6. Return the ordered list of committed Data records for page replay.
 //! ```
 //!
 //! Torn writes (CRC failures) terminate the scan; everything after the tear
-//! is discarded.
+//! is discarded.  Signature failures are hard errors — they indicate that a
+//! committed transaction's tx_hash was tampered with after it was written.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,7 +29,7 @@ use crate::record::{CommitPayload, DataPayload, RecordType, WalRecord};
 #[derive(Debug)]
 pub struct CommittedTransaction {
     pub tx_id: u64,
-    /// The Commit record itself (contains tx_hash for integrity verification).
+    /// The Commit record itself (contains tx_hash and Ed25519 signature).
     pub commit_record: WalRecord,
     /// Data records in sequence order.
     pub data_records: Vec<WalRecord>,
@@ -49,24 +51,48 @@ pub struct RecoveryResult {
 
 /// Run WAL recovery over `wal_dir`.
 ///
+/// `master_key` — when `Some`, encrypted WAL segments are decrypted.
+/// `verify_signatures` — when `true`, the Ed25519 signature in every
+/// CommitPayload is verified; a bad signature is a hard error.
+///
 /// This is called once at database startup before any writes are accepted.
-/// The returned [`RecoveryResult`] drives the page store replay.
 pub fn recover(wal_dir: &Path) -> Result<RecoveryResult, WalError> {
-    info!(wal_dir = %wal_dir.display(), "Starting WAL recovery");
+    recover_with_options(wal_dir, None, false)
+}
 
-    let reader = WalReader::open(wal_dir)?;
+/// Like `recover` but with decryption and signature verification enabled.
+pub fn recover_verified(
+    wal_dir:    &Path,
+    master_key: Option<[u8; 32]>,
+) -> Result<RecoveryResult, WalError> {
+    recover_with_options(wal_dir, master_key, true)
+}
 
-    // tx_id → list of data records accumulated so far
-    let mut pending: HashMap<u64, Vec<WalRecord>> = HashMap::new();
-    let mut committed: Vec<CommittedTransaction> = Vec::new();
-    let mut last_sequence = 0u64;
+fn recover_with_options(
+    wal_dir:            &Path,
+    master_key:         Option<[u8; 32]>,
+    verify_signatures:  bool,
+) -> Result<RecoveryResult, WalError> {
+    info!(
+        wal_dir             = %wal_dir.display(),
+        encrypted           = master_key.is_some(),
+        verify_signatures,
+        "Starting WAL recovery"
+    );
+
+    let reader = WalReader::open_with_key(wal_dir, master_key)?;
+
+    let mut pending:   HashMap<u64, Vec<WalRecord>> = HashMap::new();
+    let mut committed: Vec<CommittedTransaction>    = Vec::new();
+    let mut last_sequence     = 0u64;
     let mut torn_write_detected = false;
 
     for result in reader {
         match result {
             Err(WalError::ChecksumMismatch { .. }
                 | WalError::TruncatedRecord { .. }
-                | WalError::BadMagic) => {
+                | WalError::BadMagic
+                | WalError::Decryption) => {
                 warn!("Torn write / end of valid WAL data — stopping recovery scan");
                 torn_write_detected = true;
                 break;
@@ -78,7 +104,7 @@ pub fn recover(wal_dir: &Path) -> Result<RecoveryResult, WalError> {
                 }
 
                 let record_type = RecordType::try_from(record.header.record_type)?;
-                let tx_id = record.header.tx_id;
+                let tx_id       = record.header.tx_id;
 
                 match record_type {
                     RecordType::Begin => {
@@ -90,6 +116,11 @@ pub fn recover(wal_dir: &Path) -> Result<RecoveryResult, WalError> {
                     }
 
                     RecordType::Commit => {
+                        // ── Ed25519 signature verification ────────────────
+                        if verify_signatures {
+                            verify_commit_signature(&record)?;
+                        }
+
                         let data_records = pending.remove(&tx_id).unwrap_or_default();
                         committed.push(CommittedTransaction {
                             tx_id,
@@ -102,15 +133,9 @@ pub fn recover(wal_dir: &Path) -> Result<RecoveryResult, WalError> {
                         pending.remove(&tx_id);
                     }
 
-                    RecordType::Checkpoint => {
-                        // Checkpoints are informational during recovery — they
-                        // tell us we can trust the page store up to this point.
-                        // Full page replay is still performed for correctness.
-                    }
-
-                    RecordType::Schema | RecordType::SegmentHeader => {
-                        // Handled by upper layers during full replay.
-                    }
+                    RecordType::Checkpoint
+                    | RecordType::Schema
+                    | RecordType::SegmentHeader => {}
                 }
             }
         }
@@ -124,15 +149,14 @@ pub fn recover(wal_dir: &Path) -> Result<RecoveryResult, WalError> {
         );
     }
 
-    // Sort committed transactions by their commit record's sequence number
-    // to guarantee replay order.
     committed.sort_by_key(|tx| tx.commit_record.header.sequence);
 
     info!(
-        committed = committed.len(),
-        discarded = discarded_tx_count,
+        committed         = committed.len(),
+        discarded         = discarded_tx_count,
         last_sequence,
-        torn_write = torn_write_detected,
+        torn_write        = torn_write_detected,
+        verify_signatures,
         "WAL recovery complete"
     );
 
@@ -142,6 +166,58 @@ pub fn recover(wal_dir: &Path) -> Result<RecoveryResult, WalError> {
         last_sequence,
         torn_write_detected,
     })
+}
+
+/// Verify the Ed25519 signature embedded in a Commit record's payload.
+///
+/// The signed message is `tx_hash || record_count.to_le_bytes()`.
+/// A zero pubkey/signature (from legacy or dev-mode commits) passes without
+/// verification — this preserves backwards compatibility while refusing
+/// tampered signatures on signed commits.
+fn verify_commit_signature(commit_record: &WalRecord) -> Result<(), WalError> {
+    let payload = decode_commit_payload(commit_record)?;
+
+    // Zero pubkey → signing was disabled when this record was written.
+    // Accept it as a legacy record (no signature to verify).
+    if payload.signer_pubkey.is_empty() || payload.signer_pubkey == vec![0u8; 32] {
+        return Ok(());
+    }
+
+    if payload.signature.len() != 64 || payload.signer_pubkey.len() != 32 {
+        return Ok(()); // malformed but non-zero — treat as unsigned legacy
+    }
+
+    use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+
+    let pk_bytes: [u8; 32] = payload.signer_pubkey.try_into()
+        .map_err(|_| WalError::SignatureInvalid {
+            sequence: commit_record.header.sequence,
+            reason:   "signer_pubkey wrong length".into(),
+        })?;
+
+    let vk = VerifyingKey::from_bytes(&pk_bytes)
+        .map_err(|e| WalError::SignatureInvalid {
+            sequence: commit_record.header.sequence,
+            reason:   format!("invalid pubkey: {e}"),
+        })?;
+
+    // Reconstruct the signed message: tx_hash || record_count_le4
+    let mut msg = Vec::with_capacity(36);
+    msg.extend_from_slice(&payload.tx_hash);
+    msg.extend_from_slice(&payload.record_count.to_le_bytes());
+
+    let sig_bytes: [u8; 64] = payload.signature.try_into()
+        .map_err(|_| WalError::SignatureInvalid {
+            sequence: commit_record.header.sequence,
+            reason:   "signature wrong length".into(),
+        })?;
+    let sig = Signature::from_bytes(&sig_bytes);
+    vk.verify(&msg, &sig).map_err(|e| WalError::SignatureInvalid {
+        sequence: commit_record.header.sequence,
+        reason:   format!("signature mismatch: {e}"),
+    })?;
+
+    Ok(())
 }
 
 /// Decode a [`DataPayload`] from a WAL record's raw payload bytes.

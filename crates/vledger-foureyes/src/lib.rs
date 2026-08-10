@@ -25,6 +25,8 @@
 pub mod error;
 pub mod queue;
 pub mod record;
+#[cfg(test)]
+mod bypass_tests;
 
 pub use error::FourEyesError;
 pub use queue::FourEyesQueue;
