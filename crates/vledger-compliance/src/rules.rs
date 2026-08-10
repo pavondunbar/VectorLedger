@@ -273,16 +273,64 @@ fn check_master_key_placeholder(data_dir: &Path) -> Evidence {
 }
 
 fn check_hsm_config(data_dir: &Path) -> Evidence {
-    let cfg = data_dir.join("keys").join("hsm_config.json");
-    if cfg.exists() {
-        Evidence::pass("PCI-3.5", "Key management — HSM configuration",
-            "hsm_config.json present — key material managed by HSM provider")
-    } else {
-        Evidence::fail("PCI-3.5", "Key management — HSM configuration",
-            "HSM configuration missing",
-            vec!["keys/hsm_config.json not found — configure HSM backend via \
-                  `vledger init --hsm-backend <soft|aws|azure>`".into()])
+    // Accept either of two valid HSM configuration indicators:
+    //   1. keys/hsm_config.json  — legacy explicit HSM config file.
+    //   2. keys/key_source.json with backend != "env" and backend != "file"
+    //      (i.e. pyhsm, vault, or aws_kms — all involve external key custody).
+    let explicit_cfg = data_dir.join("keys").join("hsm_config.json");
+    if explicit_cfg.exists() {
+        return Evidence::pass("PCI-3.5", "Key management — HSM configuration",
+            "keys/hsm_config.json present — key material managed by HSM provider");
     }
+
+    let key_source = data_dir.join("keys").join("key_source.json");
+    if key_source.exists() {
+        // Parse the backend field to decide whether it qualifies as HSM/KMS.
+        let backend = std::fs::read_to_string(&key_source)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("backend").and_then(|b| b.as_str()).map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        match backend.as_str() {
+            "py_hsm" | "pyhsm" => {
+                return Evidence::pass("PCI-3.5", "Key management — HSM configuration",
+                    "keys/key_source.json configured with PyHSM backend — master key \
+                     sealed inside AES-256-GCM-SIV encrypted keystore, never on disk in plaintext");
+            }
+            "vault" => {
+                return Evidence::pass("PCI-3.5", "Key management — HSM configuration",
+                    "keys/key_source.json configured with HashiCorp Vault backend — \
+                     master key managed by Vault KMS, not stored on local disk");
+            }
+            "aws_kms" => {
+                return Evidence::pass("PCI-3.5", "Key management — HSM configuration",
+                    "keys/key_source.json configured with AWS KMS backend — master key \
+                     protected by AWS KMS, raw key material never on disk");
+            }
+            "env" | "file" | "" => {
+                return Evidence::fail("PCI-3.5", "Key management — HSM configuration",
+                    "Master key is stored on disk or in an environment variable",
+                    vec![
+                        format!("keys/key_source.json backend is '{backend}' — this does not \
+                                 satisfy PCI-DSS Req 3.5 key-management requirements."),
+                        "Action: re-initialise with `vledger init --key-source pyhsm` (or vault \
+                         / aws_kms) to move master key custody into an HSM or KMS.".into(),
+                    ]);
+            }
+            other => {
+                return Evidence::warn("PCI-3.5", "Key management — HSM configuration",
+                    &format!("Unknown key_source backend '{other}'"),
+                    vec!["Verify that the configured backend provides adequate key protection \
+                          for PCI-DSS Req 3.5 compliance.".into()]);
+            }
+        }
+    }
+
+    Evidence::fail("PCI-3.5", "Key management — HSM configuration",
+        "No HSM configuration found",
+        vec!["Neither keys/hsm_config.json nor keys/key_source.json was found. \
+              Configure an HSM backend via `vledger init --key-source pyhsm` (or vault / aws_kms).".into()])
 }
 
 fn check_four_eyes_config(data_dir: &Path) -> Evidence {

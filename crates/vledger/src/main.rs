@@ -366,9 +366,18 @@ async fn cmd_init(
             .with_context(|| format!("Failed to create {d}"))?;
     }
 
-    let signing_key = vledger_crypto::sign::DbSigningKey::generate();
-    let pubkey_hex  = hex::encode(signing_key.public_key().to_bytes());
+    let signing_key   = vledger_crypto::sign::DbSigningKey::generate();
+    let pubkey_hex    = hex::encode(signing_key.public_key().to_bytes());
+    let privkey_hex   = hex::encode(signing_key.to_bytes());
     std::fs::write(data_dir.join("keys").join("db_signing_pubkey.hex"), &pubkey_hex)?;
+    // Private key persisted with mode 0o600 — required for WAL commit signing.
+    let privkey_path  = data_dir.join("keys").join("db_signing_key.hex");
+    std::fs::write(&privkey_path, &privkey_hex)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&privkey_path, std::fs::Permissions::from_mode(0o600));
+    }
 
     let _master_key = vledger_crypto::kdf::MasterKey::generate();
     std::fs::write(

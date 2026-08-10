@@ -2476,6 +2476,7 @@ dependencies = [
  "bincode",
  "blake3",
  "chrono",
+ "hex",
  "libc",
  "proptest",
  "serde",
@@ -2665,6 +2666,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "bincode",
+ "blake3",
  "chrono",
  "crc32fast",
  "ed25519-dalek",

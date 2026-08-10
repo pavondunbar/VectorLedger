@@ -116,9 +116,23 @@ fn recover_with_options(
                     }
 
                     RecordType::Commit => {
-                        // ── Ed25519 signature verification ────────────────
+                        // ── Ed25519 signature verification + tx_hash recomputation ──
+                        //
+                        // A valid commit requires ALL of the following:
+                        //
+                        //   1. record_count == number of Data records collected for this tx
+                        //   2. recomputed tx_hash (BLAKE3 of row_hash bytes in sequence)
+                        //      == CommitPayload.tx_hash
+                        //   3. Ed25519 signature over tx_hash || record_count.to_le_bytes()
+                        //      is valid (when signing is enabled)
+                        //
+                        // Step 2 is critical: without it, an attacker who can write to
+                        // the WAL file could replace Data records while keeping the
+                        // original (signed) Commit record.  Recomputing tx_hash from the
+                        // actual Data records ensures the signature covers the real data.
                         if verify_signatures {
-                            verify_commit_signature(&record)?;
+                            let data_records = pending.get(&tx_id).map(|v| v.as_slice()).unwrap_or(&[]);
+                            verify_commit_full(&record, data_records)?;
                         }
 
                         let data_records = pending.remove(&tx_id).unwrap_or_default();
@@ -166,6 +180,71 @@ fn recover_with_options(
         last_sequence,
         torn_write_detected,
     })
+}
+
+/// Full commit verification:
+///
+/// 1. Decodes the CommitPayload.
+/// 2. Checks `record_count` matches the number of Data records collected.
+/// 3. **Recomputes** `tx_hash` from the actual Data record `row_hash` fields
+///    and asserts it equals `CommitPayload.tx_hash`.
+/// 4. Verifies the Ed25519 signature over `tx_hash || record_count.to_le_bytes()`
+///    (when a non-zero pubkey is embedded).
+///
+/// Steps 2 + 3 close the gap where an attacker replaces Data records while
+/// keeping a valid (signed) Commit record: the recomputed hash would differ.
+fn verify_commit_full(
+    commit_record: &WalRecord,
+    data_records:  &[WalRecord],
+) -> Result<(), WalError> {
+    let payload = decode_commit_payload(commit_record)?;
+
+    // ── Step 1: record count ──────────────────────────────────────────────
+    let actual_count = data_records.len() as u32;
+    if payload.record_count != actual_count {
+        return Err(WalError::SignatureInvalid {
+            sequence: commit_record.header.sequence,
+            reason: format!(
+                "record_count mismatch: CommitPayload says {}, but {} Data records found",
+                payload.record_count, actual_count
+            ),
+        });
+    }
+
+    // ── Step 2 + 3: recompute tx_hash from Data records ───────────────────
+    // tx_hash = BLAKE3( row_hash_0 || row_hash_1 || … || row_hash_n )
+    // fed incrementally — this must match Transaction::tx_hash() in
+    // vledger-transaction/src/tx.rs exactly (same hasher, same feed order).
+    let recomputed_tx_hash: [u8; 32] = {
+        let mut h = blake3::Hasher::new();
+        for data_record in data_records {
+            match decode_data_payload(data_record) {
+                Ok(dp) => { h.update(&dp.row_hash); }
+                Err(e) => return Err(WalError::Serialization(format!(
+                    "failed to decode Data record (seq {}): {e}",
+                    data_record.header.sequence
+                ))),
+            }
+        }
+        *h.finalize().as_bytes()
+    };
+
+    if recomputed_tx_hash != payload.tx_hash {
+        return Err(WalError::SignatureInvalid {
+            sequence: commit_record.header.sequence,
+            reason: format!(
+                "tx_hash mismatch: CommitPayload contains {}, recomputed from Data records is {}. \
+                 Data records may have been tampered with.",
+                hex::encode(payload.tx_hash),
+                hex::encode(recomputed_tx_hash),
+            ),
+        });
+    }
+
+    // ── Step 4: Ed25519 signature ─────────────────────────────────────────
+    verify_commit_signature(commit_record)?;
+
+    Ok(())
 }
 
 /// Verify the Ed25519 signature embedded in a Commit record's payload.

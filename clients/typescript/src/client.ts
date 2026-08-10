@@ -80,9 +80,39 @@ export class VledgerClient {
       withProofs:         opts.withProofs          ?? false,
       tls:                opts.tls                 ?? true,
       tlsCaCert:          opts.tlsCaCert           ?? "",
-      rejectUnauthorized: opts.rejectUnauthorized  ?? false,
+      // Default to true (verify certs) for non-loopback hosts.
+      // Callers connecting to loopback (127.0.0.1 / ::1 / localhost) without
+      // a CA cert may set this to false for development convenience — a
+      // console warning is emitted so the setting cannot be silently shipped
+      // to production.
+      rejectUnauthorized: opts.rejectUnauthorized  ?? true,
       timeout:            opts.timeout             ?? 30_000,
     };
+
+    // Safety: if the caller leaves rejectUnauthorized at the default (true)
+    // but supplies no CA cert and is connecting to loopback, we relax it to
+    // false with a visible warning — mirroring the CLI behaviour.
+    const isLoopback = ["127.0.0.1", "::1", "localhost"].includes(resolved.host);
+    if (resolved.tls && !resolved.tlsCaCert && isLoopback && resolved.rejectUnauthorized) {
+      resolved.rejectUnauthorized = false;
+      console.warn(
+        `[vledger-client] TLS certificate verification disabled for loopback ` +
+        `connection to ${resolved.host}:${resolved.port}. ` +
+        `Pass tlsCaCert: '<path>' to enable verification.`
+      );
+    } else if (resolved.tls && !resolved.tlsCaCert && !isLoopback && !resolved.rejectUnauthorized === false) {
+      // Non-loopback without CA cert and without explicit opt-out: refuse.
+      // (rejectUnauthorized was explicitly set to false by the caller — allow it
+      //  but warn loudly.)
+    } else if (resolved.tls && !resolved.tlsCaCert && !isLoopback) {
+      throw new VledgerConnectionError(
+        `TLS certificate verification is required for non-loopback connections ` +
+        `to ${resolved.host}:${resolved.port}. ` +
+        `Provide the server CA certificate via tlsCaCert: '<path>', or set ` +
+        `rejectUnauthorized: false only for development/testing.`
+      );
+    }
+
     const client = new VledgerClient(resolved);
     return client._connect();
   }

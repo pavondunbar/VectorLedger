@@ -187,10 +187,31 @@ class VledgerClient:
             ctx.minimum_version = ssl.TLSVersion.TLSv1_3
             if self._tls_ca_cert:
                 ctx.load_verify_locations(self._tls_ca_cert)
+                # CA cert supplied: full verification enabled (recommended for production).
             else:
-                # Development: accept self-signed certs from vgdb.
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
+                # No CA cert supplied.  For loopback connections (127.0.0.1 / ::1 /
+                # localhost) we accept the server's self-signed certificate —
+                # this is the expected setup for local development and the CLI quick-start.
+                # For any non-loopback address, raise an error so callers cannot
+                # accidentally disable certificate verification in production.
+                is_loopback = self._host in ("127.0.0.1", "::1", "localhost")
+                if is_loopback:
+                    import warnings
+                    warnings.warn(
+                        "TLS certificate verification is disabled for loopback connection "
+                        f"to {self._host}:{self._port}. Pass tls_ca_cert=<path> to enable "
+                        "verification.",
+                        stacklevel=3,
+                    )
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                else:
+                    raise VledgerConnectionError(
+                        f"TLS certificate verification is required for non-loopback "
+                        f"connections to {self._host}:{self._port}. "
+                        "Provide the server CA certificate via the tls_ca_cert parameter. "
+                        "Example: VledgerClient(host='...', tls_ca_cert='/etc/vledger/ca.crt')"
+                    )
             self._sock = ctx.wrap_socket(raw, server_hostname=self._host)
         else:
             self._sock = raw

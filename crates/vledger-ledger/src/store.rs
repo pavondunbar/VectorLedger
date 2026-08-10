@@ -153,11 +153,20 @@ impl LedgerStore {
     ///
     /// If the WAL already contains committed transactions, the in-memory
     /// state is rebuilt by replaying all committed Data records.
+    ///
+    /// When `data_dir/keys/db_signing_key.hex` is present the Ed25519 signing
+    /// key is loaded and wired into every WAL CommitPayload, fulfilling the
+    /// "Ed25519 commit signing on every WAL commit record" guarantee.
+    /// Recovery is also run with signature verification enabled so tampered
+    /// commits are caught on startup.
     pub fn open(data_dir: &Path) -> Result<Self, LedgerError> {
         let wal_dir = data_dir.join("wal");
         let pages_dir = data_dir.join("pages");
 
-        let tx_manager = TransactionManager::open(&wal_dir)?;
+        // Load Ed25519 signing key if persisted by `vledger init`.
+        let signing_key = Self::load_signing_key(data_dir);
+
+        let tx_manager = TransactionManager::open_with_signing(&wal_dir, signing_key)?;
         let page_store = PageStore::open(&pages_dir)?;
 
         // Acquire an exclusive advisory lock on the data directory to prevent
@@ -204,6 +213,56 @@ impl LedgerStore {
         Self::open(&tmp).expect("cannot open in-memory ledger")
     }
 
+    // ── Signing key loader ────────────────────────────────────────────────
+
+    /// Load the Ed25519 database signing key from `data_dir/keys/db_signing_key.hex`.
+    ///
+    /// Returns `None` (with a warning) when the file is absent or unreadable —
+    /// this preserves compatibility with existing databases initialised before
+    /// signing support was added.
+    fn load_signing_key(data_dir: &Path) -> Option<vledger_crypto::sign::DbSigningKey> {
+        let key_path = data_dir.join("keys").join("db_signing_key.hex");
+        if !key_path.exists() {
+            warn!(
+                path = %key_path.display(),
+                "db_signing_key.hex not found — WAL commits will be unsigned. \
+                 Run `vledger init` to generate and persist the signing key."
+            );
+            return None;
+        }
+        let hex_str = match std::fs::read_to_string(&key_path) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => {
+                warn!(path = %key_path.display(), "Failed to read signing key: {e}");
+                return None;
+            }
+        };
+        let bytes: Vec<u8> = match hex::decode(&hex_str) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("db_signing_key.hex contains invalid hex: {e}");
+                return None;
+            }
+        };
+        let arr: [u8; 32] = match bytes.try_into() {
+            Ok(a) => a,
+            Err(_) => {
+                warn!("db_signing_key.hex must be 32 bytes (64 hex chars)");
+                return None;
+            }
+        };
+        match vledger_crypto::sign::DbSigningKey::from_bytes(&arr) {
+            Ok(sk) => {
+                info!("WAL commit signing key loaded");
+                Some(sk)
+            }
+            Err(e) => {
+                warn!("Failed to parse signing key: {e}");
+                None
+            }
+        }
+    }
+
 
     // ── WAL replay ────────────────────────────────────────────────────────
 
@@ -211,14 +270,26 @@ impl LedgerStore {
     ///
     /// This is called once at startup and rebuilds the entire state from
     /// scratch — the WAL is the source of truth.
+    ///
+    /// When the WAL contains signed commits (i.e. the database was opened with
+    /// a signing key), `recover_verified` is used so that any tampered commit
+    /// is caught as a hard error before state is applied.
     fn replay_from_wal(&mut self, wal_dir: &Path) -> Result<(), LedgerError> {
-        use vledger_wal::recovery::{decode_data_payload, recover};
+        use vledger_wal::recovery::{decode_data_payload, recover, recover_verified};
         use vledger_wal::record::MutationKind;
 
-        let result = recover(wal_dir)?;
+        // Use verified recovery when a signing key is configured so that
+        // Ed25519 signatures on CommitPayloads are checked on startup.
+        // LedgerError implements From<WalError> so ? propagates directly.
+        let result = if self.tx_manager.signing_pubkey().is_some() {
+            recover_verified(wal_dir, None)?
+        } else {
+            recover(wal_dir)?
+        };
         info!(
-            committed = result.committed.len(),
-            discarded = result.discarded_tx_count,
+            committed         = result.committed.len(),
+            discarded         = result.discarded_tx_count,
+            verify_signatures = self.tx_manager.signing_pubkey().is_some(),
             "Replaying WAL into LedgerStore"
         );
 
@@ -434,7 +505,8 @@ impl LedgerStore {
     /// - Four-eyes approval checked where required
     /// - Idempotency key deduplication
     /// - BLAKE3 hash chain extended
-    /// - WAL fsynced before returning Ok
+    /// - WAL record written (and fsynced in `per_record` mode; flushed within
+    ///   the group-commit interval in `group_commit` mode — the default)
     pub fn post_entry(&mut self, mut entry: JournalEntry) -> Result<&JournalEntry, LedgerError> {
         // 1. Structural validation
         entry.validate()?;

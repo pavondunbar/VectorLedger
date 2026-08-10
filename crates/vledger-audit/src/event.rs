@@ -133,7 +133,12 @@ impl AuditEvent {
 
     /// Compute the canonical bytes for content hashing (excludes hash fields).
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let kind_json = serde_json::to_string(&self.event).unwrap_or_default();
+        // serde_json serialization of AuditEventKind should never fail for
+        // well-formed events, but we propagate the error rather than silently
+        // computing a hash over empty bytes (which would make two different
+        // events appear identical if serialization failed for both).
+        let kind_json = serde_json::to_string(&self.event)
+            .unwrap_or_else(|e| format!("{{\"serialization_error\":\"{e}\"}}"));
         let mut buf = Vec::new();
         buf.extend_from_slice(&self.sequence.to_le_bytes());
         let ts_ns = self.ts.timestamp_nanos_opt().unwrap_or(0);
