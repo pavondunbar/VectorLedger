@@ -117,18 +117,19 @@ resolve_version() {
     if echo "$raw" | grep -q '"message"'; then
         local api_msg
         api_msg=$(echo "$raw" | grep '"message"' | head -1 | sed 's/.*"message": *"\([^"]*\)".*/\1/')
-        warn "GitHub API returned an error: ${api_msg}"
-        die "Could not determine the latest release version.
+        die "GitHub API returned an error: ${api_msg}
 
-  This usually means:
-    1. The GitHub Actions release workflow is still running (wait ~10 minutes
-       after pushing a tag, then try again), or
-    2. No GitHub Release has been published yet for this repository.
+  Could not determine the latest VectorLedger release version.
 
-  Fix: set VLEDGER_VERSION explicitly:
+  Please visit the releases page to find the current version:
+    https://github.com/${REPO}/releases
+
+  Then install it directly with:
     curl --proto '=https' --tlsv1.2 -sSf \\
       https://raw.githubusercontent.com/${REPO}/main/install.sh \\
-      | VLEDGER_VERSION=v1.0.0 bash"
+      | VLEDGER_VERSION=v1.0.0 bash
+
+  (Replace v1.0.0 with the version shown on the releases page.)"
     fi
 
     version=$(echo "$raw" \
@@ -137,15 +138,22 @@ resolve_version() {
         | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
 
     if [ -z "$version" ]; then
-        die "Could not determine the latest release version.
+        die "Could not determine the latest VectorLedger release version.
 
-  This usually means the GitHub Actions release workflow has not finished yet.
-  Wait a few minutes after pushing a version tag, then retry.
+  The GitHub API did not return a release tag. This can happen when:
+    - No GitHub Release has been published for this repository yet.
+    - The GitHub Actions release workflow is still in progress.
+    - The GitHub API is temporarily rate-limiting your IP.
 
-  Or set the version explicitly:
+  Please visit the releases page to find the current version:
+    https://github.com/${REPO}/releases
+
+  Then install it directly with:
     curl --proto '=https' --tlsv1.2 -sSf \\
       https://raw.githubusercontent.com/${REPO}/main/install.sh \\
-      | VLEDGER_VERSION=v1.0.0 bash"
+      | VLEDGER_VERSION=v1.0.0 bash
+
+  (Replace v1.0.0 with the version shown on the releases page.)"
     fi
 
     echo "$version"
@@ -277,43 +285,6 @@ add_to_path_advice() {
     warn "  source ${profile_file}"
 }
 
-# ── Build from source fallback ────────────────────────────────────────────────
-
-build_from_source() {
-    local install_dir="$1"
-    local version="$2"
-
-    warn "No pre-built binary found for this platform. Attempting to build from source..."
-
-    require_cmd cargo
-    require_cmd git
-
-    local rust_version
-    rust_version=$(rustc --version 2>/dev/null | awk '{print $2}')
-    info "Rust version: ${rust_version}"
-
-    # Initialise tmpdir immediately so the EXIT trap can always clean it up,
-    # even if a subsequent command exits early.
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    trap 'rm -rf "$tmpdir"' EXIT
-
-    info "Cloning repository at ${version}..."
-    git clone --depth 1 --branch "${version}" \
-        "https://github.com/${REPO}.git" "${tmpdir}/vectorledger" \
-        2>&1 | tail -2
-
-    info "Building release binary (this may take a few minutes)..."
-    # Build only the vledger binary package — not the entire workspace.
-    # The workspace contains internal-only tools that are not present in
-    # customer-facing releases.
-    cargo build --release \
-        --manifest-path "${tmpdir}/vectorledger/Cargo.toml" \
-        --package vledger
-
-    install_binary "${tmpdir}/vectorledger/target/release/${BINARY}" "$install_dir"
-}
-
 # ── Binary installation ───────────────────────────────────────────────────────
 
 install_binary() {
@@ -373,9 +344,15 @@ main() {
 
     info "Downloading ${asset_name}..."
     if ! download "$asset_url" "$archive" 2>/dev/null; then
-        warn "Pre-built binary not available for ${platform} at ${version}."
-        build_from_source "$install_dir" "$version"
-        return
+        die "No pre-built binary is available for your platform (${platform}) at version ${version}.
+
+  Supported platforms: linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64
+
+  Please check the releases page for available assets:
+    https://github.com/${REPO}/releases/tag/${version}
+
+  If you believe this is an error, please open an issue:
+    https://github.com/${REPO}/issues"
     fi
 
     # ── Verify checksum (best-effort) ─────────────────────────────────────
