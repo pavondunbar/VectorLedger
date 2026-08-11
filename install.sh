@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 
 # install.sh — VectorLedger installer
@@ -567,5 +566,3 @@ main() {
 }
 
 main "$@"
-```
-
