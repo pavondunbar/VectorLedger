@@ -28,6 +28,12 @@ pub mod store;
 mod crash_tests;
 #[cfg(test)]
 mod concurrent_tests;
+#[cfg(test)]
+mod fault_injection_tests;
+#[cfg(test)]
+mod invariant_tests;
+#[cfg(test)]
+mod stress_tests;
 
 pub use account::{Account, AccountId, AccountType};
 pub use amount::Amount;

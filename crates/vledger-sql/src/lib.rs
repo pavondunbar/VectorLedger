@@ -35,6 +35,8 @@ pub mod optimizer;
 pub mod parser;
 pub mod planner;
 pub mod result;
+#[cfg(test)]
+mod adversarial_tests;
 
 pub use error::SqlError;
 pub use executor::{Executor, ReadExecutor};
