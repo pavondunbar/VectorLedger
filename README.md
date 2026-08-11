@@ -2,7 +2,7 @@
 
 **A cryptographically verifiable database engine built for institutions that can't afford to trust their own database.**
 
-VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof that the returned data has not been modified since it was written. Corrections to past records are impossible — even by a DBA with full disk access.
+VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof that the returned data has not been modified since it was written. Historical tampering is **cryptographically detectable** — any modification to a past record invalidates every hash in the chain from that point to the present, provided that verification checkpoints are independently protected (which the HSM architecture is specifically designed to enforce).
 
 Built by [VectorGuard Labs](https://vectorguardlabs.com).
 
@@ -17,7 +17,7 @@ VectorLedger makes tampering **cryptographically detectable**:
 - A row written five years ago cannot be changed without invalidating every hash in the chain from that point to the present.
 - Every SELECT response optionally carries a Merkle proof that any client can independently verify.
 - The audit log is WORM-append-only — each event is hashed into the next, forming a second independent tamper-evident chain.
-- The compliance engine generates SOC 2 Type II and PCI-DSS v4 evidence reports as executable code, not documentation.
+- The compliance engine generates machine-generated **technical evidence supporting SOC 2 Type II and PCI-DSS v4 control assessments** — not pre-written documentation. This evidence supports an auditor's work; it does not by itself make an organization compliant. Organizational compliance requires additional controls, policies, and independent auditor assessment beyond what any database engine can provide.
 
 ---
 
@@ -89,6 +89,9 @@ VectorLedger makes tampering **cryptographically detectable**:
   - **Azure Dedicated HSM** — via bridge sidecar (Thales Luna Network HSM 7)
 - Raw key material never leaves the HSM — all cryptographic operations run inside the device
 - Key rotation via `vledger rotate-keys` — old key version is archived for decryption of existing data; new version used for all new writes
+- **Two deployment models supported:**
+  - **Model 1 — Local PyHSM** (same server): Unix domain socket transport, zero network overhead, ideal for development and single-server production
+  - **Model 2 — Remote PyHSM** (same-region, separate server): TLS 1.3 + mutual TLS (mTLS) transport over a private subnet; the HSM runs on a dedicated server, PyHSM's private key material is never accessible from the VectorLedger host
 
 ### Secrets Management
 - Master key can be sourced from:
@@ -96,16 +99,33 @@ VectorLedger makes tampering **cryptographically detectable**:
   - File on disk (development only)
   - **HashiCorp Vault KV v2** (`VAULT_TOKEN` read at runtime; TTL checked and logged at startup)
   - **AWS KMS** `GenerateDataKey` (ciphertext blob cached with HMAC-SHA256 integrity check)
+  - **PyHSM — local** (Model 1): Unix socket, master key sealed inside local PyHSM daemon
+  - **PyHSM — remote** (Model 2): mTLS, master key sealed inside remote PyHSM daemon on a separate server
 - Configuration file (`key_source.json`) contains only metadata — the key itself never appears in config
 
 ### Replication
+
 - Synchronous hot-standby WAL replication
 - Three security layers: TLS 1.3, optional mTLS, BLAKE3-keyed HMAC challenge-response inside TLS
 - Replica verifies BLAKE3 hash of every received WAL record before applying it
 - Exponential reconnect backoff with faster escalation on auth failures
 - Replication secret stored at `0o600` on disk, generated from `OsRng`
+- **Divergence detection:** periodic `DivergenceCheckpoint` messages carry a rolling BLAKE3 WAL chain hash and the primary's ledger chain tip; the replica computes the same hash over its local WAL and responds with a `DivergenceReport` — a mismatch means the replica must be re-seeded
+- **Network partition handling:** the replica's receive loop detects a dropped connection (read returns 0 bytes or an I/O error) and immediately enters the exponential reconnect loop; in-progress WAL records that were not ACKed are not applied
+- **Corrupted WAL on wire:** every `WalRecordMsg` carries `BLAKE3(record_bytes)`; the replica rejects any record whose hash does not match, sends an error ACK, and closes the connection — the primary marks that replica dead and removes it from the active set
+
+**Current limitations (known, planned):**
+
+- **Failover promotion is manual.** There is no automatic primary election. If the primary crashes, an operator must explicitly reconfigure a replica as the new primary. Automated promotion via consensus (Raft/Paxos) is planned but not yet implemented.
+- **Split-brain prevention is network-layer only.** VectorLedger relies on the operator's network segmentation (e.g. AWS security groups, private subnets) to prevent two nodes from simultaneously acting as primary. There is no fencing or STONITH mechanism in the replication layer itself.
+- **Replica lag is observable but not bounded.** Heartbeat ACKs carry the replica's last applied LSN, allowing the primary to compute lag. There is no automatic write-pause when lag exceeds a threshold.
+
+These limitations are appropriate for the current stage and do not affect the security properties of the WAL integrity or tamper-evidence guarantees.
 
 ### Compliance Reporting
+
+> **Important scope note:** VectorLedger generates machine-generated technical evidence supporting SOC 2 and PCI-DSS control assessments. This evidence is a technical input to an audit — it does not by itself make an organization compliant. Organizational compliance requires additional policies, procedures, personnel controls, and independent auditor assessment that are outside the scope of any database engine.
+
 - **SOC 2 Type II** controls: CC6.1, CC6.2, CC6.3, CC6.6, CC6.7, CC7.2, CC8.1, A1.1
 - **PCI-DSS v4** controls: Req 2.2, 3.4, 3.5, 4.2, 7.1, 10.2, 10.3, 10.5, 11.5
 - Reports are generated by running checks against real filesystem state — not pre-written text
@@ -147,6 +167,25 @@ These numbers represent a **conservative baseline on development hardware**.
 Production performance has not yet been independently characterized on server-class hardware.
 The primary bottleneck in the write path is fsync latency, which varies significantly
 between storage devices and operating systems.
+
+> **Do not use the 430 TPS figure for production capacity planning.** It was measured on a single MacBook with 10 concurrent clients. Server-class NVMe storage, higher concurrency, and network-attached clients will produce materially different numbers — in both directions depending on workload shape.
+
+### Benchmark environment matrix
+
+The table below will be populated as benchmarks are run on server-class hardware. Contributions and independent reproduction are welcome.
+
+| Environment | Storage | Concurrency | TPS | p50 | p95 | p99 |
+|---|---|---|---|---|---|---|
+| Apple M-series (dev baseline) | NVMe | 10 | 430 | 23 ms | 36 ms | 42 ms |
+| AWS Graviton3 (c7g) | EBS gp3 | 10 | — | — | — | — |
+| AWS Graviton3 (c7g) | EBS gp3 | 100 | — | — | — | — |
+| AWS x86 (c6i) | EBS gp3 | 10 | — | — | — | — |
+| AWS x86 (c6i) | EBS gp3 | 100 | — | — | — | — |
+| AWS x86 (c6i) | EBS gp3 | 1 000 | — | — | — | — |
+| Bare metal | NVMe | 100 | — | — | — | — |
+| Bare metal | NVMe | 1 000 | — | — | — | — |
+
+All measurements use `--wal-sync-mode group_commit` (default) with a 70 % INSERT / 30 % SELECT mixed workload unless noted otherwise. `per_record` mode will show lower TPS and lower p99.
 
 ### WAL sync modes
 
@@ -211,11 +250,68 @@ vledger start --wal-sync-mode group_commit --group-commit-delay-ms 5
 │                                                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
 │  │  Audit Log   │  │  HSM Client  │  │  Replication     │  │
-│  │  WORM BLAKE3 │  │  SoftHSM /   │  │  WAL streaming   │  │
-│  │  chain       │  │  AWS / Azure │  │  TLS + HMAC      │  │
-│  └──────────────┘  └──────────────┘  └──────────────────┘  │
+│  │  WORM BLAKE3 │  │  Model 1 or  │  │  WAL streaming   │  │
+│  │  chain       │  │  Model 2     │  │  TLS + HMAC      │  │
+│  └──────────────┘  └──────┬───────┘  └──────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
+                             │
+             ┌───────────────┴───────────────┐
+             │                               │
+   Model 1 — same server          Model 2 — separate server
+                                   (same-region private subnet)
+             │                               │
+   ┌─────────▼─────────┐         ┌──────────▼──────────┐
+   │  PyHSM daemon     │         │  PyHSM daemon        │
+   │  Unix socket      │         │  TLS 1.3 + mTLS      │
+   │  /tmp/pyhsm.sock  │         │  port 8443           │
+   │                   │         │  private subnet only │
+   │  dev / CI /       │         │                      │
+   │  single-server    │         │  production          │
+   │  production       │         │  recommended         │
+   └───────────────────┘         └─────────────────────┘
 ```
+
+### PyHSM Deployment Models
+
+VectorLedger supports two HSM deployment models. Choose based on your security requirements and infrastructure.
+
+**Model 1 — Local PyHSM (same server)**
+
+PyHSM and VectorLedger run on the same host. Communication uses a Unix domain socket. Zero network overhead. Suitable for development, CI, and single-server production deployments.
+
+```
+┌──────────────────────────────┐
+│  Server                      │
+│                              │
+│  VectorLedger                │
+│       │                      │
+│       ▼  /tmp/pyhsm.sock    │
+│  PyHSM daemon                │
+└──────────────────────────────┘
+```
+
+**Model 2 — Remote PyHSM (same-region, separate server)**
+
+PyHSM runs on a dedicated server in the same region's private subnet. VectorLedger connects over TLS 1.3 with mutual certificate authentication (mTLS). PyHSM's private key material is never accessible from the VectorLedger host. Recommended for production.
+
+```
+  Private subnet (e.g. AWS VPC)
+
+  ┌────────────────────┐              ┌────────────────────┐
+  │  Server A          │              │  Server B          │
+  │                    │              │                    │
+  │  VectorLedger      │              │  PyHSM daemon      │
+  │  encrypted data    │──TLS 1.3 ───▶│  encrypted         │
+  │  WAL               │   + mTLS     │  keystore          │
+  │  application       │              │  port 8443         │
+  │  traffic           │              │  no public IP      │
+  └────────────────────┘              └────────────────────┘
+
+  Security group: allows VectorLedger → PyHSM only
+  No public endpoint on PyHSM server
+```
+
+The `endpoint` field in `key_source.json` can point at a load balancer VIP or AWS NLB in front of multiple PyHSM instances — the transport is cluster-ready at the network layer without any code change.
 
 ---
 
@@ -533,7 +629,7 @@ Must contain `"backend": "py_hsm"`:
 
 If it shows `"backend": "env"`, the PyHSM socket was not found during init and VectorLedger fell back silently. Delete the data directory, confirm the socket exists, and re-run init.
 
-> **Never run `vledger init` without `--key-source pyhsm` in production.** The default without this flag uses an environment variable backend which stores key material in your shell environment.
+> **Never run `vledger init` without `--key-source pyhsm` (or `--key-source remote-pyhsm` for Model 2) in production.** The default without this flag uses an environment variable backend which stores key material in your shell environment.
 
 ### 3. Lock down the data directory
 
@@ -722,16 +818,34 @@ Initialise a new database.
 
 ```bash
 vledger init [OPTIONS]
-  --data-dir <PATH>       Data directory (default: ./vledger-data)
-  --force                 Reinitialise an existing database
-  --key-source <BACKEND>  env | file | vault | aws_kms | pyhsm  (default: pyhsm)
-  --vault-addr <URL>      Vault server address
-  --vault-mount <MOUNT>   Vault KV v2 mount path (default: secret)
-  --vault-path <PATH>     Vault secret path (default: vledger/master_key)
-  --kms-key-id <ARN>      AWS KMS key ARN or alias
-  --kms-region <REGION>   AWS region (default: us-east-1)
-  --pyhsm-socket <PATH>   PyHSM Unix socket path (default: /tmp/pyhsm.sock)
-  --pyhsm-caller-id <ID>  Caller ID written to PyHSM audit log (default: vledger)
+  --data-dir <PATH>          Data directory (default: ./vledger-data)
+  --force                    Reinitialise an existing database
+  --key-source <BACKEND>     env | file | vault | aws_kms | pyhsm | remote-pyhsm
+                             (default: pyhsm)
+  --vault-addr <URL>         Vault server address
+  --vault-mount <MOUNT>      Vault KV v2 mount path (default: secret)
+  --vault-path <PATH>        Vault secret path (default: vledger/master_key)
+  --kms-key-id <ARN>         AWS KMS key ARN or alias
+  --kms-region <REGION>      AWS region (default: us-east-1)
+
+  # Model 1 — local PyHSM (same server)
+  --pyhsm-socket <PATH>      PyHSM Unix socket path (default: /tmp/pyhsm.sock)
+  --pyhsm-caller-id <ID>     Caller ID written to PyHSM audit log (default: vledger)
+
+  # Model 2 — remote PyHSM (same-region, separate server)
+  --pyhsm-endpoint <URL>     Remote PyHSM HTTPS endpoint; selects remote-pyhsm
+                             automatically when set
+                             Example: https://pyhsm.internal.example.com:8443
+                             Env: PYHSM_ENDPOINT
+  --pyhsm-ca-cert <PATH>     CA certificate PEM to verify the PyHSM server
+                             Env: PYHSM_CA_CERT
+  --pyhsm-client-cert <PATH> mTLS client certificate PEM (VectorLedger's identity)
+                             Env: PYHSM_CLIENT_CERT
+  --pyhsm-client-key <PATH>  mTLS client private key PEM
+                             Env: PYHSM_CLIENT_KEY
+  --pyhsm-timeout-ms <MS>    Per-request timeout in ms (default: 5000)
+                             Env: PYHSM_TIMEOUT_MS
+  --pyhsm-max-retries <N>    Max retries on transient errors (default: 3)
 ```
 
 ### `vledger start`
@@ -825,7 +939,24 @@ vledger restore --from <FILE.tar> [--target <PATH>] [--force]
 Rotate all HSM key slots and record audit events.
 
 ```bash
-vledger rotate-keys --data-dir <PATH> [--hsm-socket <PATH>] [--caller-id <ID>]
+vledger rotate-keys [OPTIONS]
+  --data-dir <PATH>          Data directory (default: ./vledger-data)
+  --caller-id <ID>           Caller ID written to audit log (default: vledger-admin)
+
+  # Model 1 — local PyHSM
+  --hsm-socket <PATH>        PyHSM Unix socket path (default: /tmp/pyhsm.sock)
+
+  # Model 2 — remote PyHSM (--pyhsm-endpoint selects this automatically)
+  --pyhsm-endpoint <URL>     Remote PyHSM HTTPS endpoint
+                             Env: PYHSM_ENDPOINT
+  --pyhsm-ca-cert <PATH>     CA certificate PEM (required with --pyhsm-endpoint)
+                             Env: PYHSM_CA_CERT
+  --pyhsm-client-cert <PATH> mTLS client certificate PEM
+                             Env: PYHSM_CLIENT_CERT
+  --pyhsm-client-key <PATH>  mTLS client private key PEM
+                             Env: PYHSM_CLIENT_KEY
+  --pyhsm-timeout-ms <MS>    Per-request timeout in ms (default: 5000)
+  --pyhsm-max-retries <N>    Max retries on transient errors (default: 3)
 ```
 
 ### `vledger audit-export`
@@ -972,6 +1103,13 @@ Generates a random key and writes it to `vledger-data/keys/master_key.hex` with 
 
 PyHSM is a VectorGuard Labs product and the default key backend for VectorLedger. The master encryption key is sealed inside PyHSM's AES-256-GCM-SIV encrypted keystore and never touches disk in plaintext.
 
+VectorLedger supports two PyHSM deployment models:
+
+| Model | Transport | Use case |
+|---|---|---|
+| **Model 1 — Local** | Unix domain socket | Dev, CI, single-server production |
+| **Model 2 — Remote** | TLS 1.3 + mTLS | Same-region separate-server production |
+
 #### Two ways to install PyHSM
 
 **Option A — TypeScript daemon (required for VectorLedger integration)**
@@ -1025,10 +1163,22 @@ To use the pip CLI, the TypeScript daemon does **not** need to be running — it
 | `PYHSM_MASTER_PASSWORD` | — | **Required.** Password that unlocks the PyHSM keystore. |
 | `PYHSM_KEYSTORE_PATH` | `./pyhsm-keystore.enc` | Path where the encrypted keystore is stored. Set this to a persistent, backed-up location. |
 | `PYHSM_AUDIT_LOG_PATH` | `<keystore>.audit.jsonl` | Path for PyHSM's own tamper-evident audit log. |
-| `PYHSM_SOCKET_PATH` | `/tmp/pyhsm.sock` | Unix socket path the daemon listens on. |
+| `PYHSM_SOCKET_PATH` | `/tmp/pyhsm.sock` | Unix socket path the daemon listens on (Model 1). |
 | `PYHSM_CALLER_SECRET` | — | Optional shared secret for IPC caller authentication. |
 | `PYHSM_RATE_LIMIT` | `100` | Max operations per rate window. |
 | `PYHSM_RATE_WINDOW_MS` | `60000` | Rate window in milliseconds. |
+
+#### Model 2 — remote PyHSM environment variables
+
+These variables can override the corresponding `key_source.json` fields at deploy time — useful for injecting cert paths via container environment without modifying the config file.
+
+| Variable | Description |
+|---|---|
+| `PYHSM_ENDPOINT` | HTTPS endpoint of the remote PyHSM daemon |
+| `PYHSM_CA_CERT` | Path to the CA certificate PEM |
+| `PYHSM_CLIENT_CERT` | Path to the mTLS client certificate PEM |
+| `PYHSM_CLIENT_KEY` | Path to the mTLS client private key PEM |
+| `PYHSM_TIMEOUT_MS` | Per-request timeout in milliseconds |
 
 #### How VectorLedger uses PyHSM across restarts
 
@@ -1038,6 +1188,73 @@ To use the pip CLI, the TypeScript daemon does **not** need to be running — it
 | Every `vledger start` | HMAC verified locally first, blob sent to PyHSM for decryption, plaintext key used briefly for key derivation then immediately zeroized from memory |
 | PyHSM daemon not running at startup | `vledger start` fails immediately with a clear error — no data is touched |
 | Cache file tampered | HMAC check fails, startup aborts before any IPC call |
+| Remote PyHSM unreachable (Model 2) | Startup fails closed — VectorLedger never falls back to a weaker key source |
+
+The same lifecycle applies to both Model 1 and Model 2. The only difference is the transport: Unix socket vs TLS 1.3 + mTLS.
+
+#### Model 2 — initialising with a remote PyHSM
+
+Before running `vledger init` with a remote PyHSM:
+
+1. PyHSM daemon must be running on Server B and reachable from Server A on the private subnet.
+2. You must have:
+   - The CA certificate that signed PyHSM's TLS certificate (`ca.pem`)
+   - VectorLedger's mTLS client certificate and key (`client.pem`, `client-key.pem`), signed by PyHSM's client CA
+
+```bash
+# Model 2 — remote PyHSM over mTLS
+vledger init \
+  --data-dir ./vledger-data \
+  --key-source remote-pyhsm \
+  --pyhsm-endpoint https://pyhsm.internal.example.com:8443 \
+  --pyhsm-ca-cert /etc/vledger/pyhsm/ca.pem \
+  --pyhsm-client-cert /etc/vledger/pyhsm/client.pem \
+  --pyhsm-client-key /etc/vledger/pyhsm/client-key.pem
+```
+
+Verify the backend was recorded correctly:
+
+```bash
+cat vledger-data/keys/key_source.json
+```
+
+Expected output:
+
+```json
+{
+  "backend": "remote_py_hsm",
+  "endpoint": "https://pyhsm.internal.example.com:8443",
+  "ca_cert": "/etc/vledger/pyhsm/ca.pem",
+  "client_cert": "/etc/vledger/pyhsm/client.pem",
+  "client_key": "/etc/vledger/pyhsm/client-key.pem",
+  "timeout_ms": 5000,
+  "max_retries": 3,
+  "caller_id": "vledger",
+  "key_id": "vledger.master-key"
+}
+```
+
+#### Rotating keys on a remote PyHSM
+
+```bash
+vledger rotate-keys \
+  --data-dir ./vledger-data \
+  --pyhsm-endpoint https://pyhsm.internal.example.com:8443 \
+  --pyhsm-ca-cert /etc/vledger/pyhsm/ca.pem \
+  --pyhsm-client-cert /etc/vledger/pyhsm/client.pem \
+  --pyhsm-client-key /etc/vledger/pyhsm/client-key.pem
+```
+
+#### Replay-attack prevention (Model 2)
+
+Every request sent to a remote PyHSM over TLS includes two additional fields that PyHSM should validate:
+
+| Field | Value | Purpose |
+|---|---|---|
+| `requestId` | UUID v4 | PyHSM rejects duplicate IDs within its replay window (recommended: 5 min) |
+| `timestamp` | RFC 3339 UTC | PyHSM rejects requests more than 2 minutes stale or in the future |
+
+These fields are injected automatically by VectorLedger — no configuration required. They are not present on Model 1 (local socket) requests, where replay is not a meaningful threat.
 
 #### Windows
 
@@ -1048,7 +1265,7 @@ $env:PYHSM_MASTER_PASSWORD = "your-password"
 $env:PYHSM_TCP_PORT = 7777
 npx tsx ~/PyHSM/pyhsm-ts/process.ts
 
-# Then init:
+# Then init (Model 1, TCP loopback):
 vledger init --key-source pyhsm --pyhsm-socket 127.0.0.1:7777
 ```
 
@@ -1056,7 +1273,8 @@ vledger init --key-source pyhsm --pyhsm-socket 127.0.0.1:7777
 
 | Backend | `--key-source` | Key never on disk | External dependency |
 |---|---|---|---|
-| **PyHSM** (recommended) | `pyhsm` | ✓ | PyHSM daemon running |
+| **PyHSM — local** (recommended, Model 1) | `pyhsm` | ✓ | PyHSM daemon on same host |
+| **PyHSM — remote** (production, Model 2) | `remote-pyhsm` | ✓ | PyHSM daemon on private subnet + TLS certs |
 | Environment variable | `env` | ✗ (in env) | None |
 | Disk file | `file` | ✗ | None |
 | HashiCorp Vault | `vault` | ✓ | Vault server + token |
@@ -1161,7 +1379,8 @@ The server startup banner shows days remaining when a signed license is active. 
 Before putting VectorLedger in front of production traffic:
 
 - [ ] PyHSM daemon running with a persistent, backed-up keystore (`PYHSM_KEYSTORE_PATH` points to a durable location)
-- [ ] `vledger init` completed with `--key-source pyhsm` and `key_source.json` shows `"backend": "py_hsm"`
+- [ ] `vledger init` completed with `--key-source pyhsm` (Model 1) or `--key-source remote-pyhsm` (Model 2)
+- [ ] `key_source.json` shows `"backend": "py_hsm"` or `"backend": "remote_py_hsm"` — not `"env"` or `"file"`
 - [ ] `keys/MASTER_KEY_PLACEHOLDER.txt` deleted (its presence fails the PCI-DSS compliance check)
 - [ ] Admin credential file read, password changed, and `catalog/.admin_initial_credentials` deleted
 - [ ] Data directory permissions locked (`chmod 700` on `vledger-data/` and all subdirectories)
@@ -1174,6 +1393,16 @@ Before putting VectorLedger in front of production traffic:
 - [ ] Schedule regular `vledger verify` runs (recommended: after each backup)
 - [ ] Ship `audit/audit.log` to an append-only off-host destination in real time
 - [ ] Run compliance reports and confirm zero FAIL items: `vledger compliance-report --standard pci-dss`
+
+**Additional checklist items for Model 2 (remote PyHSM):**
+
+- [ ] PyHSM server has no public IP — accessible only via private subnet
+- [ ] Security group / firewall allows VectorLedger → PyHSM (port 8443) only — no other inbound
+- [ ] CA certificate, client certificate, and client key stored at paths that survive reboots and are mode `0600`
+- [ ] `PYHSM_CA_CERT`, `PYHSM_CLIENT_CERT`, `PYHSM_CLIENT_KEY` environment variables set (or paths baked into `key_source.json`)
+- [ ] mTLS client certificate has a short validity period (90 days recommended) with a rotation schedule
+- [ ] PyHSM configured to validate `requestId` (reject duplicates within 5-minute window) and reject stale `timestamp` values
+- [ ] Verified that `vledger start` fails cleanly when PyHSM is unreachable — never falls back silently
 
 ---
 

@@ -4,6 +4,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HsmError {
+    // ── Model 1 — local IPC ───────────────────────────────────────────────
     #[error("PyHSM IPC error: {0}")]
     Ipc(String),
 
@@ -16,6 +17,24 @@ pub enum HsmError {
     #[error("PyHSM IPC timeout after {ms}ms")]
     Timeout { ms: u64 },
 
+    // ── Model 2 — remote TLS / mTLS ───────────────────────────────────────
+    /// TLS handshake, certificate loading, or mTLS configuration error.
+    #[error("PyHSM TLS error: {0}")]
+    Tls(String),
+
+    /// Network-level connection error for remote transport.
+    #[error("PyHSM remote connection error: {0}")]
+    Connection(String),
+
+    /// Configuration error (e.g. malformed endpoint URL, missing CA cert path).
+    #[error("PyHSM configuration error: {0}")]
+    Config(String),
+
+    /// All retry attempts exhausted for a remote request.
+    #[error("PyHSM remote request failed after {attempts} attempt(s): {last_error}")]
+    RetriesExhausted { attempts: u32, last_error: String },
+
+    // ── Shared ────────────────────────────────────────────────────────────
     #[error("Key not found: {0}")]
     KeyNotFound(String),
 

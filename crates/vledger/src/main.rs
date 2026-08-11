@@ -67,10 +67,42 @@ enum Commands {
         /// Default: /tmp/pyhsm.sock
         #[arg(long)]
         pyhsm_socket: Option<String>,
-        /// Caller ID written to the PyHSM audit log (used with --key-source=pyhsm).
+        /// Caller ID written to the PyHSM audit log (used with --key-source=pyhsm or remote-pyhsm).
         /// Default: vledger
         #[arg(long, default_value = "vledger")]
         pyhsm_caller_id: String,
+
+        // ── Model 2: remote PyHSM over mTLS ───────────────────────────────
+        /// Remote PyHSM HTTPS endpoint (selects --key-source=remote-pyhsm automatically).
+        /// Example: https://pyhsm.internal.example.com:8443
+        /// Overrides the PYHSM_ENDPOINT environment variable.
+        #[arg(long)]
+        pyhsm_endpoint: Option<String>,
+        /// Path to the PEM file containing the CA certificate used to verify
+        /// the remote PyHSM server's TLS certificate.
+        /// Required when --pyhsm-endpoint is set.
+        /// Overrides the PYHSM_CA_CERT environment variable.
+        #[arg(long)]
+        pyhsm_ca_cert: Option<String>,
+        /// Path to VectorLedger's mTLS client certificate PEM file.
+        /// Required for mutual TLS with the remote PyHSM daemon.
+        /// Overrides the PYHSM_CLIENT_CERT environment variable.
+        #[arg(long)]
+        pyhsm_client_cert: Option<String>,
+        /// Path to VectorLedger's mTLS client private key PEM file.
+        /// Required when --pyhsm-client-cert is set.
+        /// Overrides the PYHSM_CLIENT_KEY environment variable.
+        #[arg(long)]
+        pyhsm_client_key: Option<String>,
+        /// Per-request timeout in milliseconds for remote PyHSM calls.
+        /// Default: 5000
+        /// Overrides the PYHSM_TIMEOUT_MS environment variable.
+        #[arg(long, default_value_t = 5000)]
+        pyhsm_timeout_ms: u64,
+        /// Maximum number of retries on transient remote PyHSM errors.
+        /// Default: 3
+        #[arg(long, default_value_t = 3)]
+        pyhsm_max_retries: u32,
     },
     /// Start the TLS 1.3 server and accept SQL connections.
     Start {
@@ -184,11 +216,37 @@ enum Commands {
     #[command(name = "rotate-keys")]
     RotateKeys {
         /// Path to the HSM daemon socket (default: /tmp/pyhsm.sock).
+        /// For remote PyHSM, use --pyhsm-endpoint instead.
         #[arg(long)]
         hsm_socket: Option<String>,
         /// Caller identifier written to the audit log.
         #[arg(long, default_value = "vledger-admin")]
         caller_id: String,
+
+        // ── Model 2: remote PyHSM ─────────────────────────────────────────
+        /// Remote PyHSM HTTPS endpoint (Model 2).
+        /// Example: https://pyhsm.internal.example.com:8443
+        /// Overrides the PYHSM_ENDPOINT environment variable.
+        #[arg(long)]
+        pyhsm_endpoint: Option<String>,
+        /// Path to the CA certificate PEM for verifying the remote PyHSM server.
+        /// Required when --pyhsm-endpoint is set.
+        #[arg(long)]
+        pyhsm_ca_cert: Option<String>,
+        /// Path to VectorLedger's mTLS client certificate PEM.
+        #[arg(long)]
+        pyhsm_client_cert: Option<String>,
+        /// Path to VectorLedger's mTLS client private key PEM.
+        #[arg(long)]
+        pyhsm_client_key: Option<String>,
+        /// Per-request timeout in milliseconds for remote PyHSM calls.
+        /// Default: 5000
+        #[arg(long, default_value_t = 5000)]
+        pyhsm_timeout_ms: u64,
+        /// Maximum number of retries on transient remote PyHSM errors.
+        /// Default: 3
+        #[arg(long, default_value_t = 3)]
+        pyhsm_max_retries: u32,
     },
     /// Export the audit log to JSON or CSV.
     #[command(name = "audit-export")]
@@ -316,8 +374,8 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Init { force, key_source, vault_addr, vault_mount, vault_path, kms_key_id, kms_region, pyhsm_socket, pyhsm_caller_id }
-            => cmd_init(&cli.data_dir, force, &key_source, &vault_addr, &vault_mount, &vault_path, kms_key_id.as_deref(), &kms_region, pyhsm_socket.as_deref(), &pyhsm_caller_id).await,
+        Commands::Init { force, key_source, vault_addr, vault_mount, vault_path, kms_key_id, kms_region, pyhsm_socket, pyhsm_caller_id, pyhsm_endpoint, pyhsm_ca_cert, pyhsm_client_cert, pyhsm_client_key, pyhsm_timeout_ms, pyhsm_max_retries }
+            => cmd_init(&cli.data_dir, force, &key_source, &vault_addr, &vault_mount, &vault_path, kms_key_id.as_deref(), &kms_region, pyhsm_socket.as_deref(), &pyhsm_caller_id, pyhsm_endpoint.as_deref(), pyhsm_ca_cert.as_deref(), pyhsm_client_cert.as_deref(), pyhsm_client_key.as_deref(), pyhsm_timeout_ms, pyhsm_max_retries).await,
         Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms, query_timeout_ms, metrics_addr }
             => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms, query_timeout_ms, &metrics_addr).await,
         Commands::Status                             => cmd_status(&cli.data_dir).await,
@@ -328,7 +386,7 @@ async fn main() -> Result<()> {
         // Phase 3
         Commands::Backup { output }                  => cmd_backup(&cli.data_dir, output.as_deref()).await,
         Commands::Restore { from, target, force }    => cmd_restore(&from, target.as_deref(), &cli.data_dir, force).await,
-        Commands::RotateKeys { hsm_socket, caller_id } => cmd_rotate_keys(&cli.data_dir, hsm_socket.as_deref(), &caller_id).await,
+        Commands::RotateKeys { hsm_socket, caller_id, pyhsm_endpoint, pyhsm_ca_cert, pyhsm_client_cert, pyhsm_client_key, pyhsm_timeout_ms, pyhsm_max_retries } => cmd_rotate_keys(&cli.data_dir, hsm_socket.as_deref(), &caller_id, pyhsm_endpoint.as_deref(), pyhsm_ca_cert.as_deref(), pyhsm_client_cert.as_deref(), pyhsm_client_key.as_deref(), pyhsm_timeout_ms, pyhsm_max_retries).await,
         Commands::AuditExport { format, output, from, to } => cmd_audit_export(&cli.data_dir, &format, output.as_deref(), from.as_deref(), to.as_deref()).await,
         Commands::ComplianceReport { standard, format, output } => cmd_compliance_report(&cli.data_dir, &standard, &format, output.as_deref()).await,
         Commands::User { action, ca_cert } => cmd_user(&cli.data_dir, action, ca_cert.as_deref()).await,
@@ -340,16 +398,22 @@ async fn main() -> Result<()> {
 // ── init ──────────────────────────────────────────────────────────────────────
 
 async fn cmd_init(
-    data_dir:        &PathBuf,
-    force:           bool,
-    key_source:      &str,
-    vault_addr:      &str,
-    vault_mount:     &str,
-    vault_path:      &str,
-    kms_key_id:      Option<&str>,
-    kms_region:      &str,
-    pyhsm_socket:    Option<&str>,
-    pyhsm_caller_id: &str,
+    data_dir:          &PathBuf,
+    force:             bool,
+    key_source:        &str,
+    vault_addr:        &str,
+    vault_mount:       &str,
+    vault_path:        &str,
+    kms_key_id:        Option<&str>,
+    kms_region:        &str,
+    pyhsm_socket:      Option<&str>,
+    pyhsm_caller_id:   &str,
+    pyhsm_endpoint:    Option<&str>,
+    pyhsm_ca_cert:     Option<&str>,
+    pyhsm_client_cert: Option<&str>,
+    pyhsm_client_key:  Option<&str>,
+    pyhsm_timeout_ms:  u64,
+    pyhsm_max_retries: u32,
 ) -> Result<()> {
     if data_dir.exists() && !force {
         anyhow::bail!(
@@ -426,6 +490,37 @@ async fn cmd_init(
                     key_id:      "vledger.master-key".to_string(),
                 }
             }
+            // Model 2: explicitly requested, or auto-detected when --pyhsm-endpoint is supplied.
+            "remote-pyhsm" | "pyhsm-remote" => {
+                let endpoint = pyhsm_endpoint
+                    .map(|s| s.to_string())
+                    .or_else(|| std::env::var("PYHSM_ENDPOINT").ok())
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "--pyhsm-endpoint (or PYHSM_ENDPOINT) is required for remote-pyhsm key source"
+                    ))?;
+                let ca_cert = pyhsm_ca_cert
+                    .map(|s| s.to_string())
+                    .or_else(|| std::env::var("PYHSM_CA_CERT").ok())
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "--pyhsm-ca-cert (or PYHSM_CA_CERT) is required for remote-pyhsm key source"
+                    ))?;
+                KeySourceConfig::RemotePyHsm {
+                    endpoint,
+                    ca_cert,
+                    client_cert: pyhsm_client_cert
+                        .map(|s| s.to_string())
+                        .or_else(|| std::env::var("PYHSM_CLIENT_CERT").ok()),
+                    client_key:  pyhsm_client_key
+                        .map(|s| s.to_string())
+                        .or_else(|| std::env::var("PYHSM_CLIENT_KEY").ok()),
+                    timeout_ms:  std::env::var("PYHSM_TIMEOUT_MS")
+                        .ok().and_then(|v| v.parse().ok())
+                        .unwrap_or(pyhsm_timeout_ms),
+                    max_retries: pyhsm_max_retries,
+                    caller_id:   pyhsm_caller_id.to_string(),
+                    key_id:      "vledger.master-key".to_string(),
+                }
+            }
             _ => {
                 // Explicit --key-source env, or unrecognised value: fall back to env var.
                 KeySourceConfig::Env { var: "VectorLedger_MASTER_KEY".to_string() }
@@ -447,7 +542,15 @@ async fn cmd_init(
             KeySourceConfig::AwsKms { key_id, region, .. } =>
                 println!("  AWS KMS: {key_id} in {region}"),
             KeySourceConfig::PyHsm { socket_path, key_id, .. } =>
-                println!("  PyHSM: socket={socket_path}  wrapping-key={key_id}"),
+                println!("  PyHSM (local): socket={socket_path}  wrapping-key={key_id}"),
+            KeySourceConfig::RemotePyHsm { endpoint, key_id, client_cert, .. } => {
+                println!("  PyHSM (remote mTLS): endpoint={endpoint}  wrapping-key={key_id}");
+                if client_cert.is_some() {
+                    println!("  mTLS client cert : configured");
+                } else {
+                    println!("  mTLS client cert : ⚠  not set — server-auth only");
+                }
+            }
         }
     }
 
@@ -1930,15 +2033,31 @@ async fn cmd_restore(
 // ── rotate-keys ───────────────────────────────────────────────────────────────
 
 async fn cmd_rotate_keys(
-    data_dir:   &PathBuf,
-    hsm_socket: Option<&str>,
-    caller_id:  &str,
+    data_dir:          &PathBuf,
+    hsm_socket:        Option<&str>,
+    caller_id:         &str,
+    pyhsm_endpoint:    Option<&str>,
+    pyhsm_ca_cert:     Option<&str>,
+    pyhsm_client_cert: Option<&str>,
+    pyhsm_client_key:  Option<&str>,
+    pyhsm_timeout_ms:  u64,
+    pyhsm_max_retries: u32,
 ) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Not initialised at: {}", data_dir.display());
     }
     println!("── VectorLedger Key Rotation ───────────────────");
-    let rotated = key_rotation::rotate_keys(data_dir, hsm_socket, caller_id).await?;
+    let rotated = key_rotation::rotate_keys(
+        data_dir,
+        hsm_socket,
+        caller_id,
+        pyhsm_endpoint,
+        pyhsm_ca_cert,
+        pyhsm_client_cert,
+        pyhsm_client_key,
+        pyhsm_timeout_ms,
+        pyhsm_max_retries,
+    ).await?;
     if rotated.is_empty() {
         println!("  No keys rotated (HSM may not be running or no keys found)");
     } else {

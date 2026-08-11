@@ -1,28 +1,52 @@
-//! Async PyHSM IPC client.
+//! Async PyHSM client — supports Model 1 (local) and Model 2 (remote mTLS).
 //!
-//! Connects to the PyHSM daemon and exposes a typed Rust API matching the
-//! TypeScript client in `PyHSM/pyhsm-ts/client.ts`.
+//! ## Model 1 — same server (dev, CI, single-server production)
 //!
-//! ## Transport
-//! | Platform | Transport | Address format |
-//! |---|---|---|
-//! | Linux / macOS | Unix domain socket | `/tmp/pyhsm.sock` |
-//! | Windows | TCP loopback | `127.0.0.1:7777` or `<host>:<port>` |
+//! ```text
+//! VectorLedger
+//!      │
+//!      ▼  Unix domain socket (/tmp/pyhsm.sock)
+//!    PyHSM
+//! ```
 //!
-//! On Windows, start the PyHSM daemon with `PYHSM_TCP_PORT=7777` and pass
-//! `--pyhsm-socket 127.0.0.1:7777` (or set `PYHSM_SOCKET_PATH=127.0.0.1:7777`).
+//! Create with `HsmClient::local(socket_path, caller_id)` or
+//! `HsmClient::default_socket(caller_id)`.
+//!
+//! ## Model 2 — same-region separate server (production)
+//!
+//! ```text
+//! VectorLedger ──── TLS 1.3 + mTLS ───► PyHSM (private subnet)
+//! ```
+//!
+//! Create with `HsmClient::remote(config, caller_id)` where `config` is a
+//! `RemotePyHsmConfig` containing the endpoint, CA cert, and optional client
+//! cert/key for mutual TLS.
+//!
+//! ## Wire protocol
+//! Both transports use the same newline-delimited JSON protocol.  The remote
+//! transport adds `requestId` and `timestamp` fields to every message for
+//! replay-attack prevention; PyHSM should reject duplicate request IDs and
+//! stale timestamps.
 //!
 //! ## Usage
 //! ```no_run
-//! use vledger_hsm::HsmClient;
+//! use vledger_hsm::{HsmClient, remote::RemotePyHsmConfig};
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let hsm = HsmClient::new("/tmp/pyhsm.sock", "vledger");
-//!     hsm.generate_key("vgdb/table/1/encrypt", None).await.unwrap();
-//!     let ct = hsm.encrypt("vgdb/table/1/encrypt", b"secret data").await.unwrap();
-//!     let pt = hsm.decrypt("vgdb/table/1/encrypt", &ct).await.unwrap();
-//!     assert_eq!(*pt, b"secret data");
+//!     // Model 1
+//!     let local = HsmClient::default_socket("vledger");
+//!
+//!     // Model 2
+//!     let cfg = RemotePyHsmConfig {
+//!         endpoint:    "https://pyhsm.internal.example.com:8443".into(),
+//!         ca_cert:     "/etc/vledger/pyhsm/ca.pem".into(),
+//!         client_cert: Some("/etc/vledger/pyhsm/client.pem".into()),
+//!         client_key:  Some("/etc/vledger/pyhsm/client-key.pem".into()),
+//!         timeout_ms:  5_000,
+//!         max_retries: 3,
+//!     };
+//!     let remote = HsmClient::remote(cfg, "vledger");
 //! }
 //! ```
 
@@ -36,41 +60,70 @@ use zeroize::Zeroizing;
 
 use crate::error::HsmError;
 use crate::protocol::{HsmRequest, HsmResponse, KeyPolicy};
+use crate::remote::{HsmTransport, RemotePyHsmConfig, build_tls_connector, new_request_id, server_name, utc_timestamp};
 
-/// Timeout for a single IPC round-trip.
-const IPC_TIMEOUT_MS: u64 = 10_000;
+// ── HsmClient ─────────────────────────────────────────────────────────────────
 
-/// Async client for the PyHSM Unix socket daemon.
+/// Async client for the PyHSM daemon.
+///
+/// Supports both Model 1 (local Unix socket / TCP loopback) and Model 2
+/// (remote TLS 1.3 + mTLS).  All cryptographic operations have identical
+/// semantics regardless of transport — the transport is an implementation
+/// detail invisible to callers.
 #[derive(Clone)]
 pub struct HsmClient {
-    socket_path: PathBuf,
-    caller_id:   String,
+    transport:  HsmTransport,
+    caller_id:  String,
 }
 
 impl HsmClient {
-    /// Create a new client.
+    // ── Constructors ──────────────────────────────────────────────────────
+
+    /// **Model 1** — connect via a Unix domain socket (or TCP loopback on Windows).
     ///
-    /// `socket_path` — path to the PyHSM Unix domain socket (default `/tmp/pyhsm.sock`).
-    /// `caller_id`   — identifies this process in PyHSM's audit log.
+    /// `socket_path` — `/tmp/pyhsm.sock` on Linux/macOS; `127.0.0.1:7777` on Windows.
     pub fn new(socket_path: impl AsRef<Path>, caller_id: impl Into<String>) -> Self {
+        let path = socket_path.as_ref();
+        let transport = if path.to_str().map(|s| s.contains(':')).unwrap_or(false) {
+            HsmTransport::LocalTcp(path.to_string_lossy().into_owned())
+        } else {
+            HsmTransport::LocalSocket(path.to_path_buf())
+        };
+        Self { transport, caller_id: caller_id.into() }
+    }
+
+    /// **Model 1** — use the platform default address.
+    ///
+    /// - Unix: `/tmp/pyhsm.sock`
+    /// - Windows: `127.0.0.1:7777`
+    pub fn default_socket(caller_id: impl Into<String>) -> Self {
+        Self::new(default_pyhsm_address(), caller_id)
+    }
+
+    /// **Model 2** — connect to a remote PyHSM over TLS 1.3 + mTLS.
+    ///
+    /// `config` must contain a valid `ca_cert` path.  `client_cert` and
+    /// `client_key` are required for full mutual TLS.
+    pub fn remote(config: RemotePyHsmConfig, caller_id: impl Into<String>) -> Self {
         Self {
-            socket_path: socket_path.as_ref().to_path_buf(),
-            caller_id:   caller_id.into(),
+            transport:  HsmTransport::remote(config),
+            caller_id:  caller_id.into(),
         }
     }
 
-    /// Use the default socket/address for this platform.
-    ///
-    /// - Unix: `/tmp/pyhsm.sock`
-    /// - Windows: `127.0.0.1:7777` (PyHSM TCP mode via `PYHSM_TCP_PORT=7777`)
-    pub fn default_socket(caller_id: impl Into<String>) -> Self {
-        Self::new(default_pyhsm_address(), caller_id)
+    /// Construct from any `HsmTransport` value directly.
+    pub fn with_transport(transport: HsmTransport, caller_id: impl Into<String>) -> Self {
+        Self { transport, caller_id: caller_id.into() }
+    }
+
+    /// Returns a description of the active transport for logging.
+    pub fn transport_description(&self) -> String {
+        self.transport.description()
     }
 
     // ── Symmetric operations ──────────────────────────────────────────────
 
     /// Encrypt `plaintext` with the key identified by `key_id`.
-    /// Returns raw ciphertext bytes (the PyHSM hex-encodes over the wire).
     pub async fn encrypt(&self, key_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, HsmError> {
         let req = HsmRequest::Encrypt {
             key_id:    key_id.to_string(),
@@ -85,7 +138,6 @@ impl HsmClient {
     }
 
     /// Decrypt `ciphertext` with the key identified by `key_id`.
-    /// Returns plaintext bytes, zeroized after use by the caller.
     pub async fn decrypt(&self, key_id: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, HsmError> {
         let req = HsmRequest::Decrypt {
             key_id:     key_id.to_string(),
@@ -103,7 +155,6 @@ impl HsmClient {
     // ── Asymmetric operations ─────────────────────────────────────────────
 
     /// Sign `message` with the key identified by `key_id`.
-    /// Returns the raw signature bytes.
     pub async fn sign(&self, key_id: &str, message: &[u8]) -> Result<Vec<u8>, HsmError> {
         let req = HsmRequest::Sign {
             key_id:    key_id.to_string(),
@@ -143,13 +194,19 @@ impl HsmClient {
 
     /// Rotate a key (old version archived for decryption, new version used for encryption).
     pub async fn rotate_key(&self, key_id: &str) -> Result<(), HsmError> {
-        let req = HsmRequest::RotateKey { key_id: key_id.to_string(), caller_id: self.caller_id.clone() };
+        let req = HsmRequest::RotateKey {
+            key_id:    key_id.to_string(),
+            caller_id: self.caller_id.clone(),
+        };
         self.send(&req).await.map(|_| ())
     }
 
     /// Permanently destroy a key. Irreversible.
     pub async fn destroy_key(&self, key_id: &str) -> Result<(), HsmError> {
-        let req = HsmRequest::DestroyKey { key_id: key_id.to_string(), caller_id: self.caller_id.clone() };
+        let req = HsmRequest::DestroyKey {
+            key_id:    key_id.to_string(),
+            caller_id: self.caller_id.clone(),
+        };
         self.send(&req).await.map(|_| ())
     }
 
@@ -161,45 +218,44 @@ impl HsmClient {
         self.send(&req).await.map(|_| ())
     }
 
-    /// Returns `true` if the PyHSM daemon socket exists and responds to health.
+    /// Returns `true` if the PyHSM daemon is reachable and responds to health.
     pub async fn is_available(&self) -> bool {
-        // On Unix we can cheaply check for socket existence before connecting.
-        #[cfg(unix)]
-        if !self.socket_path.exists() {
-            return false;
+        // For local socket transport, cheaply check file existence first.
+        if let HsmTransport::LocalSocket(ref p) = self.transport {
+            if !p.exists() {
+                return false;
+            }
         }
         self.health().await.is_ok()
     }
 
-    // ── Named key helpers (vgdb key namespace) ────────────────────────────
+    // ── Named key helpers (vledger key namespace) ─────────────────────────
 
-    /// Derive the canonical key ID for a table's encryption key.
+    /// Canonical key ID for a table's encryption key.
     pub fn table_encrypt_key_id(table_id: u32) -> String {
         format!("vledger.table.{table_id}.encrypt")
     }
 
-    /// Derive the canonical key ID for the WAL signing key.
+    /// Canonical key ID for the WAL signing key.
     pub fn wal_signing_key_id() -> &'static str {
         "vledger.wal.signing"
     }
 
-    /// Derive the canonical key ID for commit signing.
+    /// Canonical key ID for commit signing.
     pub fn commit_signing_key_id() -> &'static str {
         "vledger.commit.signing"
     }
 
-    /// Ensure the vgdb core keys exist, generating them if absent.
+    /// Ensure the core vledger keys exist, generating them if absent.
     pub async fn provision_vgdb_keys(&self) -> Result<(), HsmError> {
         let keys = [
             (Self::wal_signing_key_id(),    KeyPolicy::sign_only()),
             (Self::commit_signing_key_id(), KeyPolicy::sign_only()),
         ];
         for (kid, policy) in &keys {
-            // generate_key is idempotent on PyHSM if the key already exists
             match self.generate_key(kid, Some(policy.clone())).await {
                 Ok(()) => debug!(key_id = kid, "HSM key provisioned"),
                 Err(e) => {
-                    // Key may already exist — PyHSM returns an error for duplicates
                     warn!(key_id = kid, "HSM key provision: {e} (may already exist)");
                 }
             }
@@ -207,92 +263,210 @@ impl HsmClient {
         Ok(())
     }
 
-    // ── Internal IPC ──────────────────────────────────────────────────────
+    // ── Internal dispatch ─────────────────────────────────────────────────
 
     async fn send(&self, req: &HsmRequest) -> Result<HsmResponse, HsmError> {
-        // Serialise request once — shared by both platform branches.
+        match &self.transport {
+            HsmTransport::LocalSocket(path)  => self.send_unix(req, path).await,
+            HsmTransport::LocalTcp(addr)     => self.send_tcp(req, addr).await,
+            HsmTransport::Remote(cfg)        => self.send_remote(req, cfg).await,
+        }
+    }
+
+    // ── Model 1: Unix socket ──────────────────────────────────────────────
+
+    #[cfg(unix)]
+    async fn send_unix(&self, req: &HsmRequest, path: &PathBuf) -> Result<HsmResponse, HsmError> {
+        use tokio::net::UnixStream;
+
+        const MS: u64 = 10_000;
+
+        if !path.exists() {
+            return Err(HsmError::SocketNotFound { path: path.display().to_string() });
+        }
+
+        let stream = timeout(Duration::from_millis(MS), UnixStream::connect(path))
+            .await
+            .map_err(|_| HsmError::Timeout { ms: MS })?
+            .map_err(|e| HsmError::Ipc(e.to_string()))?;
+
+        let line = self.serialize_local(req)?;
+        let (reader_half, mut writer) = tokio::io::split(stream);
+
+        timeout(Duration::from_millis(MS), writer.write_all(line.as_bytes()))
+            .await
+            .map_err(|_| HsmError::Timeout { ms: MS })?
+            .map_err(|e| HsmError::Ipc(e.to_string()))?;
+
+        let mut buf   = BufReader::new(reader_half);
+        let mut resp  = String::new();
+        timeout(Duration::from_millis(MS), buf.read_line(&mut resp))
+            .await
+            .map_err(|_| HsmError::Timeout { ms: MS })?
+            .map_err(|e| HsmError::Ipc(e.to_string()))?;
+
+        parse_response(&resp)
+    }
+
+    #[cfg(not(unix))]
+    async fn send_unix(&self, req: &HsmRequest, path: &PathBuf) -> Result<HsmResponse, HsmError> {
+        // Unix sockets not available on this platform — fall back to TCP.
+        let addr = path.to_str().unwrap_or("127.0.0.1:7777").to_string();
+        self.send_tcp(req, &addr).await
+    }
+
+    // ── Model 1: TCP loopback (Windows / explicit TCP mode) ───────────────
+
+    async fn send_tcp(&self, req: &HsmRequest, addr: &str) -> Result<HsmResponse, HsmError> {
+        const MS: u64 = 10_000;
+
+        let stream = timeout(
+            Duration::from_millis(MS),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .map_err(|_| HsmError::Timeout { ms: MS })?
+        .map_err(|e| HsmError::Ipc(format!("TCP connect to PyHSM at {addr}: {e}")))?;
+
+        let line = self.serialize_local(req)?;
+        let (reader_half, mut writer) = tokio::io::split(stream);
+
+        timeout(Duration::from_millis(MS), writer.write_all(line.as_bytes()))
+            .await
+            .map_err(|_| HsmError::Timeout { ms: MS })?
+            .map_err(|e| HsmError::Ipc(e.to_string()))?;
+
+        let mut buf  = BufReader::new(reader_half);
+        let mut resp = String::new();
+        timeout(Duration::from_millis(MS), buf.read_line(&mut resp))
+            .await
+            .map_err(|_| HsmError::Timeout { ms: MS })?
+            .map_err(|e| HsmError::Ipc(e.to_string()))?;
+
+        parse_response(&resp)
+    }
+
+    // ── Model 2: Remote TLS 1.3 + mTLS ───────────────────────────────────
+
+    async fn send_remote(&self, req: &HsmRequest, cfg: &RemotePyHsmConfig) -> Result<HsmResponse, HsmError> {
+        let ms = cfg.timeout_ms;
+        let mut last_error = String::new();
+
+        for attempt in 1..=(cfg.max_retries.max(1)) {
+            match self.try_send_remote(req, cfg, ms).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    last_error = e.to_string();
+                    // Only retry on connection/timeout errors, not on protocol
+                    // errors (wrong key, policy violation, etc.).
+                    let is_retryable = matches!(
+                        &e,
+                        HsmError::Connection(_) | HsmError::Timeout { .. } | HsmError::Tls(_)
+                    );
+                    if !is_retryable || attempt == cfg.max_retries {
+                        return Err(e);
+                    }
+                    warn!(
+                        attempt,
+                        max = cfg.max_retries,
+                        error = %last_error,
+                        "PyHSM remote request failed — retrying"
+                    );
+                    // Brief back-off: 100 ms × attempt number.
+                    tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt))).await;
+                }
+            }
+        }
+
+        Err(HsmError::RetriesExhausted {
+            attempts:   cfg.max_retries,
+            last_error,
+        })
+    }
+
+    async fn try_send_remote(
+        &self,
+        req: &HsmRequest,
+        cfg: &RemotePyHsmConfig,
+        timeout_ms: u64,
+    ) -> Result<HsmResponse, HsmError> {
+        let (host, port) = cfg.host_port()?;
+
+        // Build TLS connector (validates certs at call time so startup fails
+        // fast if the PEM files are missing or corrupt).
+        let connector = build_tls_connector(
+            &cfg.ca_cert,
+            cfg.client_cert.as_deref(),
+            cfg.client_key.as_deref(),
+        )?;
+
+        // TCP connect
+        let tcp = timeout(
+            Duration::from_millis(timeout_ms),
+            tokio::net::TcpStream::connect((&host as &str, port)),
+        )
+        .await
+        .map_err(|_| HsmError::Timeout { ms: timeout_ms })?
+        .map_err(|e| HsmError::Connection(format!("TCP connect to {host}:{port}: {e}")))?;
+
+        // TLS handshake
+        let sni = server_name(&host)?;
+        let tls_stream = timeout(
+            Duration::from_millis(timeout_ms),
+            connector.connect(sni, tcp),
+        )
+        .await
+        .map_err(|_| HsmError::Timeout { ms: timeout_ms })?
+        .map_err(|e| HsmError::Tls(format!("TLS handshake with {host}:{port}: {e}")))?;
+
+        // Serialize with replay-prevention fields injected.
+        let line = self.serialize_remote(req)?;
+
+        let (reader_half, mut writer) = tokio::io::split(tls_stream);
+
+        timeout(Duration::from_millis(timeout_ms), writer.write_all(line.as_bytes()))
+            .await
+            .map_err(|_| HsmError::Timeout { ms: timeout_ms })?
+            .map_err(|e| HsmError::Connection(e.to_string()))?;
+
+        let mut buf  = BufReader::new(reader_half);
+        let mut resp = String::new();
+        timeout(Duration::from_millis(timeout_ms), buf.read_line(&mut resp))
+            .await
+            .map_err(|_| HsmError::Timeout { ms: timeout_ms })?
+            .map_err(|e| HsmError::Connection(e.to_string()))?;
+
+        parse_response(&resp)
+    }
+
+    // ── Serialisation helpers ─────────────────────────────────────────────
+
+    /// Serialize for local transports — plain NDJSON, no extra fields.
+    fn serialize_local(&self, req: &HsmRequest) -> Result<String, HsmError> {
         let mut line = serde_json::to_string(req)
             .map_err(|e| HsmError::Serialisation(e.to_string()))?;
         line.push('\n');
+        Ok(line)
+    }
 
-        #[cfg(unix)]
-        {
-            use tokio::net::UnixStream;
-
-            if !self.socket_path.exists() {
-                return Err(HsmError::SocketNotFound {
-                    path: self.socket_path.display().to_string(),
-                });
-            }
-
-            let stream = timeout(
-                Duration::from_millis(IPC_TIMEOUT_MS),
-                UnixStream::connect(&self.socket_path),
-            )
-            .await
-            .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
-            .map_err(|e| HsmError::Ipc(e.to_string()))?;
-
-            let (reader_half, mut writer) = tokio::io::split(stream);
-
-            timeout(Duration::from_millis(IPC_TIMEOUT_MS), writer.write_all(line.as_bytes()))
-                .await
-                .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
-                .map_err(|e| HsmError::Ipc(e.to_string()))?;
-
-            let mut buf_reader = BufReader::new(reader_half);
-            let mut resp_line  = String::new();
-            timeout(
-                Duration::from_millis(IPC_TIMEOUT_MS),
-                buf_reader.read_line(&mut resp_line),
-            )
-            .await
-            .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
-            .map_err(|e| HsmError::Ipc(e.to_string()))?;
-
-            return parse_response(&resp_line);
+    /// Serialize for remote transport — inject `requestId` and `timestamp`
+    /// for replay-attack prevention.
+    fn serialize_remote(&self, req: &HsmRequest) -> Result<String, HsmError> {
+        let mut value = serde_json::to_value(req)
+            .map_err(|e| HsmError::Serialisation(e.to_string()))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("requestId".into(),  serde_json::Value::String(new_request_id()));
+            obj.insert("timestamp".into(),  serde_json::Value::String(utc_timestamp()));
         }
-
-        #[cfg(not(unix))]
-        {
-            // Windows: connect to PyHSM over TCP loopback.
-            // The socket_path field holds a "host:port" string on Windows,
-            // e.g. "127.0.0.1:7777".  Start PyHSM with PYHSM_TCP_PORT=7777.
-            let addr = self.socket_path.to_str().unwrap_or("127.0.0.1:7777");
-
-            let stream = timeout(
-                Duration::from_millis(IPC_TIMEOUT_MS),
-                tokio::net::TcpStream::connect(addr),
-            )
-            .await
-            .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
-            .map_err(|e| HsmError::Ipc(format!("TCP connect to PyHSM at {addr}: {e}")))?;
-
-            let (reader_half, mut writer) = tokio::io::split(stream);
-
-            timeout(Duration::from_millis(IPC_TIMEOUT_MS), writer.write_all(line.as_bytes()))
-                .await
-                .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
-                .map_err(|e| HsmError::Ipc(e.to_string()))?;
-
-            let mut buf_reader = BufReader::new(reader_half);
-            let mut resp_line  = String::new();
-            timeout(
-                Duration::from_millis(IPC_TIMEOUT_MS),
-                buf_reader.read_line(&mut resp_line),
-            )
-            .await
-            .map_err(|_| HsmError::Timeout { ms: IPC_TIMEOUT_MS })?
-            .map_err(|e| HsmError::Ipc(e.to_string()))?;
-
-            return parse_response(&resp_line);
-        }
+        let mut line = serde_json::to_string(&value)
+            .map_err(|e| HsmError::Serialisation(e.to_string()))?;
+        line.push('\n');
+        Ok(line)
     }
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
-/// Parse a raw NDJSON response line into an `HsmResponse`.
 fn parse_response(resp_line: &str) -> Result<HsmResponse, HsmError> {
     let resp: HsmResponse = serde_json::from_str(resp_line.trim())
         .map_err(|e| HsmError::Serialisation(format!("bad response JSON: {e}")))?;
@@ -316,14 +490,7 @@ pub fn default_pyhsm_address() -> &'static str {
     { "127.0.0.1:7777" }
 }
 
-// ── HsmKeyProvider ────────────────────────────────────────────────────────────
-//
-// Wraps HsmClient to provide EncryptionKey material to PageStore without
-// ever exposing the raw key bytes in vgdb's address space.
-// Instead, PageStore calls hsm.encrypt/decrypt directly, bypassing the
-// in-process EncryptionKey entirely.
-//
-// This is exposed as a trait so we can mock it in tests.
+// ── KeyProvider trait ─────────────────────────────────────────────────────────
 
 use async_trait::async_trait;
 

@@ -33,6 +33,8 @@ mod fault_injection_tests;
 #[cfg(test)]
 mod invariant_tests;
 #[cfg(test)]
+mod proptest_invariants;
+#[cfg(test)]
 mod stress_tests;
 
 pub use account::{Account, AccountId, AccountType};

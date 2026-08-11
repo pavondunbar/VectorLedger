@@ -2443,12 +2443,16 @@ name = "vledger-hsm"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "hex",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "uuid",
  "vledger-crypto",
@@ -2591,6 +2595,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "vledger-crypto",
+ "vledger-hsm",
  "webpki-roots 0.26.11",
  "zeroize",
 ]

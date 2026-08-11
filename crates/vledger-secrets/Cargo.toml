@@ -9,6 +9,7 @@ repository.workspace  = true
 
 [dependencies]
 vledger-crypto  = { workspace = true }
+vledger-hsm     = { path = "../vledger-hsm" }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 thiserror       = { workspace = true }

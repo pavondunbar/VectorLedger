@@ -98,7 +98,7 @@ pub enum KeySourceConfig {
         encryption_context: std::collections::HashMap<String, String>,
     },
 
-    /// PyHSM Unix-socket daemon backend.
+    /// PyHSM Unix-socket daemon backend — **Model 1** (same server).
     ///
     /// The master key is generated once inside the PyHSM daemon and never
     /// leaves it.  VectorLedger stores only an encrypted blob (sealed by
@@ -126,6 +126,84 @@ pub enum KeySourceConfig {
         #[serde(default = "default_pyhsm_key_id")]
         key_id: String,
     },
+
+    /// Remote PyHSM daemon backend — **Model 2** (same-region, separate server).
+    ///
+    /// PyHSM runs on a dedicated server in the same region's private subnet.
+    /// VectorLedger connects over TLS 1.3 with mutual certificate
+    /// authentication (mTLS).  The JSON IPC wire protocol is identical to
+    /// the local socket transport; every remote request additionally carries
+    /// a `requestId` (UUID v4) and `timestamp` (RFC 3339) for replay-attack
+    /// prevention.
+    ///
+    /// ## Key lifecycle
+    /// Identical to `PyHsm`: a wrapped blob is cached in
+    /// `keys/pyhsm_master_key.enc` with an HMAC integrity seal.  On first
+    /// boot the plaintext key is generated locally, encrypted by the remote
+    /// PyHSM daemon, and the ciphertext is cached.  On subsequent boots the
+    /// cached blob is decrypted by PyHSM over mTLS; the plaintext exists
+    /// in-process only for startup key derivation, then is zeroized.
+    ///
+    /// ## Configuration
+    /// All paths may be overridden by environment variables at runtime:
+    ///
+    /// | Field          | Env var override      |
+    /// |----------------|-----------------------|
+    /// | `endpoint`     | `PYHSM_ENDPOINT`      |
+    /// | `ca_cert`      | `PYHSM_CA_CERT`       |
+    /// | `client_cert`  | `PYHSM_CLIENT_CERT`   |
+    /// | `client_key`   | `PYHSM_CLIENT_KEY`    |
+    /// | `timeout_ms`   | `PYHSM_TIMEOUT_MS`    |
+    ///
+    /// ## Prerequisites
+    /// - PyHSM server must expose an HTTPS endpoint on the private subnet.
+    /// - CA certificate that signed the PyHSM server's TLS cert must be
+    ///   present at `ca_cert`.
+    /// - mTLS client certificate and key (signed by PyHSM's client CA) must
+    ///   be present at `client_cert` / `client_key`.
+    /// - Security group / firewall must allow VectorLedger → PyHSM only.
+    RemotePyHsm {
+        /// HTTPS endpoint of the remote PyHSM daemon.
+        /// Example: `https://pyhsm.internal.example.com:8443`
+        /// Overrideable via `PYHSM_ENDPOINT`.
+        endpoint: String,
+
+        /// Path to the PEM file containing the CA certificate used to verify
+        /// the PyHSM server's TLS certificate.
+        /// Overrideable via `PYHSM_CA_CERT`.
+        ca_cert: String,
+
+        /// Path to the PEM file containing VectorLedger's mTLS client
+        /// certificate.  Required for mutual TLS.
+        /// Overrideable via `PYHSM_CLIENT_CERT`.
+        #[serde(default)]
+        client_cert: Option<String>,
+
+        /// Path to the PEM file containing VectorLedger's mTLS client private
+        /// key.  Required when `client_cert` is set.
+        /// Overrideable via `PYHSM_CLIENT_KEY`.
+        #[serde(default)]
+        client_key: Option<String>,
+
+        /// Per-request timeout in milliseconds.  Default: 5000.
+        /// Overrideable via `PYHSM_TIMEOUT_MS`.
+        #[serde(default = "default_remote_timeout_ms")]
+        timeout_ms: u64,
+
+        /// Maximum number of retries on transient network errors.  Default: 3.
+        #[serde(default = "default_remote_max_retries")]
+        max_retries: u32,
+
+        /// Caller identifier written to the PyHSM audit log.
+        /// Default: `"vledger"`.
+        #[serde(default = "default_pyhsm_caller_id")]
+        caller_id: String,
+
+        /// Key ID used inside PyHSM for the master-key wrapping key.
+        /// Default: `"vledger.master-key"`.
+        #[serde(default = "default_pyhsm_key_id")]
+        key_id: String,
+    },
 }
 
 fn default_env_var()     -> String { "VectorLedger_MASTER_KEY".into() }
@@ -138,6 +216,8 @@ fn default_pyhsm_socket()    -> String {
 }
 fn default_pyhsm_caller_id() -> String { "vledger".into() }
 fn default_pyhsm_key_id()    -> String { "vledger.master-key".into() }
+fn default_remote_timeout_ms()  -> u64 { 5_000 }
+fn default_remote_max_retries() -> u32 { 3 }
 
 impl KeySourceConfig {
     /// Load config from a JSON file.
@@ -188,6 +268,21 @@ pub fn build_provider(
         KeySourceConfig::PyHsm { socket_path, caller_id, key_id } =>
             Ok(Box::new(PyHsmProvider {
                 socket_path: socket_path.clone(),
+                caller_id:   caller_id.clone(),
+                key_id:      key_id.clone(),
+                cache_dir:   None,
+            })),
+        KeySourceConfig::RemotePyHsm {
+            endpoint, ca_cert, client_cert, client_key,
+            timeout_ms, max_retries, caller_id, key_id,
+        } =>
+            Ok(Box::new(RemotePyHsmProvider {
+                endpoint:    endpoint.clone(),
+                ca_cert:     ca_cert.clone(),
+                client_cert: client_cert.clone(),
+                client_key:  client_key.clone(),
+                timeout_ms:  *timeout_ms,
+                max_retries: *max_retries,
                 caller_id:   caller_id.clone(),
                 key_id:      key_id.clone(),
                 cache_dir:   None,
@@ -1102,4 +1197,208 @@ fn bytes_to_key32(plaintext: &[u8]) -> Result<Zeroizing<[u8; 32]>, SecretsError>
     let s = std::str::from_utf8(plaintext)
         .map_err(|e| SecretsError::PyHsm(format!("plaintext is not valid UTF-8: {e}")))?;
     parse_hex_key(s.trim())
+}
+
+
+
+// ── RemotePyHsmProvider ───────────────────────────────────────────────────────
+
+/// Derives the VectorLedger master key from a **remote** PyHSM daemon over
+/// TLS 1.3 + mTLS — **Model 2** (same-region, separate server).
+///
+/// ## How it works
+/// Identical key lifecycle to `PyHsmProvider` (local Unix socket):
+/// - First boot: generate 32-byte master key, seal it via remote PyHSM,
+///   cache the ciphertext blob with an HMAC integrity seal.
+/// - Subsequent boots: verify HMAC, send blob to remote PyHSM for
+///   decryption over mTLS, return plaintext only for startup key derivation.
+///
+/// ## Security boundary
+/// The private key material never crosses the network — only the encrypted
+/// blob (ciphertext produced by PyHSM) and the decrypted plaintext for the
+/// in-process master key derivation.  The PyHSM private wrapping key stays
+/// on the PyHSM server at all times.
+///
+/// ## Replay prevention
+/// Every request to the remote PyHSM carries a unique `requestId` (UUID v4)
+/// and a `timestamp` (RFC 3339).  PyHSM is expected to reject duplicate
+/// request IDs within a replay window and stale timestamps.
+pub struct RemotePyHsmProvider {
+    pub endpoint:    String,
+    pub ca_cert:     String,
+    pub client_cert: Option<String>,
+    pub client_key:  Option<String>,
+    pub timeout_ms:  u64,
+    pub max_retries: u32,
+    pub caller_id:   String,
+    pub key_id:      String,
+    /// Directory where `pyhsm_master_key.enc` is cached.  `None` → current dir.
+    pub cache_dir:   Option<std::path::PathBuf>,
+}
+
+impl RemotePyHsmProvider {
+    fn cache_path(&self) -> std::path::PathBuf {
+        self.cache_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("pyhsm_master_key.enc")
+    }
+
+    /// HMAC key = BLAKE3(endpoint || key_id).
+    /// Ties the integrity seal to this specific remote endpoint and wrapping key.
+    fn hmac_key(&self) -> [u8; 32] {
+        let mut input = self.endpoint.as_bytes().to_vec();
+        input.extend_from_slice(self.key_id.as_bytes());
+        *blake3::hash(&input).as_bytes()
+    }
+
+    fn compute_hmac(key: &[u8], data: &str) -> String {
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+        mac.update(data.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn write_cache(&self, path: &std::path::Path, ct_b64: &str) -> Result<(), SecretsError> {
+        let hmac_hex = Self::compute_hmac(&self.hmac_key(), ct_b64);
+        std::fs::write(path, format!("{ct_b64}\n{hmac_hex}\n"))
+            .map_err(|e| SecretsError::PyHsm(format!("write pyhsm_master_key.enc: {e}")))?;
+        set_mode_600(path);
+        Ok(())
+    }
+
+    fn read_cache_verified(&self, path: &std::path::Path) -> Result<String, SecretsError> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| SecretsError::PyHsm(format!("read pyhsm_master_key.enc: {e}")))?;
+        let mut lines = raw.lines();
+        let ct_b64 = lines.next().ok_or_else(|| {
+            SecretsError::PyHsm("pyhsm_master_key.enc: missing ciphertext line".into())
+        })?;
+        let stored_hmac = lines.next().ok_or_else(|| {
+            SecretsError::PyHsm(
+                "pyhsm_master_key.enc: missing HMAC line — \
+                 delete the file to trigger re-generation".into(),
+            )
+        })?;
+        let expected = Self::compute_hmac(&self.hmac_key(), ct_b64);
+        use subtle::ConstantTimeEq;
+        if !bool::from(stored_hmac.as_bytes().ct_eq(expected.as_bytes())) {
+            return Err(SecretsError::PyHsm(
+                "pyhsm_master_key.enc HMAC verification FAILED — \
+                 file may have been tampered with. \
+                 Delete it to force re-generation.".into(),
+            ));
+        }
+        Ok(ct_b64.to_string())
+    }
+
+    /// Build an `HsmClient` configured for the remote transport.
+    fn build_hsm_client(&self) -> Result<vledger_hsm::HsmClient, SecretsError> {
+        let cfg = vledger_hsm::RemotePyHsmConfig {
+            endpoint:    self.resolve_env("PYHSM_ENDPOINT",     &self.endpoint),
+            ca_cert:     self.resolve_env("PYHSM_CA_CERT",      &self.ca_cert),
+            client_cert: self.resolve_env_opt("PYHSM_CLIENT_CERT", self.client_cert.as_deref()),
+            client_key:  self.resolve_env_opt("PYHSM_CLIENT_KEY",  self.client_key.as_deref()),
+            timeout_ms:  std::env::var("PYHSM_TIMEOUT_MS")
+                             .ok()
+                             .and_then(|v| v.parse().ok())
+                             .unwrap_or(self.timeout_ms),
+            max_retries: self.max_retries,
+        };
+        Ok(vledger_hsm::HsmClient::remote(cfg, &self.caller_id))
+    }
+
+    fn resolve_env(&self, var: &str, fallback: &str) -> String {
+        std::env::var(var).unwrap_or_else(|_| fallback.to_string())
+    }
+
+    fn resolve_env_opt(&self, var: &str, fallback: Option<&str>) -> Option<String> {
+        std::env::var(var).ok().or_else(|| fallback.map(|s| s.to_string()))
+    }
+
+    /// Encrypt `plaintext` via the remote PyHSM and return Base64 ciphertext.
+    async fn hsm_encrypt(
+        &self,
+        client:    &vledger_hsm::HsmClient,
+        plaintext: &[u8],
+    ) -> Result<String, SecretsError> {
+        let ct = client.encrypt(&self.key_id, plaintext).await
+            .map_err(|e| SecretsError::PyHsm(format!("remote PyHSM encrypt: {e}")))?;
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        Ok(STANDARD.encode(&ct))
+    }
+
+    /// Decrypt a Base64 ciphertext via the remote PyHSM and return plaintext bytes.
+    async fn hsm_decrypt(
+        &self,
+        client: &vledger_hsm::HsmClient,
+        ct_b64: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, SecretsError> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let ct = STANDARD.decode(ct_b64.trim())
+            .map_err(|e| SecretsError::PyHsm(format!("base64 decode cached blob: {e}")))?;
+        let pt = client.decrypt(&self.key_id, &ct).await
+            .map_err(|e| SecretsError::PyHsm(format!("remote PyHSM decrypt: {e}")))?;
+        Ok(pt)
+    }
+
+    /// Ensure the wrapping key exists in the remote PyHSM, generating if absent.
+    async fn ensure_wrapping_key(
+        &self,
+        client: &vledger_hsm::HsmClient,
+    ) -> Result<(), SecretsError> {
+        use vledger_hsm::KeyPolicy;
+        match client.generate_key(&self.key_id, Some(KeyPolicy::encrypt_decrypt())).await {
+            Ok(()) => Ok(()),
+            Err(vledger_hsm::HsmError::Remote(ref msg)) if msg.contains("already exists") => Ok(()),
+            Err(e) => Err(SecretsError::PyHsm(format!("ensure wrapping key: {e}"))),
+        }
+    }
+}
+
+#[async_trait]
+impl MasterKeyProvider for RemotePyHsmProvider {
+    async fn load_master_key(&self) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
+        let client = self.build_hsm_client()?;
+        let cache  = self.cache_path();
+
+        if cache.exists() {
+            let ct_b64 = self.read_cache_verified(&cache)?;
+            tracing::info!(
+                endpoint = %self.endpoint,
+                key_id   = %self.key_id,
+                "Remote PyHSM: HMAC verified — decrypting cached master key blob"
+            );
+            let plaintext = self.hsm_decrypt(&client, &ct_b64).await?;
+            return bytes_to_key32(plaintext.as_slice());
+        }
+
+        // First boot: generate master key, seal it inside remote PyHSM.
+        tracing::info!(
+            endpoint = %self.endpoint,
+            key_id   = %self.key_id,
+            "Remote PyHSM: first boot — generating and sealing master key"
+        );
+
+        self.ensure_wrapping_key(&client).await?;
+
+        use rand::RngCore;
+        let mut raw = Zeroizing::new([0u8; 32]);
+        rand::rngs::OsRng.fill_bytes(raw.as_mut());
+
+        let ct_b64 = self.hsm_encrypt(&client, raw.as_ref()).await?;
+        self.write_cache(&cache, &ct_b64)?;
+        tracing::info!(
+            path = %cache.display(),
+            "Remote PyHSM: master key sealed and cached"
+        );
+
+        Ok(Zeroizing::new(*raw))
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "Remote PyHSM daemon at '{}' (mTLS, key '{}')",
+            self.endpoint, self.key_id
+        )
+    }
 }
