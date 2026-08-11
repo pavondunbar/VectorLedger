@@ -1,4 +1,6 @@
+```bash
 #!/usr/bin/env bash
+
 # install.sh — VectorLedger installer
 #
 # Usage (one-liner):
@@ -6,10 +8,10 @@
 #     https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.sh | bash
 #
 # Options (set as environment variables before piping to bash):
-#   VLEDGER_VERSION   — specific release tag to install, e.g. "v0.1.0"
-#                       (default: latest release from GitHub)
-#   VLEDGER_INSTALL_DIR — directory to install the binary into
-#                       (default: /usr/local/bin, falls back to ~/.local/bin)
+#   VLEDGER_VERSION       — specific release tag to install, e.g. "v1.0.0"
+#                           (default: latest release from GitHub)
+#   VLEDGER_INSTALL_DIR   — directory to install the binary into
+#                           (default: /usr/local/bin, falls back to ~/.local/bin)
 #   VLEDGER_NO_MODIFY_PATH — set to "1" to skip adding install dir to PATH
 #
 # Examples:
@@ -20,7 +22,7 @@
 #   # Install a specific version
 #   curl --proto '=https' --tlsv1.2 -sSf \
 #     https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.sh \
-#     | VLEDGER_VERSION=v0.1.0 bash
+#     | VLEDGER_VERSION=v1.0.0 bash
 #
 #   # Install to a custom directory
 #   curl --proto '=https' --tlsv1.2 -sSf \
@@ -33,15 +35,16 @@ set -euo pipefail
 
 REPO="pavondunbar/VectorLedger"
 BINARY="vledger"
+
 RELEASES_API="https://api.github.com/repos/${REPO}/releases/latest"
 RELEASES_DOWNLOAD="https://github.com/${REPO}/releases/download"
-# Fallback used when the GitHub Releases API returns no result.
+
+# Fallback used when the GitHub Releases API cannot determine the latest version.
 # Update this whenever a new release is cut.
 LATEST_KNOWN_VERSION="v1.0.0"
 
 # ── Colour output helpers ─────────────────────────────────────────────────────
 
-# Detect whether the terminal supports colour
 if [ -t 1 ] && command -v tput >/dev/null 2>&1 && tput colors >/dev/null 2>&1; then
     RED=$(tput setaf 1)
     GREEN=$(tput setaf 2)
@@ -50,15 +53,45 @@ if [ -t 1 ] && command -v tput >/dev/null 2>&1 && tput colors >/dev/null 2>&1; t
     BOLD=$(tput bold)
     RESET=$(tput sgr0)
 else
-    RED="" GREEN="" YELLOW="" CYAN="" BOLD="" RESET=""
+    RED=""
+    GREEN=""
+    YELLOW=""
+    CYAN=""
+    BOLD=""
+    RESET=""
 fi
 
-info()    { printf "%s  info%s  %s\n"  "${CYAN}"   "${RESET}" "$*"; }
-success() { printf "%s    ok%s  %s\n"  "${GREEN}"  "${RESET}" "$*"; }
-warn()    { printf "%s  warn%s  %s\n"  "${YELLOW}" "${RESET}" "$*"; }
-error()   { printf "%s error%s  %s\n"  "${RED}"    "${RESET}" "$*" >&2; }
-bold()    { printf "%s%s%s\n"          "${BOLD}"   "$*"        "${RESET}"; }
-die()     { error "$*"; exit 1; }
+# IMPORTANT:
+# All logging goes to stderr so command substitution such as:
+#
+#   version=$(resolve_version)
+#
+# captures ONLY the actual return value from stdout.
+
+info() {
+    printf "%s  info%s  %s\n" "${CYAN}" "${RESET}" "$*" >&2
+}
+
+success() {
+    printf "%s    ok%s  %s\n" "${GREEN}" "${RESET}" "$*" >&2
+}
+
+warn() {
+    printf "%s  warn%s  %s\n" "${YELLOW}" "${RESET}" "$*" >&2
+}
+
+error() {
+    printf "%s error%s  %s\n" "${RED}" "${RESET}" "$*" >&2
+}
+
+bold() {
+    printf "%s%s%s\n" "${BOLD}" "$*" "${RESET}"
+}
+
+die() {
+    error "$*"
+    exit 1
+}
 
 # ── Platform detection ────────────────────────────────────────────────────────
 
@@ -66,15 +99,27 @@ detect_platform() {
     local os arch
 
     case "$(uname -s)" in
-        Linux)  os="linux"  ;;
-        Darwin) os="macos"  ;;
-        *)      die "Unsupported operating system: $(uname -s). VectorLedger supports Linux and macOS." ;;
+        Linux)
+            os="linux"
+            ;;
+        Darwin)
+            os="macos"
+            ;;
+        *)
+            die "Unsupported operating system: $(uname -s). VectorLedger supports Linux and macOS."
+            ;;
     esac
 
     case "$(uname -m)" in
-        x86_64 | amd64)  arch="x86_64"  ;;
-        arm64  | aarch64) arch="aarch64" ;;
-        *) die "Unsupported architecture: $(uname -m). Supported: x86_64, aarch64." ;;
+        x86_64 | amd64)
+            arch="x86_64"
+            ;;
+        arm64 | aarch64)
+            arch="aarch64"
+            ;;
+        *)
+            die "Unsupported architecture: $(uname -m). Supported: x86_64, aarch64."
+            ;;
     esac
 
     echo "${os}-${arch}"
@@ -93,47 +138,76 @@ require_cmd() {
 resolve_version() {
     local version="${VLEDGER_VERSION:-}"
 
+    # Explicit version supplied by the user.
     if [ -n "$version" ]; then
-        # Normalise: ensure it starts with 'v'
         [[ "$version" == v* ]] || version="v${version}"
         echo "$version"
-        return
+        return 0
     fi
 
     info "Fetching latest release version from GitHub..."
 
     local raw=""
+
     if command -v curl >/dev/null 2>&1; then
-        raw=$(curl --proto '=https' --tlsv1.2 -sSf \
-            --max-time 10 \
-            -H "Accept: application/vnd.github+json" \
-            "${RELEASES_API}" 2>/dev/null || true)
+        raw=$(
+            curl \
+                --proto '=https' \
+                --tlsv1.2 \
+                -fsSL \
+                --max-time 10 \
+                -H "Accept: application/vnd.github+json" \
+                -H "User-Agent: VectorLedger-Installer" \
+                "${RELEASES_API}" \
+                2>/dev/null || true
+        )
     elif command -v wget >/dev/null 2>&1; then
-        raw=$(wget -qO- --timeout=10 \
-            --header "Accept: application/vnd.github+json" \
-            "${RELEASES_API}" 2>/dev/null || true)
+        raw=$(
+            wget \
+                -qO- \
+                --timeout=10 \
+                --header="Accept: application/vnd.github+json" \
+                --header="User-Agent: VectorLedger-Installer" \
+                "${RELEASES_API}" \
+                2>/dev/null || true
+        )
     else
         die "Neither curl nor wget is available. Please install one and try again."
     fi
 
-    # Check for API errors (rate limit, 404, etc.)
-    if echo "$raw" | grep -q '"message"'; then
-        local api_msg
-        api_msg=$(echo "$raw" | grep '"message"' | head -1 | sed 's/.*"message": *"\([^"]*\)".*/\1/')
-        warn "GitHub API returned: ${api_msg}. Falling back to ${LATEST_KNOWN_VERSION}."
+    # If the API returned an error, fall back safely.
+    if [ -z "$raw" ]; then
+        warn "Could not reach the GitHub Releases API. Falling back to ${LATEST_KNOWN_VERSION}."
         echo "$LATEST_KNOWN_VERSION"
-        return
+        return 0
     fi
 
-    version=$(echo "$raw" \
-        | grep '"tag_name"' \
-        | head -1 \
-        | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    if echo "$raw" | grep -q '"message"'; then
+        local api_msg
+
+        api_msg=$(
+            echo "$raw" |
+                grep '"message"' |
+                head -1 |
+                sed 's/.*"message": *"\([^"]*\)".*/\1/'
+        )
+
+        warn "GitHub API returned: ${api_msg}. Falling back to ${LATEST_KNOWN_VERSION}."
+        echo "$LATEST_KNOWN_VERSION"
+        return 0
+    fi
+
+    version=$(
+        echo "$raw" |
+            grep '"tag_name"' |
+            head -1 |
+            sed 's/.*"tag_name": *"\([^"]*\)".*/\1/'
+    )
 
     if [ -z "$version" ]; then
         warn "Could not determine latest release from GitHub API. Falling back to ${LATEST_KNOWN_VERSION}."
         echo "$LATEST_KNOWN_VERSION"
-        return
+        return 0
     fi
 
     echo "$version"
@@ -146,16 +220,17 @@ resolve_install_dir() {
 
     if [ -n "$dir" ]; then
         echo "$dir"
-        return
+        return 0
     fi
 
-    # Prefer /usr/local/bin if we can write to it (or become root)
+    # Prefer /usr/local/bin if writable or if sudo is available.
     if [ -w "/usr/local/bin" ]; then
         echo "/usr/local/bin"
     elif command -v sudo >/dev/null 2>&1; then
         echo "/usr/local/bin"
     else
-        warn "/usr/local/bin is not writable and sudo is not available. Installing to ~/.local/bin instead."
+        warn "/usr/local/bin is not writable and sudo is not available."
+        warn "Installing to ~/.local/bin instead."
         echo "${HOME}/.local/bin"
     fi
 }
@@ -167,11 +242,20 @@ download() {
     local dest="$2"
 
     if command -v curl >/dev/null 2>&1; then
-        curl --proto '=https' --tlsv1.2 -sSfL --progress-bar \
-            --output "$dest" "$url"
+        curl \
+            --proto '=https' \
+            --tlsv1.2 \
+            -fsSL \
+            --progress-bar \
+            --output "$dest" \
+            "$url"
     elif command -v wget >/dev/null 2>&1; then
-        wget --https-only -q --show-progress \
-            -O "$dest" "$url"
+        wget \
+            --https-only \
+            -q \
+            --show-progress \
+            -O "$dest" \
+            "$url"
     else
         die "Neither curl nor wget is available. Please install one and try again."
     fi
@@ -182,37 +266,45 @@ download() {
 verify_checksum() {
     local archive="$1"
     local checksum_file="$2"
+    local expected actual
 
     if command -v sha256sum >/dev/null 2>&1; then
-        # sha256sum format: "<hash>  <filename>"
-        # Filter to only the line matching our archive filename
-        local expected
-        expected=$(grep "$(basename "$archive")" "$checksum_file" | awk '{print $1}')
+        expected=$(
+            grep -F "$(basename "$archive")" "$checksum_file" |
+                awk '{print $1}' |
+                head -1
+        )
+
         if [ -z "$expected" ]; then
             warn "No checksum entry found for $(basename "$archive") — skipping verification."
             return 0
         fi
-        local actual
+
         actual=$(sha256sum "$archive" | awk '{print $1}')
-        if [ "$expected" != "$actual" ]; then
-            die "Checksum mismatch for $(basename "$archive")!\n  Expected : $expected\n  Actual   : $actual"
-        fi
+
     elif command -v shasum >/dev/null 2>&1; then
-        # macOS ships shasum instead of sha256sum
-        local expected
-        expected=$(grep "$(basename "$archive")" "$checksum_file" | awk '{print $1}')
+        expected=$(
+            grep -F "$(basename "$archive")" "$checksum_file" |
+                awk '{print $1}' |
+                head -1
+        )
+
         if [ -z "$expected" ]; then
             warn "No checksum entry found for $(basename "$archive") — skipping verification."
             return 0
         fi
-        local actual
+
         actual=$(shasum -a 256 "$archive" | awk '{print $1}')
-        if [ "$expected" != "$actual" ]; then
-            die "Checksum mismatch for $(basename "$archive")!\n  Expected : $expected\n  Actual   : $actual"
-        fi
+
     else
         warn "sha256sum / shasum not found — skipping checksum verification."
         return 0
+    fi
+
+    if [ "$expected" != "$actual" ]; then
+        die "Checksum mismatch for $(basename "$archive")!
+  Expected : $expected
+  Actual   : $actual"
     fi
 
     success "Checksum verified."
@@ -223,9 +315,10 @@ verify_checksum() {
 add_to_path_advice() {
     local install_dir="$1"
 
-    # If the directory is already in PATH, nothing to do
     case ":${PATH}:" in
-        *":${install_dir}:"*) return ;;
+        *":${install_dir}:"*)
+            return
+            ;;
     esac
 
     if [ "${VLEDGER_NO_MODIFY_PATH:-0}" = "1" ]; then
@@ -234,10 +327,12 @@ add_to_path_advice() {
         return
     fi
 
-    # Detect the user's shell profile file
     local profile_file=""
+
     case "${SHELL:-}" in
-        */zsh)  profile_file="${ZDOTDIR:-$HOME}/.zshrc" ;;
+        */zsh)
+            profile_file="${ZDOTDIR:-$HOME}/.zshrc"
+            ;;
         */bash)
             if [ -f "${HOME}/.bash_profile" ]; then
                 profile_file="${HOME}/.bash_profile"
@@ -245,21 +340,29 @@ add_to_path_advice() {
                 profile_file="${HOME}/.bashrc"
             fi
             ;;
-        */fish) profile_file="${HOME}/.config/fish/config.fish" ;;
+        */fish)
+            profile_file="${HOME}/.config/fish/config.fish"
+            ;;
         *)
-            warn "Could not detect your shell. Add ${install_dir} to your PATH manually."
+            warn "Could not detect your shell."
+            warn "Add ${install_dir} to your PATH manually."
             return
             ;;
     esac
 
     local export_line
+
     if [[ "${SHELL:-}" == */fish ]]; then
         export_line="fish_add_path ${install_dir}"
     else
         export_line="export PATH=\"${install_dir}:\$PATH\""
     fi
 
-    printf '\n# VectorLedger\n%s\n' "${export_line}" >> "${profile_file}"
+    # Avoid adding duplicate VectorLedger PATH entries.
+    if ! grep -Fq "# VectorLedger" "${profile_file}" 2>/dev/null; then
+        printf '\n# VectorLedger\n%s\n' "${export_line}" >> "${profile_file}"
+    fi
+
     warn "${install_dir} was not in your PATH."
     warn "Added to ${profile_file}. Restart your shell or run:"
     warn "  source ${profile_file}"
@@ -279,7 +382,8 @@ install_binary() {
         info "Writing to ${install_dir} requires sudo..."
         sudo install -m 755 "$src" "${install_dir}/${BINARY}"
     else
-        die "Cannot write to ${install_dir} and sudo is not available. Set VLEDGER_INSTALL_DIR to a directory you own."
+        die "Cannot write to ${install_dir} and sudo is not available.
+Set VLEDGER_INSTALL_DIR to a directory you own."
     fi
 }
 
@@ -292,8 +396,11 @@ main() {
     bold ""
 
     require_cmd uname
+    require_cmd tar
+    require_cmd mktemp
 
     local platform version install_dir
+
     platform=$(detect_platform)
     version=$(resolve_version)
     install_dir=$(resolve_install_dir)
@@ -302,80 +409,128 @@ main() {
     info "Version       : ${version}"
     info "Install dir   : ${install_dir}"
 
-    # ── Construct expected asset name ────────────────────────────────────
+    # ── Construct expected asset names ────────────────────────────────────────
+    #
     # Expected release asset naming convention:
+    #
     #   vledger-<version>-<os>-<arch>.tar.gz
-    # e.g. vledger-v0.1.0-linux-x86_64.tar.gz
+    #
+    # Example:
+    #
+    #   vledger-v1.0.0-linux-x86_64.tar.gz
+
     local asset_name="${BINARY}-${version}-${platform}.tar.gz"
     local checksum_name="${BINARY}-${version}-checksums.txt"
+
     local asset_url="${RELEASES_DOWNLOAD}/${version}/${asset_name}"
     local checksum_url="${RELEASES_DOWNLOAD}/${version}/${checksum_name}"
 
-    # ── Download to a temp directory ─────────────────────────────────────
-    # Initialise tmpdir before anything else so the EXIT trap always fires
-    # cleanly even if a download or extraction step exits early.
+    # ── Temporary directory ───────────────────────────────────────────────────
+
     local tmpdir
     tmpdir=$(mktemp -d)
-    # Always clean up on exit
+
     trap 'rm -rf "$tmpdir"' EXIT
 
     local archive="${tmpdir}/${asset_name}"
     local checksum_file="${tmpdir}/${checksum_name}"
 
+    # ── Download binary ───────────────────────────────────────────────────────
+
     info "Downloading ${asset_name}..."
+
     if ! download "$asset_url" "$archive" 2>/dev/null; then
         die "No pre-built binary is available for your platform (${platform}) at version ${version}.
 
-  Supported platforms: linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64
+Expected asset:
+  ${asset_name}
 
-  Please check the releases page for available assets:
-    https://github.com/${REPO}/releases/tag/${version}
+Supported platforms:
+  linux-x86_64
+  linux-aarch64
+  macos-x86_64
+  macos-aarch64
 
-  If you believe this is an error, please open an issue:
-    https://github.com/${REPO}/issues"
+Please check the releases page for available assets:
+https://github.com/${REPO}/releases/tag/${version}
+
+If you believe this is an error, please open an issue:
+https://github.com/${REPO}/issues"
     fi
 
-    # ── Verify checksum (best-effort) ─────────────────────────────────────
+    # ── Verify checksum ───────────────────────────────────────────────────────
+
     info "Verifying checksum..."
+
     if download "$checksum_url" "$checksum_file" 2>/dev/null; then
         verify_checksum "$archive" "$checksum_file"
     else
         warn "Checksum file not available — skipping verification."
     fi
 
-    # ── Extract ───────────────────────────────────────────────────────────
-    info "Extracting archive..."
-    tar -xzf "$archive" -C "$tmpdir"
+    # ── Extract ───────────────────────────────────────────────────────────────
 
-    # The binary may be at the root of the archive or inside a subdirectory
+    info "Extracting archive..."
+
+    if ! tar -xzf "$archive" -C "$tmpdir"; then
+        die "Failed to extract ${asset_name}."
+    fi
+
+    # Binary may be at the root or inside a subdirectory.
     local binary_path
-    binary_path=$(find "$tmpdir" -type f -name "$BINARY" ! -name "*.tar.gz" | head -1)
+
+    binary_path=$(
+        find "$tmpdir" \
+            -type f \
+            -name "$BINARY" \
+            -not -path "$archive" |
+            head -1
+    )
+
     if [ -z "$binary_path" ]; then
         die "Could not find '${BINARY}' binary inside the downloaded archive."
     fi
+
     chmod +x "$binary_path"
 
-    # ── Install ───────────────────────────────────────────────────────────
+    # ── Install ───────────────────────────────────────────────────────────────
+
     info "Installing ${BINARY} to ${install_dir}..."
+
     install_binary "$binary_path" "$install_dir"
 
-    # ── Verify ────────────────────────────────────────────────────────────
-    local installed_version
-    installed_version=$("${install_dir}/${BINARY}" --version 2>/dev/null || true)
-    success "Installed: ${install_dir}/${BINARY}  (${installed_version})"
+    # ── Verify installation ───────────────────────────────────────────────────
 
-    # ── PATH ──────────────────────────────────────────────────────────────
+    local installed_version
+
+    installed_version=$(
+        "${install_dir}/${BINARY}" --version 2>/dev/null || true
+    )
+
+    if [ -z "$installed_version" ]; then
+        warn "Binary installed, but version verification failed."
+    else
+        success "Installed: ${install_dir}/${BINARY} (${installed_version})"
+    fi
+
+    # ── PATH advice ───────────────────────────────────────────────────────────
+
     add_to_path_advice "$install_dir"
 
     bold ""
     bold "  VectorLedger ${version} is ready."
     bold ""
+
     bold "  Quick start (requires PyHSM daemon running first):"
     printf "    vledger init --key-source pyhsm\n"
     printf "    vledger start --data-dir ./vledger-data\n"
+
     bold ""
-    bold "  Full setup guide: https://github.com/${REPO}#quick-start"
+    bold "  Full setup guide:"
+    bold "  https://github.com/${REPO}#quick-start"
     bold ""
 }
 
 main "$@"
+```
+
