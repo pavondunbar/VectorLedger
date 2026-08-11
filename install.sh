@@ -10,6 +10,8 @@
 # Options (set as environment variables before piping to bash):
 #   VLEDGER_VERSION       — specific release tag to install, e.g. "v1.0.0"
 #                           (default: latest release from GitHub)
+#                           NOTE: if the GitHub API is rate-limited or unreachable,
+#                           you must supply this explicitly.
 #   VLEDGER_INSTALL_DIR   — directory to install the binary into
 #                           (default: /usr/local/bin, falls back to ~/.local/bin)
 #   VLEDGER_NO_MODIFY_PATH — set to "1" to skip adding install dir to PATH
@@ -41,7 +43,7 @@ RELEASES_DOWNLOAD="https://github.com/${REPO}/releases/download"
 
 # Fallback used when the GitHub Releases API cannot determine the latest version.
 # Update this whenever a new release is cut.
-LATEST_KNOWN_VERSION="v1.0.0"
+LATEST_KNOWN_VERSION=""
 
 # ── Colour output helpers ─────────────────────────────────────────────────────
 
@@ -177,8 +179,16 @@ resolve_version() {
 
     # If the API returned an error, fall back safely.
     if [ -z "$raw" ]; then
-        warn "Could not reach the GitHub Releases API. Falling back to ${LATEST_KNOWN_VERSION}."
-        echo "$LATEST_KNOWN_VERSION"
+        if [ -n "${LATEST_KNOWN_VERSION:-}" ]; then
+            warn "Could not reach the GitHub Releases API. Falling back to ${LATEST_KNOWN_VERSION}."
+            echo "$LATEST_KNOWN_VERSION"
+        else
+            error "Could not reach the GitHub Releases API and no fallback version is set."
+            error "Please specify a version explicitly:"
+            error "  curl ... | VLEDGER_VERSION=<version> bash"
+            error "Or check available releases at: https://github.com/${REPO}/releases"
+            exit 1
+        fi
         return 0
     fi
 
@@ -192,8 +202,16 @@ resolve_version() {
                 sed 's/.*"message": *"\([^"]*\)".*/\1/'
         )
 
-        warn "GitHub API returned: ${api_msg}. Falling back to ${LATEST_KNOWN_VERSION}."
-        echo "$LATEST_KNOWN_VERSION"
+        if [ -n "${LATEST_KNOWN_VERSION:-}" ]; then
+            warn "GitHub API returned: ${api_msg}. Falling back to ${LATEST_KNOWN_VERSION}."
+            echo "$LATEST_KNOWN_VERSION"
+        else
+            error "GitHub API returned: ${api_msg}"
+            error "Please specify a version explicitly:"
+            error "  curl ... | VLEDGER_VERSION=<version> bash"
+            error "Or check available releases at: https://github.com/${REPO}/releases"
+            exit 1
+        fi
         return 0
     fi
 
@@ -205,8 +223,16 @@ resolve_version() {
     )
 
     if [ -z "$version" ]; then
-        warn "Could not determine latest release from GitHub API. Falling back to ${LATEST_KNOWN_VERSION}."
-        echo "$LATEST_KNOWN_VERSION"
+        if [ -n "${LATEST_KNOWN_VERSION:-}" ]; then
+            warn "Could not determine latest release from GitHub API. Falling back to ${LATEST_KNOWN_VERSION}."
+            echo "$LATEST_KNOWN_VERSION"
+        else
+            error "Could not determine latest release from GitHub API."
+            error "Please specify a version explicitly:"
+            error "  curl ... | VLEDGER_VERSION=<version> bash"
+            error "Or check available releases at: https://github.com/${REPO}/releases"
+            exit 1
+        fi
         return 0
     fi
 
@@ -440,22 +466,23 @@ main() {
     info "Downloading ${asset_name}..."
 
     if ! download "$asset_url" "$archive" 2>/dev/null; then
-        die "No pre-built binary is available for your platform (${platform}) at version ${version}.
-
-Expected asset:
-  ${asset_name}
-
-Supported platforms:
-  linux-x86_64
-  linux-aarch64
-  macos-x86_64
-  macos-aarch64
-
-Please check the releases page for available assets:
-https://github.com/${REPO}/releases/tag/${version}
-
-If you believe this is an error, please open an issue:
-https://github.com/${REPO}/issues"
+        error "No pre-built binary is available for your platform (${platform}) at version ${version}."
+        error ""
+        error "Expected asset:"
+        error "  ${asset_name}"
+        error ""
+        error "Supported platforms:"
+        error "  linux-x86_64"
+        error "  linux-aarch64"
+        error "  macos-x86_64"
+        error "  macos-aarch64"
+        error ""
+        error "Please check the releases page for available assets:"
+        error "  https://github.com/${REPO}/releases/tag/${version}"
+        error ""
+        error "If you believe this is an error, please open an issue:"
+        error "  https://github.com/${REPO}/issues"
+        exit 1
     fi
 
     # ── Verify checksum ───────────────────────────────────────────────────────
