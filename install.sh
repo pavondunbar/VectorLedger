@@ -428,7 +428,15 @@ main() {
     local platform version install_dir
 
     platform=$(detect_platform)
-    version=$(resolve_version)
+
+    # resolve_version runs in a subshell via $(); exit 1 inside only kills
+    # the subshell, not this script.  Capture output then check it is non-empty.
+    version=$(resolve_version) || true
+    if [ -z "${version:-}" ]; then
+        # Error messages were already printed inside resolve_version.
+        exit 1
+    fi
+
     install_dir=$(resolve_install_dir)
 
     info "Platform      : ${platform}"
