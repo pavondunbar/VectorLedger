@@ -35,6 +35,9 @@ REPO="pavondunbar/VectorLedger"
 BINARY="vledger"
 RELEASES_API="https://api.github.com/repos/${REPO}/releases/latest"
 RELEASES_DOWNLOAD="https://github.com/${REPO}/releases/download"
+# Fallback used when the GitHub Releases API returns no result.
+# Update this whenever a new release is cut.
+LATEST_KNOWN_VERSION="v1.0.0"
 
 # ── Colour output helpers ─────────────────────────────────────────────────────
 
@@ -117,19 +120,9 @@ resolve_version() {
     if echo "$raw" | grep -q '"message"'; then
         local api_msg
         api_msg=$(echo "$raw" | grep '"message"' | head -1 | sed 's/.*"message": *"\([^"]*\)".*/\1/')
-        die "GitHub API returned an error: ${api_msg}
-
-  Could not determine the latest VectorLedger release version.
-
-  Please visit the releases page to find the current version:
-    https://github.com/${REPO}/releases
-
-  Then install it directly with:
-    curl --proto '=https' --tlsv1.2 -sSf \\
-      https://raw.githubusercontent.com/${REPO}/main/install.sh \\
-      | VLEDGER_VERSION=v1.0.0 bash
-
-  (Replace v1.0.0 with the version shown on the releases page.)"
+        warn "GitHub API returned: ${api_msg}. Falling back to ${LATEST_KNOWN_VERSION}."
+        echo "$LATEST_KNOWN_VERSION"
+        return
     fi
 
     version=$(echo "$raw" \
@@ -138,22 +131,9 @@ resolve_version() {
         | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
 
     if [ -z "$version" ]; then
-        die "Could not determine the latest VectorLedger release version.
-
-  The GitHub API did not return a release tag. This can happen when:
-    - No GitHub Release has been published for this repository yet.
-    - The GitHub Actions release workflow is still in progress.
-    - The GitHub API is temporarily rate-limiting your IP.
-
-  Please visit the releases page to find the current version:
-    https://github.com/${REPO}/releases
-
-  Then install it directly with:
-    curl --proto '=https' --tlsv1.2 -sSf \\
-      https://raw.githubusercontent.com/${REPO}/main/install.sh \\
-      | VLEDGER_VERSION=v1.0.0 bash
-
-  (Replace v1.0.0 with the version shown on the releases page.)"
+        warn "Could not determine latest release from GitHub API. Falling back to ${LATEST_KNOWN_VERSION}."
+        echo "$LATEST_KNOWN_VERSION"
+        return
     fi
 
     echo "$version"
