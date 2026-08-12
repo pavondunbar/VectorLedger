@@ -129,7 +129,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --version "0.5.5" --locked
+        run: cargo install cargo-cyclonedx --version "0.5.9" --locked
 
       - name: Generate SBOM
         run: |
@@ -184,12 +184,10 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
         with:
-          cosign-release: 'v2.4.1'
+          cosign-release: 'v3.1.3'
 
       - name: Sign checksums.txt
         working-directory: ./dist
-        env:
-          COSIGN_EXPERIMENTAL: "1"
         run: |
           VERSION="${GITHUB_REF_NAME}"
           CHECKSUM_FILE="vledger-${VERSION}-checksums.txt"
@@ -201,8 +199,6 @@ jobs:
 
       - name: Sign SBOM
         working-directory: ./dist
-        env:
-          COSIGN_EXPERIMENTAL: "1"
         run: |
           VERSION="${GITHUB_REF_NAME}"
           SBOM_FILE="vledger-${VERSION}-sbom.cdx.json"
@@ -214,7 +210,7 @@ jobs:
 
       # ── GitHub Release ────────────────────────────────────────────────────
       - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/vledger-*.tar.gz
