@@ -1192,24 +1192,150 @@ These variables can override the corresponding `key_source.json` fields at deplo
 
 The same lifecycle applies to both Model 1 and Model 2. The only difference is the transport: Unix socket vs TLS 1.3 + mTLS.
 
-#### Model 2 — initialising with a remote PyHSM
+#### Model 2 — step-by-step setup (remote PyHSM, same region)
 
-Before running `vledger init` with a remote PyHSM:
+This section walks through every step required to connect VectorLedger on
+Server A to PyHSM running on Server B, on the same-region private subnet.
 
-1. PyHSM daemon must be running on Server B and reachable from Server A on the private subnet.
-2. You must have:
-   - The CA certificate that signed PyHSM's TLS certificate (`ca.pem`)
-   - VectorLedger's mTLS client certificate and key (`client.pem`, `client-key.pem`), signed by PyHSM's client CA
+**Prerequisites:**
+- Both servers are in the same AWS VPC (or equivalent private network).
+- Server B has no public IP — only reachable via private subnet.
+- `openssl` is available on whichever machine you use to generate certificates.
+
+---
+
+##### Step 1 — Generate TLS certificates
+
+All three certificates (CA, PyHSM server, VectorLedger client) can be
+generated on any machine and then distributed. Run these commands once —
+treat the CA key (`ca.key`) with the same care as a root password.
 
 ```bash
-# Model 2 — remote PyHSM over mTLS
+# 1a. Create the Certificate Authority
+openssl genrsa -out ca.key 4096
+openssl req -new -x509 -key ca.key -sha256 -days 3650 \
+    -subj "/CN=VectorLedger-PyHSM-CA" \
+    -out ca.crt
+
+# 1b. Create the PyHSM server certificate
+#     Replace 10.0.1.50 with Server B's actual private IP.
+openssl genrsa -out pyhsm-server.key 4096
+openssl req -new -key pyhsm-server.key \
+    -subj "/CN=pyhsm.internal" \
+    -out pyhsm-server.csr
+openssl x509 -req -in pyhsm-server.csr -CA ca.crt -CAkey ca.key \
+    -CAcreateserial -days 3650 -sha256 \
+    -extfile <(printf "subjectAltName=IP:10.0.1.50,DNS:pyhsm.internal") \
+    -out pyhsm-server.crt
+
+# 1c. Create the VectorLedger mTLS client certificate
+openssl genrsa -out vledger-client.key 4096
+openssl req -new -key vledger-client.key \
+    -subj "/CN=vledger-client" \
+    -out vledger-client.csr
+openssl x509 -req -in vledger-client.csr -CA ca.crt -CAkey ca.key \
+    -CAcreateserial -days 90 -sha256 \
+    -out vledger-client.crt
+```
+
+> **90-day validity on the client cert is intentional.** Short-lived client
+> certificates limit the blast radius if the private key is ever exposed.
+> Set a calendar reminder to rotate before expiry (see
+> [Rotating the client certificate](#rotating-the-client-certificate) below).
+
+---
+
+##### Step 2 — Distribute certificates
+
+Copy the generated files to the correct server. Only the files each server
+needs — never copy a private key to the wrong host.
+
+**On Server B (PyHSM server):**
+
+```bash
+sudo mkdir -p /etc/pyhsm/tls
+sudo cp ca.crt            /etc/pyhsm/tls/
+sudo cp pyhsm-server.crt  /etc/pyhsm/tls/
+sudo cp pyhsm-server.key  /etc/pyhsm/tls/
+sudo chmod 600 /etc/pyhsm/tls/pyhsm-server.key
+sudo chmod 644 /etc/pyhsm/tls/ca.crt /etc/pyhsm/tls/pyhsm-server.crt
+```
+
+**On Server A (VectorLedger server):**
+
+```bash
+sudo mkdir -p /etc/vledger/pyhsm
+sudo cp ca.crt             /etc/vledger/pyhsm/
+sudo cp vledger-client.crt /etc/vledger/pyhsm/
+sudo cp vledger-client.key /etc/vledger/pyhsm/
+sudo chmod 600 /etc/vledger/pyhsm/vledger-client.key
+sudo chmod 644 /etc/vledger/pyhsm/ca.crt /etc/vledger/pyhsm/vledger-client.crt
+```
+
+---
+
+##### Step 3 — Open the security group
+
+In your AWS console (or equivalent), add an inbound rule to Server B's
+security group:
+
+| Field | Value |
+|---|---|
+| Type | Custom TCP |
+| Port | 8443 |
+| Source | Server A's security group ID (or its private IP /32) |
+
+No other inbound rule is needed on Server B. There must be no public IP on
+Server B and no 0.0.0.0/0 rule for port 8443.
+
+---
+
+##### Step 4 — Start PyHSM in remote (TLS) mode on Server B
+
+PyHSM must be told to listen on a TCP port with TLS instead of the default
+Unix socket. Supply the server certificate, key, and CA cert via environment
+variables or the flags your PyHSM version supports:
+
+```bash
+PYHSM_MASTER_PASSWORD="<your-pyhsm-password>" \
+PYHSM_KEYSTORE_PATH="/var/lib/pyhsm/pyhsm-keystore.enc" \
+PYHSM_AUDIT_LOG_PATH="/var/log/pyhsm/pyhsm-audit.jsonl" \
+PYHSM_TLS_CERT="/etc/pyhsm/tls/pyhsm-server.crt" \
+PYHSM_TLS_KEY="/etc/pyhsm/tls/pyhsm-server.key" \
+PYHSM_TLS_CA="/etc/pyhsm/tls/ca.crt" \
+PYHSM_LISTEN="0.0.0.0:8443" \
+npx tsx ~/PyHSM/pyhsm-ts/process.ts
+```
+
+Confirm it is listening (run on Server B):
+
+```bash
+ss -tlnp | grep 8443
+# LISTEN  0  128  0.0.0.0:8443  ...
+```
+
+Confirm it is reachable from Server A (run on Server A):
+
+```bash
+# Replace 10.0.1.50 with Server B's private IP
+nc -zv 10.0.1.50 8443
+# Connection to 10.0.1.50 8443 port [tcp/*] succeeded!
+```
+
+---
+
+##### Step 5 — Initialise VectorLedger with remote-pyhsm
+
+Run this on **Server A**. Replace `10.0.1.50` with Server B's private IP:
+
+```bash
 vledger init \
   --data-dir ./vledger-data \
   --key-source remote-pyhsm \
-  --pyhsm-endpoint https://pyhsm.internal.example.com:8443 \
-  --pyhsm-ca-cert /etc/vledger/pyhsm/ca.pem \
-  --pyhsm-client-cert /etc/vledger/pyhsm/client.pem \
-  --pyhsm-client-key /etc/vledger/pyhsm/client-key.pem
+  --pyhsm-endpoint    https://10.0.1.50:8443 \
+  --pyhsm-ca-cert     /etc/vledger/pyhsm/ca.crt \
+  --pyhsm-client-cert /etc/vledger/pyhsm/vledger-client.crt \
+  --pyhsm-client-key  /etc/vledger/pyhsm/vledger-client.key
 ```
 
 Verify the backend was recorded correctly:
@@ -1223,10 +1349,10 @@ Expected output:
 ```json
 {
   "backend": "remote_py_hsm",
-  "endpoint": "https://pyhsm.internal.example.com:8443",
-  "ca_cert": "/etc/vledger/pyhsm/ca.pem",
-  "client_cert": "/etc/vledger/pyhsm/client.pem",
-  "client_key": "/etc/vledger/pyhsm/client-key.pem",
+  "endpoint": "https://10.0.1.50:8443",
+  "ca_cert": "/etc/vledger/pyhsm/ca.crt",
+  "client_cert": "/etc/vledger/pyhsm/vledger-client.crt",
+  "client_key": "/etc/vledger/pyhsm/vledger-client.key",
   "timeout_ms": 5000,
   "max_retries": 3,
   "caller_id": "vledger",
@@ -1234,15 +1360,98 @@ Expected output:
 }
 ```
 
+If `"backend"` shows `"env"` or `"file"`, the connection to PyHSM failed
+during init and VectorLedger fell back silently. Check that PyHSM is running
+on Server B, the security group rule is in place, and the cert paths are
+correct, then delete `vledger-data/` and re-run init.
+
+---
+
+##### Step 6 — Start VectorLedger
+
+```bash
+vledger start --data-dir ./vledger-data
+```
+
+On every start, VectorLedger connects to the remote PyHSM, decrypts the
+master key blob, uses the key briefly for derivation, and immediately
+zeroizes it from memory. If PyHSM is unreachable, startup fails closed — it
+never falls back to a weaker key source.
+
+---
+
+##### Using environment variables instead of baking paths into key_source.json
+
+If you prefer to inject cert paths at deploy time (e.g. via container
+environment variables or a secrets manager), set these before running
+`vledger init` or `vledger start`:
+
+```bash
+export PYHSM_ENDPOINT=https://10.0.1.50:8443
+export PYHSM_CA_CERT=/etc/vledger/pyhsm/ca.crt
+export PYHSM_CLIENT_CERT=/etc/vledger/pyhsm/vledger-client.crt
+export PYHSM_CLIENT_KEY=/etc/vledger/pyhsm/vledger-client.key
+
+vledger init --key-source remote-pyhsm --data-dir ./vledger-data
+```
+
+Environment variables override the corresponding fields in `key_source.json`
+at runtime — useful for rotating cert paths without modifying the config file.
+
+---
+
+##### Rotating the client certificate
+
+The mTLS client certificate should be rotated before it expires (90-day
+validity recommended). No data migration is required — only the transport
+credential changes.
+
+```bash
+# 1. Generate a new client cert signed by the same CA
+openssl genrsa -out vledger-client-new.key 4096
+openssl req -new -key vledger-client-new.key \
+    -subj "/CN=vledger-client" -out vledger-client-new.csr
+openssl x509 -req -in vledger-client-new.csr -CA ca.crt -CAkey ca.key \
+    -CAcreateserial -days 90 -sha256 -out vledger-client-new.crt
+
+# 2. Copy the new cert and key to Server A
+sudo cp vledger-client-new.crt /etc/vledger/pyhsm/vledger-client.crt
+sudo cp vledger-client-new.key /etc/vledger/pyhsm/vledger-client.key
+sudo chmod 600 /etc/vledger/pyhsm/vledger-client.key
+
+# 3. Restart VectorLedger to pick up the new certificate
+#    (no vledger init needed — key_source.json paths are unchanged)
+```
+
+---
+
+##### Quick-reference: full init command
+
+For scripting or re-running init with all options explicit:
+
+```bash
+vledger init \
+  --data-dir ./vledger-data \
+  --key-source remote-pyhsm \
+  --pyhsm-endpoint    https://10.0.1.50:8443 \
+  --pyhsm-ca-cert     /etc/vledger/pyhsm/ca.crt \
+  --pyhsm-client-cert /etc/vledger/pyhsm/vledger-client.crt \
+  --pyhsm-client-key  /etc/vledger/pyhsm/vledger-client.key \
+  --pyhsm-timeout-ms  5000 \
+  --pyhsm-max-retries 3
+```
+
+---
+
 #### Rotating keys on a remote PyHSM
 
 ```bash
 vledger rotate-keys \
   --data-dir ./vledger-data \
-  --pyhsm-endpoint https://pyhsm.internal.example.com:8443 \
-  --pyhsm-ca-cert /etc/vledger/pyhsm/ca.pem \
-  --pyhsm-client-cert /etc/vledger/pyhsm/client.pem \
-  --pyhsm-client-key /etc/vledger/pyhsm/client-key.pem
+  --pyhsm-endpoint    https://10.0.1.50:8443 \
+  --pyhsm-ca-cert     /etc/vledger/pyhsm/ca.crt \
+  --pyhsm-client-cert /etc/vledger/pyhsm/vledger-client.crt \
+  --pyhsm-client-key  /etc/vledger/pyhsm/vledger-client.key
 ```
 
 #### Replay-attack prevention (Model 2)

@@ -242,9 +242,17 @@ impl KeySourceConfig {
 }
 
 /// Build a `Box<dyn MasterKeyProvider>` from a `KeySourceConfig`.
+///
+/// `cache_dir` should be `data_dir/keys/` so that the PyHSM encrypted blob
+/// (`pyhsm_master_key.enc`) and the AWS KMS blob (`kms_data_key.enc`) are
+/// written next to `key_source.json` and survive across restarts regardless
+/// of the process working directory.  Pass `None` only in tests or when no
+/// data directory exists yet.
 pub fn build_provider(
-    cfg: &KeySourceConfig,
+    cfg:       &KeySourceConfig,
+    cache_dir: Option<&Path>,
 ) -> Result<Box<dyn MasterKeyProvider>, SecretsError> {
+    let cache = cache_dir.map(|p| p.to_path_buf());
     match cfg {
         KeySourceConfig::Env { var } =>
             Ok(Box::new(EnvVarProvider { var: var.clone() })),
@@ -263,14 +271,14 @@ pub fn build_provider(
                 key_id:             key_id.clone(),
                 region:             region.clone(),
                 encryption_context: encryption_context.clone(),
-                cache_dir:          None,
+                cache_dir:          cache.clone(),
             })),
         KeySourceConfig::PyHsm { socket_path, caller_id, key_id } =>
             Ok(Box::new(PyHsmProvider {
                 socket_path: socket_path.clone(),
                 caller_id:   caller_id.clone(),
                 key_id:      key_id.clone(),
-                cache_dir:   None,
+                cache_dir:   cache.clone(),
             })),
         KeySourceConfig::RemotePyHsm {
             endpoint, ca_cert, client_cert, client_key,
@@ -285,7 +293,7 @@ pub fn build_provider(
                 max_retries: *max_retries,
                 caller_id:   caller_id.clone(),
                 key_id:      key_id.clone(),
-                cache_dir:   None,
+                cache_dir:   cache,
             })),
     }
 }

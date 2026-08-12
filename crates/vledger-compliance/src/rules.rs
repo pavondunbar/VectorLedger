@@ -276,7 +276,7 @@ fn check_hsm_config(data_dir: &Path) -> Evidence {
     // Accept either of two valid HSM configuration indicators:
     //   1. keys/hsm_config.json  — legacy explicit HSM config file.
     //   2. keys/key_source.json with backend != "env" and backend != "file"
-    //      (i.e. pyhsm, vault, or aws_kms — all involve external key custody).
+    //      (i.e. py_hsm, remote_py_hsm, vault, or aws_kms — all involve external key custody).
     let explicit_cfg = data_dir.join("keys").join("hsm_config.json");
     if explicit_cfg.exists() {
         return Evidence::pass("PCI-3.5", "Key management — HSM configuration",
@@ -295,8 +295,16 @@ fn check_hsm_config(data_dir: &Path) -> Evidence {
         match backend.as_str() {
             "py_hsm" | "pyhsm" => {
                 return Evidence::pass("PCI-3.5", "Key management — HSM configuration",
-                    "keys/key_source.json configured with PyHSM backend — master key \
-                     sealed inside AES-256-GCM-SIV encrypted keystore, never on disk in plaintext");
+                    "keys/key_source.json configured with PyHSM backend (Model 1 — local) — \
+                     master key sealed inside AES-256-GCM-SIV encrypted keystore, \
+                     never on disk in plaintext");
+            }
+            "remote_py_hsm" => {
+                return Evidence::pass("PCI-3.5", "Key management — HSM configuration",
+                    "keys/key_source.json configured with remote PyHSM backend \
+                     (Model 2 — separate server, TLS 1.3 + mTLS) — master key sealed \
+                     inside PyHSM on a dedicated server; raw key material never \
+                     accessible from the VectorLedger host");
             }
             "vault" => {
                 return Evidence::pass("PCI-3.5", "Key management — HSM configuration",

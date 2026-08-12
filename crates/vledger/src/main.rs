@@ -1246,9 +1246,10 @@ async fn cmd_backup_verify(
     // Optionally load master key for decrypting encrypted file content.
     let master_key_opt: Option<vledger_crypto::kdf::MasterKey> = if decrypt {
         let key_source_path = data_dir.join("keys").join("key_source.json");
+        let keys_dir = data_dir.join("keys");
         if key_source_path.exists() {
             match vledger_secrets::KeySourceConfig::from_file(&key_source_path) {
-                Ok(cfg) => match vledger_secrets::build_provider(&cfg) {
+                Ok(cfg) => match vledger_secrets::build_provider(&cfg, Some(&keys_dir)) {
                     Ok(provider) => match provider.load_master_key().await {
                         Ok(raw_key) => Some(vledger_crypto::kdf::MasterKey::from_bytes(*raw_key)),
                         Err(e) => {
@@ -1932,9 +1933,10 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
     // Fall back to unencrypted if the key source is unavailable (e.g. HSM
     // not running in a recovery scenario), but warn loudly.
     let key_source_path = data_dir.join("keys").join("key_source.json");
+    let keys_dir = data_dir.join("keys");
     let manifest = if key_source_path.exists() {
         match vledger_secrets::KeySourceConfig::from_file(&key_source_path) {
-            Ok(cfg) => match vledger_secrets::build_provider(&cfg) {
+            Ok(cfg) => match vledger_secrets::build_provider(&cfg, Some(&keys_dir)) {
                 Ok(provider) => match provider.load_master_key().await {
                     Ok(raw_key) => {
                         let master = vledger_crypto::kdf::MasterKey::from_bytes(*raw_key);
@@ -1991,9 +1993,10 @@ async fn cmd_restore(
     // key_source.json (the one that was present when the backup was made).
     // If unavailable, fall back to the unencrypted restore path with a warning.
     let key_source_path = data_dir.join("keys").join("key_source.json");
+    let keys_dir = data_dir.join("keys");
     let manifest = if key_source_path.exists() {
         match vledger_secrets::KeySourceConfig::from_file(&key_source_path) {
-            Ok(cfg) => match vledger_secrets::build_provider(&cfg) {
+            Ok(cfg) => match vledger_secrets::build_provider(&cfg, Some(&keys_dir)) {
                 Ok(provider) => match provider.load_master_key().await {
                     Ok(raw_key) => {
                         let master = vledger_crypto::kdf::MasterKey::from_bytes(*raw_key);

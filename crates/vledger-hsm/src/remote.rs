@@ -249,8 +249,10 @@ pub fn build_tls_connector(
             )));
         }
 
-        // Try PKCS8 private key first, then SEC1 (EC), then PKCS1 (RSA).
+        // Try PKCS#8 first, then SEC1 (EC), then PKCS#1 (RSA).
+        // All three are common outputs of `openssl genrsa` / `openssl genpkey`.
         let client_key: PrivateKeyDer<'static> = {
+            // PKCS#8 — `openssl genpkey`, most modern tooling default.
             let mut key_reader = key_pem.as_slice();
             let pkcs8: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
                 .collect::<Result<Vec<_>, _>>()
@@ -259,17 +261,30 @@ pub fn build_tls_connector(
             if let Some(k) = pkcs8.into_iter().next() {
                 PrivateKeyDer::Pkcs8(k)
             } else {
+                // SEC1 — `openssl ecparam -genkey`, EC keys in legacy PEM format.
                 let mut key_reader2 = key_pem.as_slice();
                 let ec: Vec<_> = rustls_pemfile::ec_private_keys(&mut key_reader2)
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap_or_default();
+
                 if let Some(k) = ec.into_iter().next() {
                     PrivateKeyDer::Sec1(k)
                 } else {
-                    return Err(HsmError::Tls(format!(
-                        "No private key found in client key file: {key_path}\n\
-                         Supported formats: PKCS#8 PEM, SEC1 EC PEM"
-                    )));
+                    // PKCS#1 — `openssl genrsa`, RSA keys in legacy PEM format
+                    // ("BEGIN RSA PRIVATE KEY").
+                    let mut key_reader3 = key_pem.as_slice();
+                    let rsa: Vec<_> = rustls_pemfile::rsa_private_keys(&mut key_reader3)
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap_or_default();
+
+                    if let Some(k) = rsa.into_iter().next() {
+                        PrivateKeyDer::Pkcs1(k)
+                    } else {
+                        return Err(HsmError::Tls(format!(
+                            "No private key found in client key file: {key_path}\n\
+                             Supported formats: PKCS#8 PEM, SEC1 EC PEM, PKCS#1 RSA PEM"
+                        )));
+                    }
                 }
             }
         };
