@@ -128,6 +128,12 @@ enum Commands {
         /// Set to empty string to disable.
         #[arg(long, default_value = "127.0.0.1:9090")]
         metrics_addr: String,
+        /// Maximum number of concurrent client connections accepted by the
+        /// server.  Applies to both the native TLS listener and the pgwire
+        /// listener.  Increase this for high-concurrency / enterprise
+        /// deployments.  Default: 128.
+        #[arg(long, default_value_t = 128)]
+        max_connections: usize,
     },
     /// Show database status.
     Status,
@@ -376,8 +382,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init { force, key_source, vault_addr, vault_mount, vault_path, kms_key_id, kms_region, pyhsm_socket, pyhsm_caller_id, pyhsm_endpoint, pyhsm_ca_cert, pyhsm_client_cert, pyhsm_client_key, pyhsm_timeout_ms, pyhsm_max_retries }
             => cmd_init(&cli.data_dir, force, &key_source, &vault_addr, &vault_mount, &vault_path, kms_key_id.as_deref(), &kms_region, pyhsm_socket.as_deref(), &pyhsm_caller_id, pyhsm_endpoint.as_deref(), pyhsm_ca_cert.as_deref(), pyhsm_client_cert.as_deref(), pyhsm_client_key.as_deref(), pyhsm_timeout_ms, pyhsm_max_retries).await,
-        Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms, query_timeout_ms, metrics_addr }
-            => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms, query_timeout_ms, &metrics_addr).await,
+        Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms, query_timeout_ms, metrics_addr, max_connections }
+            => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms, query_timeout_ms, &metrics_addr, max_connections).await,
         Commands::Status                             => cmd_status(&cli.data_dir).await,
         Commands::Verify                             => cmd_verify(&cli.data_dir).await,
         Commands::Sql { query, username, password, server, ca_cert } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref(), server.as_deref(), ca_cert.as_deref()).await,
@@ -569,7 +575,7 @@ async fn cmd_init(
 
 // ── start ─────────────────────────────────────────────────────────────────────
 
-async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool, wal_sync_mode: &str, group_commit_delay_ms: u64, query_timeout_ms: u64, metrics_addr: &str) -> Result<()> {
+async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool, wal_sync_mode: &str, group_commit_delay_ms: u64, query_timeout_ms: u64, metrics_addr: &str, max_connections: usize) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Data directory not found — run `vledger init` first.");
     }
@@ -649,6 +655,7 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
             }),
         group_commit_delay_ms,
         query_timeout_ms,
+        max_connections,
         ..Default::default()
     };
 
@@ -721,7 +728,7 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
             tls_key_path:    None,
             tls_hostname:    "localhost".into(),
             catalog_dir:     None,
-            max_connections: 64,
+            max_connections,
         };
         let pg_server  = vledger_pgwire::PgWireServer::new(pg_config, ledger2, user_store);
         let pg_token   = shutdown.clone();
