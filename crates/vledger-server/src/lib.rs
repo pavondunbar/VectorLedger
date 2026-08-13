@@ -24,7 +24,6 @@ use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vledger_ledger::LedgerStore;
-
 // ── Per-IP rate-limiter ───────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -195,6 +194,24 @@ impl Server {
                     );
                 }
             }
+        }
+
+        // Page group-commit background flusher — always started.
+        // Page writes are now buffered (no sync_all inside the write lock);
+        // this task ensures they are fsynced every group_commit_delay_ms.
+        {
+            let pages_dir   = self.ledger.read().await.pages_dir();
+            let flush_state = self.ledger.read().await.page_flush_state();
+            vledger_pages::spawn_page_commit_flusher(
+                pages_dir,
+                flush_state,
+                self.config.group_commit_delay_ms,
+                shutdown.clone(),
+            );
+            info!(
+                delay_ms = self.config.group_commit_delay_ms,
+                "Group-commit page flusher started"
+            );
         }
 
         // ── Accept loop ───────────────────────────────────────────────────

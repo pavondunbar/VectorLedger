@@ -226,19 +226,51 @@ impl JournalEntry {
         buf
     }
 
-    /// Compute and set the content hash and chain hash.
-    /// Call this after all fields are set, before writing to the ledger.
-    pub fn finalize_hashes(&mut self, prev_chain_hash: &Hash) {
+    /// Pre-compute the content hash from the entry's own fields.
+    ///
+    /// This is the expensive BLAKE3 pass over `canonical_bytes()`.  It does
+    /// **not** depend on any external (locked) ledger state, so it can be
+    /// called before the write lock is acquired.
+    ///
+    /// After calling this, `content_hash` is populated.  Call
+    /// `finalize_chain_hash` inside the write lock to complete the chain link.
+    pub fn precompute_content_hash(&mut self) {
         let canonical = self.canonical_bytes();
         self.content_hash = hash_bytes(&canonical);
-        self.prev_hash = *prev_chain_hash;
+    }
 
-        // Chain hash: BLAKE3(sequence_le || prev_hash || content_hash)
+    /// Finalize the chain hash using a pre-computed `content_hash`.
+    ///
+    /// Must be called **inside** the write lock after `sequence` and
+    /// `posted_at` have been assigned, because the chain hash depends on
+    /// `prev_chain_hash` (mutable shared state).
+    ///
+    /// Assumes `precompute_content_hash` has already been called.  If
+    /// `content_hash` is still `ZERO_HASH` this will fall back to computing
+    /// it inline (safe but slower — call `precompute_content_hash` first for
+    /// best performance).
+    pub fn finalize_chain_hash(&mut self, prev_chain_hash: &Hash) {
+        // Guard: if content_hash was never pre-computed, do it now.
+        if self.content_hash == ZERO_HASH {
+            let canonical = self.canonical_bytes();
+            self.content_hash = hash_bytes(&canonical);
+        }
+        self.prev_hash = *prev_chain_hash;
         let mut hasher = blake3::Hasher::new();
         hasher.update(&self.sequence.to_le_bytes());
         hasher.update(prev_chain_hash);
         hasher.update(&self.content_hash);
         self.chain_hash = *hasher.finalize().as_bytes();
+    }
+
+    /// Compute and set the content hash and chain hash.
+    /// Call this after all fields are set, before writing to the ledger.
+    ///
+    /// For performance-critical paths prefer calling `precompute_content_hash`
+    /// before the write lock and `finalize_chain_hash` inside the lock.
+    pub fn finalize_hashes(&mut self, prev_chain_hash: &Hash) {
+        self.precompute_content_hash();
+        self.finalize_chain_hash(prev_chain_hash);
     }
 
     /// Verify internal hash consistency.

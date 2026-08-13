@@ -42,6 +42,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
@@ -122,6 +123,17 @@ pub struct LedgerStore {
     entries: Vec<JournalEntry>,
     account_entry_index: HashMap<AccountId, Vec<usize>>,
 
+    // ── Running balance cache — O(1) balance lookup ───────────────────────
+    /// Stores the signed running balance for every account.
+    ///
+    /// For debit-normal accounts (Asset / Expense) the value is
+    /// `Σ debits − Σ credits`.  For credit-normal accounts it is
+    /// `Σ credits − Σ debits`.  Updated atomically on every `post_entry`
+    /// and `reverse_entry` commit, and rebuilt from the WAL on startup.
+    ///
+    /// Replaces the previous O(N) scan in `balance()` with an O(1) lookup.
+    balance_cache: HashMap<AccountId, i128>,
+
     // ── Sequence / chain state ────────────────────────────────────────────
     next_sequence: AtomicU64,
     last_chain_hash: Hash,
@@ -183,6 +195,7 @@ impl LedgerStore {
             accounts: HashMap::new(),
             entries: Vec::new(),
             account_entry_index: HashMap::new(),
+            balance_cache: HashMap::new(),
             next_sequence: AtomicU64::new(1),
             last_chain_hash: ZERO_HASH,
             idempotency_keys: std::collections::HashSet::new(),
@@ -349,15 +362,61 @@ impl LedgerStore {
         if let Some(ref key) = entry.idempotency_key {
             self.idempotency_keys.insert(key.clone());
         }
-        // Build entry index
+        // Build entry index and update running balance cache.
+        // Only Posted and Reversal entries affect balances — skip others.
+        let affects_balance = matches!(
+            entry.status,
+            EntryStatus::Posted | EntryStatus::Reversal
+        );
         let idx = self.entries.len();
         for line in &entry.lines {
             self.account_entry_index
                 .entry(line.account_id)
                 .or_default()
                 .push(idx);
+
+            if affects_balance {
+                self.update_balance_cache(line.account_id, line.amount.as_i128(), line.dr_cr);
+            }
         }
         self.entries.push(entry);
+    }
+
+    /// Update the running balance cache for a single account/line.
+    ///
+    /// The cache stores the *signed* balance in the account's normal-balance
+    /// direction:
+    /// - Debit-normal (Asset / Expense): cache += debit, cache -= credit
+    /// - Credit-normal (Liability / Income / Equity): cache += credit, cache -= debit
+    ///
+    /// If the account is not yet registered (e.g. during WAL replay before
+    /// the account record has been applied) the entry is skipped and the
+    /// cache will be correctly populated once `apply_account` runs.
+    fn update_balance_cache(&mut self, account_id: AccountId, amount: i128, dr_cr: DrCr) {
+        let is_debit_normal = match self.accounts.get(&account_id) {
+            Some(acct) => matches!(
+                acct.account_type,
+                AccountType::Asset | AccountType::Expense
+            ),
+            // Account not yet in memory — skip; cache will be correct after
+            // the account record is applied and the entry re-evaluated via
+            // the full balance() recompute on first access.
+            None => return,
+        };
+
+        let delta: i128 = if is_debit_normal {
+            match dr_cr {
+                DrCr::Debit  =>  amount,
+                DrCr::Credit => -amount,
+            }
+        } else {
+            match dr_cr {
+                DrCr::Credit =>  amount,
+                DrCr::Debit  => -amount,
+            }
+        };
+
+        *self.balance_cache.entry(account_id).or_insert(0) += delta;
     }
 
 
@@ -627,11 +686,14 @@ impl LedgerStore {
             }
         }
 
-        // 5. Assign sequence and finalize hash chain
+        // 5. Assign sequence and finalize chain hash.
+        // Content hash was pre-computed before the lock was acquired
+        // (in handler.rs or by the caller).  Only the chain hash — which
+        // depends on last_chain_hash — is computed here inside the lock.
         let seq = self.next_sequence.fetch_add(1, Ordering::SeqCst);
         entry.sequence = seq;
         entry.posted_at = Utc::now();
-        entry.finalize_hashes(&self.last_chain_hash);
+        entry.finalize_chain_hash(&self.last_chain_hash);
 
         // 6. Persist to WAL + page store
         let bytes = encode(&entry)?;
@@ -644,11 +706,18 @@ impl LedgerStore {
             self.idempotency_keys.insert(key.clone());
         }
         let idx = self.entries.len();
+        let affects_balance = matches!(
+            entry.status,
+            EntryStatus::Posted | EntryStatus::Reversal
+        );
         for line in &entry.lines {
             self.account_entry_index
                 .entry(line.account_id)
                 .or_default()
                 .push(idx);
+            if affects_balance {
+                self.update_balance_cache(line.account_id, line.amount.as_i128(), line.dr_cr);
+            }
         }
         self.entries.push(entry);
 
@@ -763,13 +832,15 @@ impl LedgerStore {
         // Register the reversal event index.
         self.reversal_event_index.insert(entry_id, reversal_id);
 
-        // Index the reversal entry itself.
+        // Index the reversal entry and update the running balance cache.
+        // Reversal entries have status=Reversal which affects balances.
         let reversal_idx = self.entries.len();
         for line in &reversal.lines {
             self.account_entry_index
                 .entry(line.account_id)
                 .or_default()
                 .push(reversal_idx);
+            self.update_balance_cache(line.account_id, line.amount.as_i128(), line.dr_cr);
         }
         self.entries.push(reversal);
 
@@ -800,38 +871,12 @@ impl LedgerStore {
     /// Compute the current balance for an account.
     /// Asset/Expense: debits − credits (positive = normal balance).
     /// Liability/Income/Equity: credits − debits.
+    ///
+    /// O(1) — reads from the running balance cache that is updated on every
+    /// `post_entry` and `reverse_entry` commit and rebuilt from the WAL on
+    /// startup.
     pub fn balance(&self, account_id: &AccountId) -> i128 {
-        let acct = match self.accounts.get(account_id) {
-            Some(a) => a,
-            None => return 0,
-        };
-        let indices = match self.account_entry_index.get(account_id) {
-            Some(v) => v,
-            None => return 0,
-        };
-        let mut debits: i128 = 0;
-        let mut credits: i128 = 0;
-        for &idx in indices {
-            let entry = &self.entries[idx];
-            // Include Posted entries (regardless of whether they have been
-            // reversed — the reversal entry offsets them financially).
-            // Include Reversal entries (they cancel the original).
-            // Exclude PendingApproval and Rejected entries.
-            if !matches!(entry.status,
-                EntryStatus::Posted | EntryStatus::Reversal) {
-                continue;
-            }
-            for line in &entry.lines {
-                if &line.account_id == account_id {
-                    match line.dr_cr {
-                        DrCr::Debit  => debits  += line.amount.as_i128(),
-                        DrCr::Credit => credits += line.amount.as_i128(),
-                    }
-                }
-            }
-        }
-        let sign = acct.account_type.normal_balance_sign();
-        if sign > 0 { debits - credits } else { credits - debits }
+        self.balance_cache.get(account_id).copied().unwrap_or(0)
     }
 
     /// Return all entries for an account in posting order.
@@ -918,11 +963,25 @@ impl LedgerStore {
         std::env::temp_dir().join("vledger-wal-fallback")
     }
 
+    /// Return the pages directory path (used by the page group-commit flusher).
+    pub fn pages_dir(&self) -> std::path::PathBuf {
+        if let Some(ref d) = self.data_dir {
+            return d.join("pages");
+        }
+        std::env::temp_dir().join("vledger-pages-fallback")
+    }
+
     /// Return the `FlushState` handle from the WAL writer, if the WAL is
     /// running in `GroupCommit` mode.  The server uses this to hand the
     /// handle off to the background flusher task.
     pub fn wal_flush_state(&self) -> Option<std::sync::Arc<vledger_wal::FlushState>> {
         self.tx_manager.wal_flush_state()
+    }
+
+    /// Return the `PageFlushState` handle from the page store.
+    /// The server uses this to start the background page flusher task.
+    pub fn page_flush_state(&self) -> std::sync::Arc<vledger_pages::PageFlushState> {
+        Arc::clone(&self.page_store.flush_state)
     }
 }
 

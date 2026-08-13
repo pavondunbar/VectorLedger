@@ -146,11 +146,14 @@ impl TransactionManager {
     ///
     /// ## Steps
     /// 1. Check idempotency key.
-    /// 2. Write all Data records to WAL.
-    /// 3. Write Commit record to WAL (includes tx_hash).
-    /// 4. WAL fsyncs after each record — durability is guaranteed before we
+    /// 2. Pre-compute the Ed25519 signature (if signing enabled) — this is
+    ///    pure CPU work that does not depend on WAL I/O and is done first so
+    ///    it does not interleave with or delay the WAL writes.
+    /// 3. Write all Data records to WAL.
+    /// 4. Write Commit record to WAL (includes tx_hash + pre-computed sig).
+    /// 5. WAL fsyncs after each record — durability is guaranteed before we
     ///    return Ok.
-    /// 5. Mark the transaction committed and advance `last_committed_tx_id`.
+    /// 6. Mark the transaction committed and advance `last_committed_tx_id`.
     pub fn commit(&mut self, tx_id: u64) -> Result<(), TxError> {
         let tx = self.active.get(&tx_id).ok_or(TxError::NotFound(tx_id))?;
 
@@ -158,17 +161,34 @@ impl TransactionManager {
         if let Some(ref key) = tx.idempotency_key.clone() {
             if self.committed_idempotency_keys.contains(key) {
                 warn!(tx_id, key, "Idempotency key already committed — returning success without re-applying");
-                // Idempotent success: do not re-apply but do not error either.
                 let _tx = self.active.remove(&tx_id).unwrap();
                 return Ok(());
             }
         }
 
-        let tx_hash = tx.tx_hash();
+        let tx_hash        = tx.tx_hash();
         let mutation_count = tx.mutation_count() as u32;
         let idempotency_key = tx.idempotency_key.clone();
 
-        // Write Data records
+        // ── Step 2: Pre-compute Ed25519 signature before any WAL I/O ─────
+        //
+        // The signed message (tx_hash || mutation_count_le4 = 36 bytes) is
+        // fully determined at this point — it depends only on the accumulated
+        // mutation row hashes, not on WAL state.  Computing the signature
+        // here (before the WAL writes below) means the ~50–100 µs Ed25519
+        // operation does not interleave with or stall the WAL I/O path.
+        let (signature, signer_pubkey) = if let Some(ref sk) = self.signing_key {
+            let mut msg = Vec::with_capacity(36);
+            msg.extend_from_slice(&tx_hash);
+            msg.extend_from_slice(&mutation_count.to_le_bytes());
+            let sig    = sk.sign(&msg);
+            let pubkey = sk.public_key().to_bytes();
+            (sig.to_vec(), pubkey.to_vec())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        // ── Step 3: Write Data records to WAL ────────────────────────────
         let mutations: Vec<PendingMutation> = {
             self.active.get(&tx_id).unwrap().mutations.clone()
         };
@@ -186,19 +206,7 @@ impl TransactionManager {
             self.wal.append_record(tx_id, RecordType::Data, &payload)?;
         }
 
-        // Build the signed commit message: tx_hash || record_count_le4
-        let (signature, signer_pubkey) = if let Some(ref sk) = self.signing_key {
-            let mut msg = Vec::with_capacity(36);
-            msg.extend_from_slice(&tx_hash);
-            msg.extend_from_slice(&mutation_count.to_le_bytes());
-            let sig    = sk.sign(&msg);
-            let pubkey = sk.public_key().to_bytes();
-            (sig.to_vec(), pubkey.to_vec())
-        } else {
-            (Vec::new(), Vec::new())
-        };
-
-        // Write Commit record
+        // ── Step 4: Write Commit record (with pre-computed signature) ────
         let commit_payload = CommitPayload {
             record_count: mutation_count,
             tx_hash,
@@ -207,7 +215,7 @@ impl TransactionManager {
         };
         self.wal.append_record(tx_id, RecordType::Commit, &commit_payload)?;
 
-        // Mark committed
+        // ── Step 5: Mark committed ────────────────────────────────────────
         if let Some(mut tx) = self.active.remove(&tx_id) {
             tx.mark_committed()?;
             if tx_id > self.last_committed_tx_id {
@@ -235,6 +243,36 @@ impl TransactionManager {
 
         info!(tx_id, "Transaction rolled back");
         Ok(())
+    }
+
+    /// Pre-compute the Ed25519 commit signature for a transaction.
+    ///
+    /// Returns `Some((signature, pubkey))` when a signing key is configured,
+    /// `None` otherwise.
+    ///
+    /// The result can be passed to `commit_presigned` to avoid computing the
+    /// signature inside the write-lock critical section.  This is useful when
+    /// the caller can prepare the signature concurrently with other pre-lock
+    /// work (e.g. content hash computation).
+    ///
+    /// Panics if `tx_id` is not an active transaction.
+    pub fn precompute_commit_signature(
+        &self,
+        tx_id: u64,
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        let tx = self.active.get(&tx_id)?;
+        let sk = self.signing_key.as_ref()?;
+
+        let tx_hash        = tx.tx_hash();
+        let mutation_count = tx.mutation_count() as u32;
+
+        let mut msg = Vec::with_capacity(36);
+        msg.extend_from_slice(&tx_hash);
+        msg.extend_from_slice(&mutation_count.to_le_bytes());
+
+        let sig    = sk.sign(&msg);
+        let pubkey = sk.public_key().to_bytes();
+        Some((sig.to_vec(), pubkey.to_vec()))
     }
 
     /// Returns the ID of the last committed transaction.
