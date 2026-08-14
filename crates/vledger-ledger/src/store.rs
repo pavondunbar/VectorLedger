@@ -981,6 +981,31 @@ impl LedgerStore {
         self.entries.iter().find(|e| e.sequence == seq)
     }
 
+    /// FOR DEMO/TESTING ONLY — silently mutate an entry's description in
+    /// memory without updating its hash chain.
+    ///
+    /// This simulates a malicious actor modifying ledger data after it has
+    /// been written.  The next `VERIFY_CHAIN()` call will detect the
+    /// tampering because the stored `content_hash` will no longer match the
+    /// entry's actual field values.
+    ///
+    /// This method is intentionally NOT durable — it mutates only the
+    /// in-memory state and never touches the WAL or page store.
+    pub fn tamper_entry_for_demo(&mut self, seq: u64, new_description: String) -> bool {
+        let idx = seq.saturating_sub(1) as usize;
+        if let Some(e) = self.entries.get_mut(idx) {
+            if e.sequence == seq {
+                e.description = new_description;
+                return true;
+            }
+        }
+        if let Some(e) = self.entries.iter_mut().find(|e| e.sequence == seq) {
+            e.description = new_description;
+            return true;
+        }
+        false
+    }
+
     /// Force a WAL checkpoint.
     ///
     /// Computes the BLAKE3 Merkle root over all journal-entry pages, then

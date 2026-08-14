@@ -43,6 +43,13 @@ pub enum LogicalPlan {
     /// SELECT VERIFY_ENTRY(sequence_number) — verify a single entry's hashes.
     VerifyEntry { sequence: u64 },
 
+    /// SELECT TAMPER_ENTRY(seq, 'new_description') — FOR DEMO/TESTING ONLY.
+    /// Silently mutates an entry's description in memory without updating its
+    /// hash, so VERIFY_CHAIN() will detect the tampering.
+    /// This simulates what a malicious actor would do if they could reach the
+    /// in-memory ledger state directly.
+    TamperEntry { sequence: u64, new_description: String },
+
     /// SELECT 1, SELECT 'hello', SELECT true — constant expression with no FROM.
     /// Used by ORMs, connection poolers, and health checks.
     Constant { col: String, val: String },
@@ -247,6 +254,17 @@ impl LogicalPlanBuilder {
                                 "VERIFY_ENTRY() requires a sequence number argument".into()
                             ))?;
                             return Ok(LogicalPlan::VerifyEntry { sequence });
+                        }
+                        "TAMPER_ENTRY" => {
+                            // TAMPER_ENTRY(seq, 'new_description')
+                            let (seq, _) = extract_optional_u64_range(&f.args)?;
+                            let sequence = seq.ok_or_else(|| SqlError::MissingField(
+                                "TAMPER_ENTRY() requires a sequence number as first argument".into()
+                            ))?;
+                            // Second arg is the new description string.
+                            let new_description = extract_nth_string_arg(&f.args, 1)
+                                .unwrap_or_else(|_| "TAMPERED".to_string());
+                            return Ok(LogicalPlan::TamperEntry { sequence, new_description });
                         }
                         _ => {}
                     }
@@ -548,6 +566,26 @@ fn extract_optional_u64_range(
         }
     };
     Ok((parse_arg(0)?, parse_arg(1)?))
+}
+
+/// Extract the nth argument from a function call as a string.
+fn extract_nth_string_arg(
+    args: &sqlparser::ast::FunctionArguments,
+    n: usize,
+) -> Result<String, SqlError> {
+    use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+    match args {
+        FunctionArguments::List(list) => {
+            list.args.get(n)
+                .and_then(|a| match a {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(e),
+                    _ => None,
+                })
+                .and_then(|e| expr_to_string(e).ok())
+                .ok_or_else(|| SqlError::MissingField(format!("argument {} is required", n)))
+        }
+        _ => Err(SqlError::MissingField(format!("argument {} is required", n))),
+    }
 }
 
 fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, SqlError> {

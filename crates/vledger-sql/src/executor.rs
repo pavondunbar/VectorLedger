@@ -55,7 +55,7 @@ impl<'a> ReadExecutor<'a> {
             LogicalPlan::Join(spec)                 => self.exec_join(spec),
             LogicalPlan::Aggregate(spec)            => self.exec_aggregate(spec),
             LogicalPlan::Window(spec)               => self.exec_window(spec),
-            LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_) =>
+            LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_) | LogicalPlan::TamperEntry { .. } =>
                 Err(SqlError::Unsupported(
                     "write plans must be executed with Executor (requires &mut LedgerStore)".into()
                 )),
@@ -463,6 +463,8 @@ impl<'a> Executor<'a> {
             // Write plans — require &mut LedgerStore.
             LogicalPlan::PostEntry(spec)      => self.exec_post_entry(spec),
             LogicalPlan::CreateAccount(spec)  => self.exec_create_account(spec),
+            LogicalPlan::TamperEntry { sequence, new_description } =>
+                self.exec_tamper_entry(sequence, new_description),
 
             // Read plans — delegate to ReadExecutor.
             read_plan => {
@@ -471,7 +473,8 @@ impl<'a> Executor<'a> {
                     attach_proofs: self.attach_proofs,
                 };
                 reader.execute(read_plan)
-            }        }
+            }
+        }
     }
 
     // ── INSERT INTO ledger ────────────────────────────────────────────────
@@ -519,6 +522,26 @@ impl<'a> Executor<'a> {
             Value::Text("Created".into()),
         ])];
         Ok(QueryResult::rows(cols, rows, format!("Account '{}' created", spec.code)))
+    }
+
+    // ── TAMPER_ENTRY — demo/testing only ─────────────────────────────────
+
+    fn exec_tamper_entry(&mut self, sequence: u64, new_description: String) -> Result<QueryResult, SqlError> {
+        let found = self.ledger.tamper_entry_for_demo(sequence, new_description.clone());
+        let cols = vec!["sequence".into(), "status".into(), "tampered_field".into(), "new_value".into()];
+        if found {
+            let rows = vec![crate::result::Row::new(cols.clone(), vec![
+                crate::result::Value::BigInt(sequence as i128),
+                crate::result::Value::Text("TAMPERED — run VERIFY_CHAIN() to detect".into()),
+                crate::result::Value::Text("description".into()),
+                crate::result::Value::Text(new_description),
+            ])];
+            Ok(crate::result::QueryResult::rows(cols, rows,
+                "Entry tampered in memory. Hash chain NOT updated. VERIFY_CHAIN() will now fail.".to_string()
+            ))
+        } else {
+            Err(SqlError::Execution(format!("entry with sequence {sequence} not found")))
+        }
     }
 
     // ── Account resolution (uses &self.ledger — read-only) ────────────────
