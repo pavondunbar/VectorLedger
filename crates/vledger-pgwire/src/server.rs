@@ -817,6 +817,16 @@ async fn execute_query(
         Ok(qr) => {
             let mut msgs: Vec<Vec<u8>> = Vec::new();
             if qr.columns.is_empty() && qr.rows.is_empty() {
+                // If the message signals an integrity failure, surface it as
+                // an error response so the client sees it clearly rather than
+                // getting a silent "OK 0".
+                if qr.message.starts_with("INTEGRITY FAILURE") {
+                    if *tx_status == b'T' { *tx_status = b'E'; }
+                    return vec![
+                        messages::error_response("ERROR", "XX000", &qr.message),
+                        messages::ready_for_query(*tx_status),
+                    ];
+                }
                 let tag = if sql_upper.starts_with("INSERT") {
                     format!("INSERT 0 {}", qr.rows_affected)
                 } else if sql_upper.starts_with("UPDATE") {
