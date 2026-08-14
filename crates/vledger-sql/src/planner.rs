@@ -257,11 +257,13 @@ impl LogicalPlanBuilder {
                         }
                         "TAMPER_ENTRY" => {
                             // TAMPER_ENTRY(seq, 'new_description')
-                            let (seq, _) = extract_optional_u64_range(&f.args)?;
-                            let sequence = seq.ok_or_else(|| SqlError::MissingField(
-                                "TAMPER_ENTRY() requires a sequence number as first argument".into()
-                            ))?;
-                            // Second arg is the new description string.
+                            // Parse the integer sequence number directly
+                            // without going through extract_optional_u64_range
+                            // (which would try to parse the string arg as u64).
+                            let sequence = extract_nth_string_arg(&f.args, 0)
+                                .and_then(|s| s.parse::<u64>().map_err(|_|
+                                    SqlError::TypeError("TAMPER_ENTRY() first argument must be an integer sequence number".into())
+                                ))?;
                             let new_description = extract_nth_string_arg(&f.args, 1)
                                 .unwrap_or_else(|_| "TAMPERED".to_string());
                             return Ok(LogicalPlan::TamperEntry { sequence, new_description });
