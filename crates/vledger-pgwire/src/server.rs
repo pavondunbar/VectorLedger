@@ -249,15 +249,10 @@ impl PgWireServer {
 
             tokio::spawn(async move {
                 let _permit = permit; // held for full connection lifetime
-                match acceptor.accept(stream).await {
-                    Ok(tls_stream) => {
-                        if let Err(e) =
-                            handle_connection(tls_stream, ledger, user_store, attach, peer, conn_token).await
-                        {
-                            error!(%peer, "PgWire connection error: {e}");
-                        }
-                    }
-                    Err(e) => warn!(%peer, "PgWire TLS handshake failed: {e}"),
+                if let Err(e) =
+                    handle_connection_starttls(stream, acceptor, ledger, user_store, attach, peer, conn_token).await
+                {
+                    error!(%peer, "PgWire connection error: {e}");
                 }
             });
         }
@@ -308,7 +303,88 @@ fn build_tls_acceptor(cfg: &PgWireConfig) -> anyhow::Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(StdArc::new(config)))
 }
 
-// ── Connection handler ────────────────────────────────────────────────────────
+// ── STARTTLS connection handler ───────────────────────────────────────────────
+//
+// Standard PostgreSQL TLS negotiation:
+// 1. Accept plain TCP connection.
+// 2. Read the startup payload.
+// 3. If it is an SSLRequest (code 80877103), respond with 'S' and perform
+//    the TLS handshake inline — this is what psql and every standard
+//    PostgreSQL client expects.
+// 4. If it is a plain startup message, reject (we require TLS).
+
+async fn handle_connection_starttls(
+    stream:     TcpStream,
+    acceptor:   TlsAcceptor,
+    ledger:     Arc<tokio::sync::RwLock<LedgerStore>>,
+    user_store: Arc<UserStore>,
+    attach:     bool,
+    peer:       std::net::SocketAddr,
+    shutdown:   CancellationToken,
+) -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut plain = tokio::io::BufReader::new(stream);
+
+    // Read the 4-byte length prefix of the startup packet.
+    let len = tokio::select! {
+        res = timeout(AUTH_TIMEOUT, plain.read_u32()) => match res {
+            Ok(Ok(n))  => n,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_)     => { warn!(%peer, "PgWire auth timeout (startup len)"); return Ok(()); }
+        },
+        _ = shutdown.cancelled() => return Ok(()),
+    };
+
+    if len < 8 || len > 65536 {
+        anyhow::bail!("invalid startup packet length {len}");
+    }
+
+    // Read the remainder of the startup packet.
+    let payload_len = (len - 4) as usize;
+    let mut buf = vec![0u8; payload_len];
+    tokio::select! {
+        res = timeout(AUTH_TIMEOUT, plain.read_exact(&mut buf)) => match res {
+            Ok(Ok(_))  => {}
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_)     => { warn!(%peer, "PgWire auth timeout (startup payload)"); return Ok(()); }
+        },
+        _ = shutdown.cancelled() => return Ok(()),
+    };
+
+    let protocol_version = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+
+    if protocol_version == SSL_REQUEST_CODE {
+        // Respond 'S' — yes, we support SSL.
+        plain.get_mut().write_all(b"S").await?;
+        plain.get_mut().flush().await?;
+
+        // Perform TLS handshake on the now-unwrapped stream.
+        let tcp = plain.into_inner();
+        let tls_stream = match acceptor.accept(tcp).await {
+            Ok(s)  => s,
+            Err(e) => {
+                warn!(%peer, "PgWire TLS handshake failed: {e}");
+                return Ok(());
+            }
+        };
+
+        handle_connection(tls_stream, ledger, user_store, attach, peer, shutdown).await
+    } else {
+        // Client is not using SSL — reject with a clear error.
+        // Re-assemble the startup bytes so handle_connection can read them,
+        // but we require TLS so just send an error and close.
+        let mut plain_write = plain.into_inner();
+        let err = messages::error_response(
+            "FATAL", "28000",
+            "SSL connection is required. Use sslmode=require.",
+        );
+        let _ = plain_write.write_all(&err).await;
+        Ok(())
+    }
+}
+
+// ── TLS connection handler ────────────────────────────────────────────────────
 
 async fn handle_connection(
     stream:        tokio_rustls::server::TlsStream<TcpStream>,
