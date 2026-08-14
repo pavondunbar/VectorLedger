@@ -624,8 +624,10 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     }
 
     info!("Opening ledger at {}", data_dir.display());
-    let ledger = vledger_ledger::LedgerStore::open(data_dir)
-        .context("Failed to open ledger")?;
+    let ledger = std::sync::Arc::new(tokio::sync::RwLock::new(
+        vledger_ledger::LedgerStore::open(data_dir)
+            .context("Failed to open ledger")?
+    ));
 
     // Write a ServerStarted audit event so audit/audit.log is created on
     // first start. This satisfies CC6.2 (audit trail present) and ensures
@@ -709,17 +711,17 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
         });
     }
 
+    let catalog_dir_str = data_dir.join("catalog")
+        .to_string_lossy().to_string();
+    let mut config_with_catalog = config.clone();
+    config_with_catalog.catalog_dir = Some(catalog_dir_str);
+
+    let user_store = std::sync::Arc::new(
+        vledger_server::UserStore::open(&data_dir.join("catalog"))
+            .context("Failed to open user store")?
+    );
+
     if pgwire {
-        // Open a second LedgerStore handle for the pgwire server.
-        // Share the same UserStore as the native TLS server so both listeners
-        // use the same user accounts and session state.
-        let ledger2 = vledger_ledger::LedgerStore::open(data_dir)
-            .context("Failed to open ledger for pgwire")?;
-        let catalog_dir = data_dir.join("catalog");
-        let user_store = std::sync::Arc::new(
-            vledger_server::UserStore::open(&catalog_dir)
-                .context("Failed to open user store for pgwire")?
-        );
         let pg_config = vledger_pgwire::PgWireConfig {
             bind_addr:       "127.0.0.1:5432".into(),
             database:        "vledger".into(),
@@ -730,8 +732,12 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
             catalog_dir:     None,
             max_connections,
         };
-        let pg_server  = vledger_pgwire::PgWireServer::new(pg_config, ledger2, user_store);
-        let pg_token   = shutdown.clone();
+        let pg_server = vledger_pgwire::PgWireServer::new_shared(
+            pg_config,
+            std::sync::Arc::clone(&ledger),
+            std::sync::Arc::clone(&user_store),
+        );
+        let pg_token = shutdown.clone();
         tokio::spawn(async move {
             if let Err(e) = pg_server.run(pg_token).await {
                 tracing::error!("PgWire server error: {e}");
@@ -751,7 +757,7 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
         });
     }
 
-    vledger_server::Server::new(config, ledger)
+    vledger_server::Server::new_shared(config_with_catalog, ledger, user_store)
         .run(shutdown)
         .await
         .context("Server error")

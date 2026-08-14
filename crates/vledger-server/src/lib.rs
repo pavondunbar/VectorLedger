@@ -96,6 +96,23 @@ impl Server {
         }
     }
 
+    /// Create a server with a pre-shared `Arc<RwLock<LedgerStore>>`.
+    ///
+    /// Use this when the pgwire server needs to share the same ledger handle
+    /// so both listeners operate on the same in-memory state without opening
+    /// the data directory twice (which would hit the exclusive lock).
+    pub fn new_shared(
+        config:     ServerConfig,
+        ledger:     Arc<RwLock<LedgerStore>>,
+        user_store: Arc<UserStore>,
+    ) -> Self {
+        Self {
+            config:     Arc::new(config),
+            ledger,
+            user_store,
+        }
+    }
+
     /// Start listening.  Runs until `shutdown` is cancelled or the process exits.
     ///
     /// ## Graceful shutdown (Fix #2)

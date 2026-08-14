@@ -136,21 +136,35 @@ impl Default for PgWireConfig {
 /// connection-resource controls.
 pub struct PgWireServer {
     config:     PgWireConfig,
-    ledger:     Arc<tokio::sync::Mutex<LedgerStore>>,
+    ledger:     Arc<tokio::sync::RwLock<LedgerStore>>,
     user_store: Arc<UserStore>,
 }
 
 impl PgWireServer {
-    /// Create a new server.
+    /// Create a new server, taking ownership of `ledger` and wrapping it
+    /// in a new `Arc<RwLock>`.
     ///
     /// `user_store` is shared with the native TLS server so that both
     /// listeners use the same user database.
     pub fn new(config: PgWireConfig, ledger: LedgerStore, user_store: Arc<UserStore>) -> Self {
         Self {
             config,
-            ledger:     Arc::new(tokio::sync::Mutex::new(ledger)),
+            ledger:     Arc::new(tokio::sync::RwLock::new(ledger)),
             user_store,
         }
+    }
+
+    /// Create a new server sharing an already-open `Arc<RwLock<LedgerStore>>`.
+    ///
+    /// Use this when the native TLS server has already opened the ledger so
+    /// that both listeners share the same store and avoid the exclusive data
+    /// directory lock conflict.
+    pub fn new_shared(
+        config:     PgWireConfig,
+        ledger:     Arc<tokio::sync::RwLock<LedgerStore>>,
+        user_store: Arc<UserStore>,
+    ) -> Self {
+        Self { config, ledger, user_store }
     }
 
     /// Start accepting connections.  Runs until `shutdown` is cancelled or the process exits.
@@ -298,7 +312,7 @@ fn build_tls_acceptor(cfg: &PgWireConfig) -> anyhow::Result<TlsAcceptor> {
 
 async fn handle_connection(
     stream:        tokio_rustls::server::TlsStream<TcpStream>,
-    ledger:        Arc<tokio::sync::Mutex<LedgerStore>>,
+    ledger:        Arc<tokio::sync::RwLock<LedgerStore>>,
     user_store:    Arc<UserStore>,
     attach_proofs: bool,
     peer:          std::net::SocketAddr,
@@ -383,7 +397,7 @@ async fn handle_authenticated<R, W>(
     startup:       StartupMessage,
     mut reader:    BufReader<R>,
     mut writer:    W,
-    ledger:        Arc<tokio::sync::Mutex<LedgerStore>>,
+    ledger:        Arc<tokio::sync::RwLock<LedgerStore>>,
     user_store:    Arc<UserStore>,
     attach_proofs: bool,
     peer:          std::net::SocketAddr,
@@ -550,7 +564,7 @@ where
 
 async fn execute_query(
     sql:            &str,
-    ledger:         &Arc<tokio::sync::Mutex<LedgerStore>>,
+    ledger:         &Arc<tokio::sync::RwLock<LedgerStore>>,
     _attach_proofs: bool,
     role:           Role,
 ) -> Vec<Vec<u8>> {
@@ -615,7 +629,7 @@ async fn execute_query(
     }
 
     let result = {
-        let mut ledger = ledger.lock().await;
+        let mut ledger = ledger.write().await;
         Executor::new(&mut *ledger).execute(plan)
     };
 
