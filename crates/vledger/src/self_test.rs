@@ -71,7 +71,11 @@ pub async fn run(entries: u64, keep_data: bool) -> Result<()> {
 
     // ── Create isolated test directory ────────────────────────────────────
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
-    let (test_dir, _tmpdir): (PathBuf, Option<tempfile::TempDir>) = if keep_data {
+    // For large entry counts /tmp may be quota-limited (each page is 8 KB).
+    // Use the current directory for tests > 100K entries so disk space
+    // comes from the main volume. Cleaned up automatically unless --keep-data.
+    let use_cwd = keep_data || entries > 100_000;
+    let (test_dir, _tmpdir): (PathBuf, Option<tempfile::TempDir>) = if use_cwd {
         let path = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(format!("vledger-self-test-{timestamp}"));
@@ -164,6 +168,12 @@ pub async fn run(entries: u64, keep_data: bool) -> Result<()> {
 
     // ── Print report ──────────────────────────────────────────────────────
     print_report(&phases, keep_data, &test_dir, entries, &seed_hex);
+
+    // Clean up the test directory if --keep-data was not requested
+    // and it was written to the current directory (large test).
+    if !keep_data && use_cwd && test_dir.exists() {
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
 
     // Return error if any phase failed.
     let any_fail = phases.iter().any(|p| matches!(p.result, PhaseResult::Fail(_)));
