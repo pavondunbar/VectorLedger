@@ -1615,6 +1615,316 @@ Before putting VectorLedger in front of production traffic:
 
 ---
 
+## Testing & Verification
+
+This section documents every testing mechanism available in VectorLedger. Run these commands on your own server to independently verify correctness, durability, and tamper-evidence before deploying to production.
+
+### Prerequisites
+
+Start the server before running any tests that require a live connection:
+
+```bash
+export VectorLedger_MASTER_KEY=$(openssl rand -hex 32)
+./target/release/vledger init --key-source env
+cat vledger-data/catalog/.admin_initial_credentials   # note the generated password
+./target/release/vledger start --max-connections 200 --pgwire &
+sleep 5
+```
+
+---
+
+### 1. Benchmark Tests (TPS)
+
+Measures transactions per second across INSERT, SELECT, and mixed workloads. Restart the server between each workload run to clear connection state.
+
+```bash
+# INSERT workload — write heavy
+cargo run --release --package vledger-bench -- \
+    --username admin --password <password> \
+    --clients 50 --transactions 5000 --workload insert
+
+# Restart between runs
+pkill vledger && sleep 2 && ./target/release/vledger start --max-connections 200 --pgwire &
+sleep 5
+
+# SELECT workload — read heavy
+cargo run --release --package vledger-bench -- \
+    --username admin --password <password> \
+    --clients 50 --transactions 5000 --workload select
+
+pkill vledger && sleep 2 && ./target/release/vledger start --max-connections 200 --pgwire &
+sleep 5
+
+# MIXED workload — 70% INSERT, 30% SELECT
+cargo run --release --package vledger-bench -- \
+    --username admin --password <password> \
+    --clients 50 --transactions 5000 --workload mixed
+```
+
+**Recommended instance:** AWS `c7g.xlarge` (Graviton3, 4 vCPU, 8 GB RAM). Avoid `t3`/`t4g` burstable instances — CPU credit throttling produces misleading results.
+
+---
+
+### 2. PostgreSQL Wire Protocol Compatibility
+
+Verifies that VectorLedger accepts connections from standard PostgreSQL clients. Start the server with `--pgwire` and connect with `psql`:
+
+```bash
+psql "host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require"
+```
+
+Run these queries to confirm compatibility:
+
+```sql
+SELECT 1;
+SELECT version();
+SELECT current_user();
+SELECT current_database();
+SHOW server_version;
+SHOW server_encoding;
+SHOW TimeZone;
+SELECT COUNT(*) FROM ledger;
+SELECT * FROM ledger LIMIT 5;
+SELECT * FROM accounts LIMIT 5;
+SELECT VERIFY_CHAIN();
+BEGIN;
+SELECT COUNT(*) FROM ledger;
+COMMIT;
+```
+
+---
+
+### 3. Concurrent Transaction Test
+
+Runs the benchmark in one terminal while querying live from another to confirm no torn reads, duplicate sequences, or chain failures under concurrent load.
+
+**Terminal 1:**
+```bash
+cargo run --release --package vledger-bench -- \
+    --username admin --password <password> \
+    --clients 10 --transactions 1000 --workload mixed &
+```
+
+**Terminal 2 (while benchmark runs):**
+```bash
+psql "host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require"
+```
+
+```sql
+SELECT COUNT(*) FROM ledger;
+SELECT COUNT(DISTINCT sequence) FROM ledger;  -- must equal COUNT(*)
+SELECT VERIFY_CHAIN();                         -- must return OK
+```
+
+---
+
+### 4. WAL Corruption Test
+
+Confirms that VectorLedger detects and rejects corrupted WAL data during recovery.
+
+```bash
+pkill vledger && sleep 2
+
+# Corrupt a byte in the last WAL segment
+python3 -c "
+import os
+wal_dir = 'vledger-data/wal'
+segments = sorted(os.listdir(wal_dir))
+target = os.path.join(wal_dir, segments[-1])
+size = os.path.getsize(target)
+mid = size // 2
+with open(target, 'r+b') as f:
+    f.seek(mid)
+    b = f.read(1)
+    f.seek(-1, 1)
+    f.write(bytes([b[0] ^ 0xFF]))
+print('WAL corruption written at offset', mid)
+"
+
+# Attempt restart — server will reject or truncate at the corrupt record
+nohup ./target/release/vledger start --max-connections 200 --pgwire &
+sleep 10
+cat nohup.out | tail -10
+
+# Restore the WAL (XOR with 0xFF again to flip back)
+python3 -c "
+import os
+wal_dir = 'vledger-data/wal'
+segments = sorted(os.listdir(wal_dir))
+target = os.path.join(wal_dir, segments[-1])
+size = os.path.getsize(target)
+mid = size // 2
+with open(target, 'r+b') as f:
+    f.seek(mid)
+    b = f.read(1)
+    f.seek(-1, 1)
+    f.write(bytes([b[0] ^ 0xFF]))
+print('WAL restored at offset', mid)
+"
+
+# Restart and verify full recovery
+pkill vledger && sleep 2
+nohup ./target/release/vledger start --max-connections 200 --pgwire &
+sleep 120  # wait for WAL replay
+psql "host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require"
+```
+
+```sql
+SELECT COUNT(*) FROM ledger;
+SELECT VERIFY_CHAIN();
+```
+
+---
+
+### 5. Logical Tampering Test
+
+Confirms that the BLAKE3 hash chain detects in-memory data manipulation. `TAMPER_ENTRY` mutates an entry's description without updating its hash — simulating what a malicious actor would need to do to falsify a record.
+
+```sql
+-- Establish baseline
+SELECT VERIFY_CHAIN();
+
+-- Tamper with a specific entry
+SELECT TAMPER_ENTRY(999999, 'THIS RECORD HAS BEEN FALSIFIED');
+
+-- Hash chain must now detect the mutation
+SELECT VERIFY_CHAIN();
+-- Expected: ERROR: INTEGRITY FAILURE: Hash chain broken at sequence 999999
+
+-- Confirm the specific entry is marked corrupted
+SELECT VERIFY_ENTRY(999999);
+-- Expected: status = CORRUPTED
+```
+
+---
+
+### 6. Crash / Restart Recovery Test
+
+Confirms that committed transactions survive a hard kill mid-write and that uncommitted transactions are rolled back cleanly.
+
+```bash
+# Start benchmark in background
+cargo run --release --package vledger-bench -- \
+    --username admin --password <password> \
+    --clients 10 --transactions 10000 --workload insert &
+
+BENCH_PID=$!
+
+# Hard-kill the server while writes are in flight
+sleep 10
+kill -9 $(pgrep -f "vledger start")
+echo "Server killed mid-write"
+wait $BENCH_PID
+
+# Restart — WAL replay recovers all committed transactions
+nohup ./target/release/vledger start --max-connections 200 --pgwire &
+sleep 120
+psql "host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require"
+```
+
+```sql
+SELECT COUNT(*) FROM ledger;
+SELECT VERIFY_CHAIN();
+-- Chain must be OK. Some in-flight transactions may be missing (expected).
+-- All committed transactions must be present and valid.
+```
+
+---
+
+### 7. Integrity Self-Test Suite
+
+The built-in self-test runs five automated phases against a completely isolated temporary database. Your production data is never touched.
+
+```bash
+# Quick smoke test — 1K entries, instant
+./target/release/vledger verify --self-test --entries 1000 2>/dev/null
+
+# Dev run — 10K entries, ~5 seconds
+./target/release/vledger verify --self-test --entries 10000 2>/dev/null
+
+# Standard — 100K entries, ~30-60 seconds (default)
+./target/release/vledger verify --self-test 2>/dev/null
+
+# Enterprise stress test — 1M entries, ~10-15 minutes
+./target/release/vledger verify --self-test --entries 1000000 2>/dev/null
+
+# Keep the test database for manual inspection
+./target/release/vledger verify --self-test --entries 10000 --keep-data 2>/dev/null
+```
+
+**What the self-test verifies:**
+
+| Phase | What it tests |
+|---|---|
+| A — Baseline | Inserts N deterministic entries with varied amounts, verifies the hash chain immediately |
+| B — WAL Integrity | Corrupts a WAL byte, confirms server detects and rejects it, restores the byte |
+| C — Crash Recovery | Reopens the database, confirms 100% of entries recovered with chain intact |
+| D — Logical Integrity | Mutates an entry in memory without updating its hash, confirms `VERIFY_CHAIN()` detects it |
+| E — Entry Verification | Spot-checks five entries spread across the ledger with `VERIFY_ENTRY()` |
+
+**Inspecting the self-test database manually:**
+
+```bash
+# Run with --keep-data to retain the database after the test
+./target/release/vledger verify --self-test --entries 10000 --keep-data 2>/dev/null
+
+# Note the directory printed at the end, then start a server against it
+cat /path/to/vledger-self-test-<timestamp>/catalog/.admin_initial_credentials
+
+./target/release/vledger start \
+    --data-dir /path/to/vledger-self-test-<timestamp> \
+    --max-connections 10 --pgwire &
+
+sleep 5
+
+psql "host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require"
+```
+
+```sql
+SELECT COUNT(*) FROM ledger;
+SELECT VERIFY_CHAIN();
+SELECT VERIFY_ENTRY(1);
+SELECT VERIFY_ENTRY(5000);
+SELECT VERIFY_ENTRY(10000);
+\x
+SELECT * FROM ledger ORDER BY sequence LIMIT 10;
+SELECT * FROM ledger WHERE sequence = 5000;
+```
+
+---
+
+### 8. Chain Range Verification
+
+Verify a specific range of entries rather than the full chain:
+
+```sql
+-- Verify entries 1 through 100,000
+SELECT VERIFY_CHAIN(1, 100000);
+
+-- Verify from 1,000,000 to end
+SELECT VERIFY_CHAIN(1000000);
+
+-- Verify the full chain
+SELECT VERIFY_CHAIN();
+```
+
+---
+
+### 9. Direct SQL Queries (without psql)
+
+Query the production database directly from the terminal without starting psql:
+
+```bash
+./target/release/vledger sql --query "SELECT COUNT(*) FROM ledger"
+./target/release/vledger sql --query "SELECT VERIFY_CHAIN()"
+./target/release/vledger sql --query "SELECT * FROM ledger WHERE sequence = 500000"
+./target/release/vledger sql --query "SELECT VERIFY_ENTRY(500000)"
+./target/release/vledger sql --query "SELECT VERIFY_CHAIN(1000000, 1100000)"
+./target/release/vledger sql --query "SELECT * FROM ledger LIMIT 10"
+```
+
+---
+
 ## Running the Test Suite
 
 ```bash
