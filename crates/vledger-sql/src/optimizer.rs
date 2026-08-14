@@ -98,8 +98,10 @@ pub fn explain(plan: &LogicalPlan, indent: usize) -> String {
             format!("{pad}ScanAccounts {{ filter: {filter:?} }}"),
         LogicalPlan::GetBalance { account_ref } =>
             format!("{pad}GetBalance({account_ref})"),
-        LogicalPlan::VerifyChain =>
-            format!("{pad}VerifyChain"),
+        LogicalPlan::VerifyChain { from_seq, to_seq } =>
+            format!("{pad}VerifyChain {{ from: {from_seq:?}, to: {to_seq:?} }}"),
+        LogicalPlan::VerifyEntry { sequence } =>
+            format!("{pad}VerifyEntry({sequence})"),
         LogicalPlan::Constant { col, val } =>
             format!("{pad}Constant {{ {col}: {val} }}"),
         LogicalPlan::PostEntry(_) =>

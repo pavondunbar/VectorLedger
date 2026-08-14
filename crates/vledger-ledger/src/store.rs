@@ -920,6 +920,67 @@ impl LedgerStore {
         Ok(())
     }
 
+    /// Verify a range of the hash chain between `from_seq` and `to_seq` inclusive.
+    ///
+    /// When `from_seq` is `None` the range starts at the first entry.
+    /// When `to_seq` is `None` the range ends at the last entry.
+    /// When both are `None` this is equivalent to `verify_chain_integrity`.
+    ///
+    /// Returns `(verified_count, range_chain_tip)`.
+    pub fn verify_chain_range(
+        &self,
+        from_seq: Option<u64>,
+        to_seq:   Option<u64>,
+    ) -> Result<(usize, vledger_crypto::Hash), LedgerError> {
+        let entries: Vec<&JournalEntry> = self.entries.iter()
+            .filter(|e| {
+                from_seq.map_or(true, |f| e.sequence >= f) &&
+                to_seq.map_or(true,   |t| e.sequence <= t)
+            })
+            .collect();
+
+        if entries.is_empty() {
+            return Ok((0, ZERO_HASH));
+        }
+
+        // For a sub-range we verify internal hash consistency and chain linkage
+        // within the range.  The first entry in the range carries its own
+        // prev_hash which we accept as the range's starting point.
+        let mut prev_hash = entries[0].prev_hash;
+        let mut count = 0usize;
+        let mut tip   = ZERO_HASH;
+
+        for entry in &entries {
+            if !entry.verify_hashes() {
+                return Err(LedgerError::Serialization(
+                    format!("Hash chain broken at sequence {}", entry.sequence)));
+            }
+            if entry.prev_hash != prev_hash {
+                return Err(LedgerError::Serialization(
+                    format!("Chain linkage broken at sequence {}", entry.sequence)));
+            }
+            prev_hash = entry.chain_hash;
+            tip = entry.chain_hash;
+            count += 1;
+        }
+
+        Ok((count, tip))
+    }
+
+    /// Look up a single entry by its sequence number.
+    /// Returns `None` if no entry with that sequence exists.
+    pub fn get_entry_by_sequence(&self, seq: u64) -> Option<&JournalEntry> {
+        // Sequence numbers start at 1 and are densely packed, so try the
+        // direct index first (O(1)) before falling back to a linear scan.
+        let idx = seq.saturating_sub(1) as usize;
+        if let Some(e) = self.entries.get(idx) {
+            if e.sequence == seq {
+                return Some(e);
+            }
+        }
+        self.entries.iter().find(|e| e.sequence == seq)
+    }
+
     /// Force a WAL checkpoint.
     ///
     /// Computes the BLAKE3 Merkle root over all journal-entry pages, then

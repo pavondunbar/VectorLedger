@@ -553,6 +553,13 @@ where
 
     let role = session.role;
 
+    // Per-connection transaction state.
+    // VectorLedger entries are individually atomic (WAL-backed), so BEGIN/COMMIT/ROLLBACK
+    // are accepted as syntactic stubs for client compatibility. True multi-statement
+    // ACID transactions across entries are a future roadmap item.
+    // 'I' = idle, 'T' = in transaction, 'E' = error in transaction.
+    let mut tx_status: u8 = b'I';
+
     // ── Query loop — each read guarded by IDLE_TIMEOUT, also shutdown ────
     loop {
         let read_result = tokio::select! {
@@ -599,7 +606,7 @@ where
             }
 
             FrontendMessage::Query(sql) => {
-                let responses = execute_query(&sql, &ledger, attach_proofs, role).await;
+                let responses = execute_query(&sql, &ledger, attach_proofs, role, &mut tx_status).await;
                 codec::write_messages(&mut writer, &responses).await?;
             }
 
@@ -618,12 +625,12 @@ where
             }
 
             FrontendMessage::Execute { portal } => {
-                let responses = execute_query(&portal, &ledger, attach_proofs, role).await;
+                let responses = execute_query(&portal, &ledger, attach_proofs, role, &mut tx_status).await;
                 codec::write_messages(&mut writer, &responses).await?;
             }
 
             FrontendMessage::Sync | FrontendMessage::Flush => {
-                codec::write_all(&mut writer, &messages::ready_for_query(b'I')).await?;
+                codec::write_all(&mut writer, &messages::ready_for_query(tx_status)).await?;
             }
 
             FrontendMessage::Unknown(t) => {
@@ -643,17 +650,52 @@ async fn execute_query(
     ledger:         &Arc<tokio::sync::RwLock<LedgerStore>>,
     _attach_proofs: bool,
     role:           Role,
+    tx_status:      &mut u8,
 ) -> Vec<Vec<u8>> {
     let sql = sql.trim();
     if sql.is_empty() || sql == ";" {
-        return vec![messages::empty_query_response(), messages::ready_for_query(b'I')];
+        return vec![messages::empty_query_response(), messages::ready_for_query(*tx_status)];
     }
 
     let sql_upper = sql.to_uppercase();
+    let sql_upper_trimmed = sql_upper.trim_end_matches(';');
+
+    // ── Transaction control ───────────────────────────────────────────────
+    // VectorLedger entries are individually WAL-atomic. BEGIN/COMMIT/ROLLBACK
+    // are accepted for client compatibility and track the connection's
+    // transaction status byte (used by psql's prompt and client drivers).
+    if matches!(sql_upper_trimmed,
+        "BEGIN" | "BEGIN TRANSACTION" | "START TRANSACTION" | "BEGIN WORK"
+    ) {
+        *tx_status = b'T';
+        return vec![messages::command_complete("BEGIN"), messages::ready_for_query(*tx_status)];
+    }
+    if matches!(sql_upper_trimmed,
+        "COMMIT" | "COMMIT TRANSACTION" | "COMMIT WORK" | "END" | "END TRANSACTION" | "END WORK"
+    ) {
+        *tx_status = b'I';
+        return vec![messages::command_complete("COMMIT"), messages::ready_for_query(*tx_status)];
+    }
+    if matches!(sql_upper_trimmed, "ROLLBACK" | "ROLLBACK TRANSACTION" | "ROLLBACK WORK" | "ABORT")
+        || sql_upper_trimmed.starts_with("ROLLBACK TO")
+        || sql_upper_trimmed.starts_with("ROLLBACK TRANSACTION TO")
+    {
+        *tx_status = b'I';
+        return vec![messages::command_complete("ROLLBACK"), messages::ready_for_query(*tx_status)];
+    }
+    if sql_upper_trimmed == "SAVEPOINT" || sql_upper_trimmed.starts_with("SAVEPOINT ") {
+        return vec![messages::command_complete("SAVEPOINT"), messages::ready_for_query(*tx_status)];
+    }
+    if sql_upper_trimmed == "RELEASE"
+        || sql_upper_trimmed.starts_with("RELEASE ")
+        || sql_upper_trimmed.starts_with("RELEASE SAVEPOINT ")
+    {
+        return vec![messages::command_complete("RELEASE"), messages::ready_for_query(*tx_status)];
+    }
 
     // Client-compatibility stubs (psql meta-commands).
     if sql_upper.starts_with("SET ") || sql_upper.starts_with("SET\t") {
-        return vec![messages::command_complete("SET"), messages::ready_for_query(b'I')];
+        return vec![messages::command_complete("SET"), messages::ready_for_query(*tx_status)];
     }
     if sql_upper.starts_with("SHOW ") {
         let var = sql[5..].trim().trim_end_matches(';');
@@ -668,14 +710,58 @@ async fn execute_query(
             messages::row_description(&[FieldDesc::text(var)]),
             messages::data_row(&[Some(val.to_string())]),
             messages::command_complete("SHOW"),
-            messages::ready_for_query(b'I'),
+            messages::ready_for_query(*tx_status),
         ];
     }
     if sql_upper.contains("PG_CATALOG") || sql_upper.contains("INFORMATION_SCHEMA") {
         return vec![
             messages::row_description(&[]),
             messages::command_complete("SELECT 0"),
-            messages::ready_for_query(b'I'),
+            messages::ready_for_query(*tx_status),
+        ];
+    }
+
+    // PostgreSQL compatibility stubs — functions that clients call for
+    // connectivity checks, ORM introspection, and driver initialisation.
+    // Handled before the SQL parser so they never reach the planner.
+    if sql_upper.starts_with("SELECT VERSION()") || sql_upper.starts_with("SELECT VERSION ()") {
+        return vec![
+            messages::row_description(&[FieldDesc::text("version".to_string())]),
+            messages::data_row(&[Some("PostgreSQL 15.0 (VectorLedger vgdb)".to_string())]),
+            messages::command_complete("SELECT 1"),
+            messages::ready_for_query(*tx_status),
+        ];
+    }
+    if sql_upper.starts_with("SELECT CURRENT_SCHEMA") {
+        return vec![
+            messages::row_description(&[FieldDesc::text("current_schema".to_string())]),
+            messages::data_row(&[Some("public".to_string())]),
+            messages::command_complete("SELECT 1"),
+            messages::ready_for_query(*tx_status),
+        ];
+    }
+    if sql_upper.starts_with("SELECT CURRENT_DATABASE") || sql_upper.starts_with("SELECT CURRENT_CATALOG") {
+        return vec![
+            messages::row_description(&[FieldDesc::text("current_database".to_string())]),
+            messages::data_row(&[Some("vledger".to_string())]),
+            messages::command_complete("SELECT 1"),
+            messages::ready_for_query(*tx_status),
+        ];
+    }
+    if sql_upper.starts_with("SELECT CURRENT_USER") || sql_upper.starts_with("SELECT USER") {
+        return vec![
+            messages::row_description(&[FieldDesc::text("current_user".to_string())]),
+            messages::data_row(&[Some(role.to_string())]),
+            messages::command_complete("SELECT 1"),
+            messages::ready_for_query(*tx_status),
+        ];
+    }
+    if sql_upper.starts_with("SELECT CURRENT_SETTING(") {
+        return vec![
+            messages::row_description(&[FieldDesc::text("current_setting".to_string())]),
+            messages::data_row(&[Some(String::new())]),
+            messages::command_complete("SELECT 1"),
+            messages::ready_for_query(*tx_status),
         ];
     }
 
@@ -683,24 +769,31 @@ async fn execute_query(
 
     let stmt = match parse_one(sql) {
         Ok(s)  => s,
-        Err(e) => return vec![
-            messages::error_response("ERROR", "42601", &format!("syntax error: {e}")),
-            messages::ready_for_query(b'E'),
-        ],
+        Err(e) => {
+            if *tx_status == b'T' { *tx_status = b'E'; }
+            return vec![
+                messages::error_response("ERROR", "42601", &format!("syntax error: {e}")),
+                messages::ready_for_query(*tx_status),
+            ];
+        }
     };
 
     let plan = match LogicalPlanBuilder::plan(stmt) {
         Ok(p)  => p,
-        Err(e) => return vec![
-            messages::error_response("ERROR", "42601", &format!("plan error: {e}")),
-            messages::ready_for_query(b'E'),
-        ],
+        Err(e) => {
+            if *tx_status == b'T' { *tx_status = b'E'; }
+            return vec![
+                messages::error_response("ERROR", "42601", &format!("plan error: {e}")),
+                messages::ready_for_query(*tx_status),
+            ];
+        }
     };
 
     if let Err(e) = check_plan_privilege(role, &plan) {
+        if *tx_status == b'T' { *tx_status = b'E'; }
         return vec![
             messages::error_response("ERROR", "42501", &e),
-            messages::ready_for_query(b'E'),
+            messages::ready_for_query(*tx_status),
         ];
     }
 
@@ -710,10 +803,13 @@ async fn execute_query(
     };
 
     match result {
-        Err(e) => vec![
-            messages::error_response("ERROR", "XX000", &e.to_string()),
-            messages::ready_for_query(b'E'),
-        ],
+        Err(e) => {
+            if *tx_status == b'T' { *tx_status = b'E'; }
+            vec![
+                messages::error_response("ERROR", "XX000", &e.to_string()),
+                messages::ready_for_query(*tx_status),
+            ]
+        }
         Ok(qr) => {
             let mut msgs: Vec<Vec<u8>> = Vec::new();
             if qr.columns.is_empty() && qr.rows.is_empty() {
@@ -749,7 +845,7 @@ async fn execute_query(
                 };
                 msgs.push(messages::command_complete(&tag));
             }
-            msgs.push(messages::ready_for_query(b'I'));
+            msgs.push(messages::ready_for_query(*tx_status));
             msgs
         }
     }

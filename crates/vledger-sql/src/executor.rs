@@ -49,7 +49,8 @@ impl<'a> ReadExecutor<'a> {
             LogicalPlan::ScanEntries { filter }     => self.exec_scan_entries(filter),
             LogicalPlan::ScanAccounts { filter }    => self.exec_scan_accounts(filter),
             LogicalPlan::GetBalance { account_ref } => self.exec_get_balance(&account_ref),
-            LogicalPlan::VerifyChain                => self.exec_verify_chain(),
+            LogicalPlan::VerifyChain { from_seq, to_seq } => self.exec_verify_chain(from_seq, to_seq),
+            LogicalPlan::VerifyEntry { sequence }   => self.exec_verify_entry(sequence),
             LogicalPlan::Constant { col, val }      => self.exec_constant(col, val),
             LogicalPlan::Join(spec)                 => self.exec_join(spec),
             LogicalPlan::Aggregate(spec)            => self.exec_aggregate(spec),
@@ -137,6 +138,15 @@ impl<'a> ReadExecutor<'a> {
     }
 
 
+    // ── SELECT 1 / SELECT 'hello' / constant expression ──────────────────
+
+    fn exec_constant(&self, col: String, val: String) -> Result<QueryResult, SqlError> {
+        let cols = vec![col];
+        let rows = vec![Row::new(cols.clone(), vec![Value::Text(val)])];
+        Ok(QueryResult::rows(cols, rows, String::new()))
+    }
+
+
     // ── SELECT FROM accounts ──────────────────────────────────────────────
 
     fn exec_scan_accounts(&self, filter: Option<EntryFilter>) -> Result<QueryResult, SqlError> {
@@ -190,31 +200,67 @@ impl<'a> ReadExecutor<'a> {
         Ok(QueryResult::rows(cols, rows, format!("balance = {balance}")))
     }
 
-    // ── SELECT VERIFY_CHAIN() ─────────────────────────────────────────────
+    // ── SELECT VERIFY_CHAIN() / VERIFY_CHAIN(from, to) ───────────────────
 
-    fn exec_verify_chain(&self) -> Result<QueryResult, SqlError> {
-        match self.ledger.verify_chain_integrity() {
-            Ok(()) => {
-                let n   = self.ledger.entry_count();
-                let tip = hex::encode(self.ledger.chain_tip());
-                let cols = vec!["status".into(), "entries_verified".into(), "chain_tip".into()];
+    fn exec_verify_chain(&self, from_seq: Option<u64>, to_seq: Option<u64>) -> Result<QueryResult, SqlError> {
+        let cols = vec!["status".into(), "entries_verified".into(), "chain_tip".into()];
+
+        // Full chain when no range specified.
+        if from_seq.is_none() && to_seq.is_none() {
+            return match self.ledger.verify_chain_integrity() {
+                Ok(()) => {
+                    let n   = self.ledger.entry_count();
+                    let tip = hex::encode(self.ledger.chain_tip());
+                    let rows = vec![Row::new(cols.clone(), vec![
+                        Value::Text("OK".into()),
+                        Value::BigInt(n as i128),
+                        Value::Hash(tip),
+                    ])];
+                    Ok(QueryResult::rows(cols, rows, "Chain integrity verified"))
+                }
+                Err(e) => Ok(QueryResult::empty(format!("INTEGRITY FAILURE: {e}"))),
+            };
+        }
+
+        // Range verification.
+        match self.ledger.verify_chain_range(from_seq, to_seq) {
+            Ok((count, tip)) => {
                 let rows = vec![Row::new(cols.clone(), vec![
                     Value::Text("OK".into()),
-                    Value::BigInt(n as i128),
-                    Value::Hash(tip),
+                    Value::BigInt(count as i128),
+                    Value::Hash(hex::encode(tip)),
                 ])];
-                Ok(QueryResult::rows(cols, rows, "Chain integrity verified"))
+                Ok(QueryResult::rows(cols, rows, format!("Chain range verified ({count} entries)")))
             }
             Err(e) => Ok(QueryResult::empty(format!("INTEGRITY FAILURE: {e}"))),
         }
     }
 
-    // ── SELECT 1 / SELECT 'hello' / constant expression ──────────────────
+    // ── SELECT VERIFY_ENTRY(seq) ──────────────────────────────────────────
 
-    fn exec_constant(&self, col: String, val: String) -> Result<QueryResult, SqlError> {
-        let cols = vec![col];
-        let rows = vec![Row::new(cols.clone(), vec![Value::Text(val)])];
-        Ok(QueryResult::rows(cols, rows, String::new()))
+    fn exec_verify_entry(&self, sequence: u64) -> Result<QueryResult, SqlError> {
+        let cols = vec![
+            "sequence".into(), "status".into(), "content_hash".into(),
+            "chain_hash".into(), "description".into(),
+        ];
+        match self.ledger.get_entry_by_sequence(sequence) {
+            None => {
+                Ok(QueryResult::empty(format!("entry with sequence {sequence} not found")))
+            }
+            Some(entry) => {
+                let ok = entry.verify_hashes();
+                let rows = vec![Row::new(cols.clone(), vec![
+                    Value::BigInt(entry.sequence as i128),
+                    Value::Text(if ok { "VALID" } else { "CORRUPTED" }.into()),
+                    Value::Hash(hex::encode(entry.content_hash)),
+                    Value::Hash(hex::encode(entry.chain_hash)),
+                    Value::Text(entry.description.clone()),
+                ])];
+                Ok(QueryResult::rows(cols, rows,
+                    if ok { "Entry hash verified".to_string() } else { "INTEGRITY FAILURE: hash mismatch".to_string() }
+                ))
+            }
+        }
     }
 
 

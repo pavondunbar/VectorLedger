@@ -36,7 +36,12 @@ pub enum LogicalPlan {
     GetBalance { account_ref: String },
 
     /// SELECT VERIFY_CHAIN()
-    VerifyChain,
+    /// SELECT VERIFY_CHAIN(from_seq)
+    /// SELECT VERIFY_CHAIN(from_seq, to_seq)
+    VerifyChain { from_seq: Option<u64>, to_seq: Option<u64> },
+
+    /// SELECT VERIFY_ENTRY(sequence_number) — verify a single entry's hashes.
+    VerifyEntry { sequence: u64 },
 
     /// SELECT 1, SELECT 'hello', SELECT true — constant expression with no FROM.
     /// Used by ORMs, connection poolers, and health checks.
@@ -232,7 +237,17 @@ impl LogicalPlanBuilder {
                             let arg = extract_function_string_arg(&f.args, "BALANCE")?;
                             return Ok(LogicalPlan::GetBalance { account_ref: arg });
                         }
-                        "VERIFY_CHAIN" => return Ok(LogicalPlan::VerifyChain),
+                        "VERIFY_CHAIN" => {
+                            let (from_seq, to_seq) = extract_optional_u64_range(&f.args)?;
+                            return Ok(LogicalPlan::VerifyChain { from_seq, to_seq });
+                        }
+                        "VERIFY_ENTRY" => {
+                            let (seq, _) = extract_optional_u64_range(&f.args)?;
+                            let sequence = seq.ok_or_else(|| SqlError::MissingField(
+                                "VERIFY_ENTRY() requires a sequence number argument".into()
+                            ))?;
+                            return Ok(LogicalPlan::VerifyEntry { sequence });
+                        }
                         _ => {}
                     }
                 }
@@ -502,6 +517,37 @@ fn extract_function_string_arg(
         }
         _ => Err(SqlError::MissingField(format!("{fname}() requires arguments"))),
     }
+}
+
+/// Extract zero, one, or two optional u64 arguments from a function call.
+///
+/// Used by `VERIFY_CHAIN(from, to)` and `VERIFY_ENTRY(seq)`.
+/// - 0 args → (None, None)
+/// - 1 arg  → (Some(n), None)
+/// - 2 args → (Some(n1), Some(n2))
+fn extract_optional_u64_range(
+    args: &sqlparser::ast::FunctionArguments,
+) -> Result<(Option<u64>, Option<u64>), SqlError> {
+    use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+    let list = match args {
+        FunctionArguments::List(l) => l,
+        FunctionArguments::None   => return Ok((None, None)),
+        _ => return Ok((None, None)),
+    };
+    let parse_arg = |i: usize| -> Result<Option<u64>, SqlError> {
+        match list.args.get(i) {
+            None => Ok(None),
+            Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(e))) => {
+                let s = expr_to_string(e)?;
+                let n = s.parse::<u64>().map_err(|_|
+                    SqlError::TypeError(format!("argument {} must be an integer", i + 1))
+                )?;
+                Ok(Some(n))
+            }
+            _ => Ok(None),
+        }
+    };
+    Ok((parse_arg(0)?, parse_arg(1)?))
 }
 
 fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, SqlError> {
