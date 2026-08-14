@@ -543,7 +543,14 @@ fn insert_deterministic_entries(
         let amount = Amount::new(amount_minor as i64)
             .ok_or_else(|| anyhow::anyhow!("zero amount generated at seq {seq}"))?;
 
-        let description = format!("self-test-{seq}-{}", &hex::encode(lcg.to_le_bytes())[..6]);
+        // Embed the dollar amount in the description so it's visible when
+        // querying the ledger directly (e.g. SELECT * FROM ledger WHERE sequence = N).
+        let dollars  = amount_minor / 100;
+        let cents    = amount_minor % 100;
+        let pair_idx = (seq as usize) % 10;
+        let description = format!(
+            "self-test seq={seq} ${dollars}.{cents:02} pair={pair_idx}"
+        );
 
         let entry = JournalEntryBuilder::new(&description, "self-test")
             .debit(debit_id, amount, "USD")
