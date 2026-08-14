@@ -5,6 +5,7 @@
 
 mod backup;
 mod key_rotation;
+mod self_test;
 
 use std::path::PathBuf;
 
@@ -138,7 +139,24 @@ enum Commands {
     /// Show database status.
     Status,
     /// Verify WAL and ledger chain integrity.
-    Verify,
+    ///
+    /// With --self-test, runs a full integrity self-test against a fresh
+    /// isolated database that never touches your production data.
+    Verify {
+        /// Run the full integrity self-test suite in an isolated database.
+        #[arg(long)]
+        self_test: bool,
+
+        /// Number of entries to generate for the self-test.
+        /// Presets: 10,000 (dev) | 100,000 (default) | 1,000,000 (enterprise).
+        #[arg(long, default_value_t = 100_000)]
+        entries: u64,
+
+        /// Keep the self-test database after completion (for manual inspection).
+        /// The test directory path is printed at the end.
+        #[arg(long)]
+        keep_data: bool,
+    },
     /// Run SQL against the database (interactive REPL or single statement).
     ///
     /// When a server is running (default: 127.0.0.1:5433) the CLI connects
@@ -385,7 +403,13 @@ async fn main() -> Result<()> {
         Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms, query_timeout_ms, metrics_addr, max_connections }
             => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms, query_timeout_ms, &metrics_addr, max_connections).await,
         Commands::Status                             => cmd_status(&cli.data_dir).await,
-        Commands::Verify                             => cmd_verify(&cli.data_dir).await,
+        Commands::Verify { self_test, entries, keep_data }  => {
+            if self_test {
+                crate::self_test::run(entries, keep_data).await
+            } else {
+                cmd_verify(&cli.data_dir).await
+            }
+        }
         Commands::Sql { query, username, password, server, ca_cert } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref(), server.as_deref(), ca_cert.as_deref()).await,
         Commands::SelfTest                           => cmd_self_test().await,
         Commands::SelfTestPhase3                     => cmd_self_test_phase3().await,
