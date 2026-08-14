@@ -531,7 +531,7 @@ fn insert_deterministic_entries(
         let (debit_id, credit_id) = accounts.pair_for_seq(seq);
 
         let amount = Amount::new(amount_minor as i64)
-            .ok_or_else(|| anyhow::anyhow!("zero amount generated"))?;
+            .ok_or_else(|| anyhow::anyhow!("zero amount generated at seq {seq}"))?;
 
         let description = format!("self-test-{seq}-{}", &hex::encode(lcg.to_le_bytes())[..6]);
 
@@ -541,7 +541,10 @@ fn insert_deterministic_entries(
             .build();
 
         store.post_entry(entry)
-            .with_context(|| format!("Failed to post entry {seq}"))?;
+            .map_err(|e| anyhow::anyhow!(
+                "Failed to post entry {seq} (amount={amount_minor} minor units, \
+                 debit={debit_id}, credit={credit_id}): {e}"
+            ))?;
 
         // Progress indicator every 10% for large datasets.
         if count >= 10_000 && seq % (count / 10) == 0 {
