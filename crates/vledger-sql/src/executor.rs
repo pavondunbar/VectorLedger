@@ -50,6 +50,7 @@ impl<'a> ReadExecutor<'a> {
             LogicalPlan::ScanAccounts { filter }    => self.exec_scan_accounts(filter),
             LogicalPlan::GetBalance { account_ref } => self.exec_get_balance(&account_ref),
             LogicalPlan::VerifyChain                => self.exec_verify_chain(),
+            LogicalPlan::Constant { col, val }      => self.exec_constant(col, val),
             LogicalPlan::Join(spec)                 => self.exec_join(spec),
             LogicalPlan::Aggregate(spec)            => self.exec_aggregate(spec),
             LogicalPlan::Window(spec)               => self.exec_window(spec),
@@ -206,6 +207,14 @@ impl<'a> ReadExecutor<'a> {
             }
             Err(e) => Ok(QueryResult::empty(format!("INTEGRITY FAILURE: {e}"))),
         }
+    }
+
+    // ── SELECT 1 / SELECT 'hello' / constant expression ──────────────────
+
+    fn exec_constant(&self, col: String, val: String) -> Result<QueryResult, SqlError> {
+        let cols = vec![col];
+        let rows = vec![Row::new(cols.clone(), vec![Value::Text(val)])];
+        Ok(QueryResult::rows(cols, rows, String::new()))
     }
 
 
@@ -416,8 +425,7 @@ impl<'a> Executor<'a> {
                     attach_proofs: self.attach_proofs,
                 };
                 reader.execute(read_plan)
-            }
-        }
+            }        }
     }
 
     // ── INSERT INTO ledger ────────────────────────────────────────────────

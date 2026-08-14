@@ -38,6 +38,10 @@ pub enum LogicalPlan {
     /// SELECT VERIFY_CHAIN()
     VerifyChain,
 
+    /// SELECT 1, SELECT 'hello', SELECT true — constant expression with no FROM.
+    /// Used by ORMs, connection poolers, and health checks.
+    Constant { col: String, val: String },
+
     /// INSERT INTO ledger (…) VALUES (…)
     PostEntry(EntrySpec),
 
@@ -232,6 +236,41 @@ impl LogicalPlanBuilder {
                         _ => {}
                     }
                 }
+            }
+        }
+
+        // ── Constant expression queries: SELECT 1, SELECT 'hello', etc. ──
+        // Many PostgreSQL clients (ORMs, connection poolers, health checks)
+        // use SELECT 1 as a connectivity check. Return a single row with
+        // the evaluated constant rather than erroring.
+        if body.from.is_empty() {
+            if let Some(item) = body.projection.first() {
+                let (col, val) = match item {
+                    SelectItem::UnnamedExpr(Expr::Value(v)) => {
+                        let s = match v {
+                            SqlValue::Number(n, _) => n.clone(),
+                            SqlValue::SingleQuotedString(s) => s.clone(),
+                            SqlValue::Boolean(b) => b.to_string(),
+                            SqlValue::Null => "NULL".into(),
+                            other => other.to_string(),
+                        };
+                        ("?column?".to_string(), s)
+                    }
+                    SelectItem::ExprWithAlias {
+                        expr: Expr::Value(v), alias
+                    } => {
+                        let s = match v {
+                            SqlValue::Number(n, _) => n.clone(),
+                            SqlValue::SingleQuotedString(s) => s.clone(),
+                            SqlValue::Boolean(b) => b.to_string(),
+                            SqlValue::Null => "NULL".into(),
+                            other => other.to_string(),
+                        };
+                        (alias.value.clone(), s)
+                    }
+                    _ => return Err(SqlError::Unsupported("SELECT with no FROM".into())),
+                };
+                return Ok(LogicalPlan::Constant { col, val });
             }
         }
 

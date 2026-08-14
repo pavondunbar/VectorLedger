@@ -100,6 +100,8 @@ pub fn explain(plan: &LogicalPlan, indent: usize) -> String {
             format!("{pad}GetBalance({account_ref})"),
         LogicalPlan::VerifyChain =>
             format!("{pad}VerifyChain"),
+        LogicalPlan::Constant { col, val } =>
+            format!("{pad}Constant {{ {col}: {val} }}"),
         LogicalPlan::PostEntry(_) =>
             format!("{pad}PostEntry"),
         LogicalPlan::CreateAccount(_) =>
