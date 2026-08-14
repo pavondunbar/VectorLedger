@@ -700,10 +700,14 @@ async fn execute_query(
     if sql_upper.starts_with("SHOW ") {
         let var = sql[5..].trim().trim_end_matches(';');
         let val = match var.to_uppercase().as_str() {
-            "SERVER_VERSION"  => "15.0",
-            "CLIENT_ENCODING" => "UTF8",
-            "DATESTYLE"       => "ISO, MDY",
-            "TIMEZONE"        => "UTC",
+            "SERVER_VERSION"    => "15.0",
+            "SERVER_ENCODING"   => "UTF8",
+            "CLIENT_ENCODING"   => "UTF8",
+            "DATESTYLE"         => "ISO, MDY",
+            "TIMEZONE"          => "UTC",
+            "INTEGER_DATETIMES" => "on",
+            "IS_SUPERUSER"      => "on",
+            "MAX_CONNECTIONS"   => "200",
             _                 => "",
         };
         return vec![
