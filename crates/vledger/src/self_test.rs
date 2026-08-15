@@ -192,10 +192,17 @@ async fn phase_baseline(test_dir: &Path, entries: u64, seed_hex: &str) -> PhaseR
 
     let result = (|| -> Result<()> {
         // Initialise a fresh ledger in the test directory.
-        let wal_dir   = test_dir.join("wal");
-        let pages_dir = test_dir.join("pages");
+        let wal_dir     = test_dir.join("wal");
+        let pages_dir   = test_dir.join("pages");
+        let catalog_dir = test_dir.join("catalog");
         std::fs::create_dir_all(&wal_dir)?;
         std::fs::create_dir_all(&pages_dir)?;
+        std::fs::create_dir_all(&catalog_dir)?;
+
+        // Create a UserStore so the directory can be queried with vledger sql
+        // when --keep-data is set.  The generated admin password is written to
+        // catalog/.admin_initial_credentials as usual.
+        let _ = vledger_server::UserStore::open(&catalog_dir);
 
         let mut store = LedgerStore::open(test_dir)
             .context("Failed to open test ledger")?;
@@ -688,17 +695,21 @@ fn print_report(
         println!("  Test artifacts retained at:");
         println!("  {}", test_dir.display());
         println!();
-        println!("  Inspect the test ledger with psql (start server first):");
-        println!("  1. vledger start --data-dir {} --max-connections 10 --pgwire &", test_dir.display());
-        println!("  2. psql \"host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require\"");
+        println!("  Admin credentials:");
+        println!("  cat {}/catalog/.admin_initial_credentials", test_dir.display());
         println!();
-        println!("  Suggested queries:");
-        println!("    SELECT COUNT(*) FROM ledger;");
-        println!("    SELECT VERIFY_CHAIN();");
-        println!("    SELECT VERIFY_ENTRY(1);");
-        println!("    SELECT VERIFY_ENTRY({});", entries / 2);
-        println!("    SELECT VERIFY_ENTRY({entries});");
-        println!("    SELECT * FROM ledger ORDER BY sequence LIMIT 10;");
+        println!("  Start a server against the test database:");
+        println!("  ./target/release/vledger start \\");
+        println!("      --data-dir {} \\", test_dir.display());
+        println!("      --max-connections 10 &");
+        println!();
+        println!("  Then query with vledger sql:");
+        println!("  ./target/release/vledger sql --query \"SELECT COUNT(*) FROM ledger\"");
+        println!("  ./target/release/vledger sql --query \"SELECT VERIFY_CHAIN()\"");
+        println!("  ./target/release/vledger sql --query \"SELECT VERIFY_ENTRY(1)\"");
+        println!("  ./target/release/vledger sql --query \"SELECT VERIFY_ENTRY({})\"", entries / 2);
+        println!("  ./target/release/vledger sql --query \"SELECT VERIFY_ENTRY({entries})\"");
+        println!("  ./target/release/vledger sql --query \"SELECT * FROM ledger LIMIT 10\"");
         println!();
     }
 }
