@@ -1923,6 +1923,27 @@ Query the production database directly from the terminal without starting psql:
 ./target/release/vledger sql --query "SELECT * FROM ledger LIMIT 10"
 ```
 
+Each `vledger sql` invocation opens a fresh TLS connection, authenticates, runs the query, and closes. There is no persistent session between calls, so credentials are prompted every time by default.
+
+**To avoid retyping credentials on every query, set environment variables:**
+
+```bash
+export VLEDGER_CLI_USERNAME=admin
+export VLEDGER_CLI_PASSWORD=<your-password>
+
+# All subsequent queries run without prompting
+./target/release/vledger sql --query "SELECT COUNT(*) FROM ledger"
+./target/release/vledger sql --query "SELECT VERIFY_CHAIN()"
+./target/release/vledger sql --query "SELECT VERIFY_ENTRY(500000)"
+```
+
+**Alternatively, use psql for an interactive session** — authenticate once and run as many queries as you want:
+
+```bash
+psql "host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require"
+# Type \q to exit
+```
+
 ---
 
 ## Running the Test Suite
