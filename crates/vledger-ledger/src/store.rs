@@ -989,8 +989,10 @@ impl LedgerStore {
     /// tampering because the stored `content_hash` will no longer match the
     /// entry's actual field values.
     ///
-    /// This method is intentionally NOT durable — it mutates only the
-    /// in-memory state and never touches the WAL or page store.
+    /// Gated behind `#[cfg(any(test, feature = "self-test"))]` — only
+    /// available in test builds and the self-test command. Not callable
+    /// via the SQL interface or any production code path.
+    #[cfg(any(test, feature = "self-test"))]
     pub fn tamper_entry_for_demo(&mut self, seq: u64, new_description: String) -> bool {
         let idx = seq.saturating_sub(1) as usize;
         if let Some(e) = self.entries.get_mut(idx) {

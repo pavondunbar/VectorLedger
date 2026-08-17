@@ -55,7 +55,7 @@ impl<'a> ReadExecutor<'a> {
             LogicalPlan::Join(spec)                 => self.exec_join(spec),
             LogicalPlan::Aggregate(spec)            => self.exec_aggregate(spec),
             LogicalPlan::Window(spec)               => self.exec_window(spec),
-            LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_) | LogicalPlan::TamperEntry { .. } =>
+            LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_) =>
                 Err(SqlError::Unsupported(
                     "write plans must be executed with Executor (requires &mut LedgerStore)".into()
                 )),
@@ -463,6 +463,7 @@ impl<'a> Executor<'a> {
             // Write plans — require &mut LedgerStore.
             LogicalPlan::PostEntry(spec)      => self.exec_post_entry(spec),
             LogicalPlan::CreateAccount(spec)  => self.exec_create_account(spec),
+            #[cfg(test)]
             LogicalPlan::TamperEntry { sequence, new_description } =>
                 self.exec_tamper_entry(sequence, new_description),
 
@@ -524,8 +525,9 @@ impl<'a> Executor<'a> {
         Ok(QueryResult::rows(cols, rows, format!("Account '{}' created", spec.code)))
     }
 
-    // ── TAMPER_ENTRY — demo/testing only ─────────────────────────────────
+    // ── TAMPER_ENTRY — test only (cfg-gated, not compiled into release) ──
 
+    #[cfg(test)]
     fn exec_tamper_entry(&mut self, sequence: u64, new_description: String) -> Result<QueryResult, SqlError> {
         let found = self.ledger.tamper_entry_for_demo(sequence, new_description.clone());
         let cols = vec!["sequence".into(), "status".into(), "tampered_field".into(), "new_value".into()];

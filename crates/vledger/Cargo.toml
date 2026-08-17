@@ -17,7 +17,7 @@ vledger-crypto      = { workspace = true }
 vledger-wal         = { workspace = true }
 vledger-pages       = { workspace = true }
 vledger-transaction = { workspace = true }
-vledger-ledger      = { workspace = true }
+vledger-ledger      = { workspace = true, features = ["self-test"] }
 vledger-index       = { workspace = true }
 vledger-sql         = { workspace = true }
 vledger-server      = { workspace = true }

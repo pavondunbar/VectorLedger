@@ -43,11 +43,11 @@ pub enum LogicalPlan {
     /// SELECT VERIFY_ENTRY(sequence_number) — verify a single entry's hashes.
     VerifyEntry { sequence: u64 },
 
-    /// SELECT TAMPER_ENTRY(seq, 'new_description') — FOR DEMO/TESTING ONLY.
+    /// SELECT TAMPER_ENTRY(seq, 'new_description') — FOR TESTING ONLY.
+    /// Gated behind #[cfg(test)] — cannot be compiled into a release binary.
     /// Silently mutates an entry's description in memory without updating its
     /// hash, so VERIFY_CHAIN() will detect the tampering.
-    /// This simulates what a malicious actor would do if they could reach the
-    /// in-memory ledger state directly.
+    #[cfg(test)]
     TamperEntry { sequence: u64, new_description: String },
 
     /// SELECT 1, SELECT 'hello', SELECT true — constant expression with no FROM.
@@ -255,6 +255,7 @@ impl LogicalPlanBuilder {
                             ))?;
                             return Ok(LogicalPlan::VerifyEntry { sequence });
                         }
+                        #[cfg(test)]
                         "TAMPER_ENTRY" => {
                             // TAMPER_ENTRY(seq, 'new_description')
                             // Parse the integer sequence number directly

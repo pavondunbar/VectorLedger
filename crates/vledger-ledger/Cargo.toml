@@ -7,6 +7,11 @@ authors.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 
+[features]
+# Enables tamper_entry_for_demo on LedgerStore for the self-test suite.
+# NEVER enable in production builds outside of the self-test command.
+self-test = []
+
 [dependencies]
 vledger-crypto      = { workspace = true }
 vledger-transaction = { workspace = true }

@@ -108,8 +108,9 @@ pub fn explain(plan: &LogicalPlan, indent: usize) -> String {
             format!("{pad}PostEntry"),
         LogicalPlan::CreateAccount(_) =>
             format!("{pad}CreateAccount"),
+        #[cfg(test)]
         LogicalPlan::TamperEntry { sequence, .. } =>
-            format!("{pad}TamperEntry({sequence}) [DEMO ONLY]"),
+            format!("{pad}TamperEntry({sequence}) [TEST ONLY]"),
         LogicalPlan::Join(s) => {
             let l = explain(&s.left,  indent + 1);
             let r = explain(&s.right, indent + 1);
