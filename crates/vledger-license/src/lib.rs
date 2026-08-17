@@ -35,7 +35,9 @@
 pub mod error;
 pub mod store;
 pub mod tier;
+pub mod watcher;
 
 pub use error::LicenseError;
 pub use store::LicenseStore;
 pub use tier::{Feature, LicenseTier};
+pub use watcher::{SharedLicense, spawn_license_watcher};

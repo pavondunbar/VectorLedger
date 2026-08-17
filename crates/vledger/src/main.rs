@@ -640,10 +640,15 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     }
 
     // ── License check ─────────────────────────────────────────────────────
-    let license = vledger_license::LicenseStore::load_or_free(data_dir);
+    // Load the license synchronously at startup so we can gate features and
+    // print the banner before anything else starts.  After the shutdown token
+    // is wired up (below) we hand this off to the daily background watcher
+    // which refreshes it at each UTC midnight — ensuring a downgrade applied
+    // on Monday is in effect by Tuesday without requiring a restart.
+    let initial_license = vledger_license::LicenseStore::load_or_free(data_dir);
 
     if pgwire {
-        license.require_feature(vledger_license::Feature::PgWire)
+        initial_license.require_feature(vledger_license::Feature::PgWire)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
@@ -707,7 +712,7 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     if !metrics_addr.is_empty() {
         println!("  Metrics    : http://{metrics_addr}/metrics  (Prometheus)");
     }
-    license.print_banner();
+    initial_license.print_banner();
     if pgwire {
         println!("  PgWire     : 127.0.0.1:5432  (PostgreSQL wire protocol)");
     }
@@ -734,6 +739,17 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
             token.cancel();
         });
     }
+
+    // ── Daily license watcher ─────────────────────────────────────────────
+    // Wrap the initial license in a shared RwLock and spawn a background task
+    // that re-reads license.json at each UTC midnight.  Any downgrade or
+    // expiry applied during the day takes effect at the next midnight tick
+    // without requiring a server restart.
+    let _license = vledger_license::spawn_license_watcher(
+        data_dir,
+        initial_license,
+        shutdown.clone(),
+    );
 
     let catalog_dir_str = data_dir.join("catalog")
         .to_string_lossy().to_string();
