@@ -2514,6 +2514,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vledger-license-gen"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "vledger-pages"
 version = "1.0.0"
 dependencies = [
