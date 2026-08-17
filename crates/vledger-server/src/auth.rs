@@ -390,7 +390,33 @@ impl UserStore {
                             token:      token.clone(),
                             expires_at: expires,
                         };
+
+                        // ── Lazy rehash ───────────────────────────────────
+                        // If the stored hash was produced with the old weak
+                        // parameters (Argon2::default(): ~19 MiB / 2 iter /
+                        // 1 lane) rather than the current hardened params
+                        // (64 MiB / 3 iter / 4 lanes), silently upgrade it
+                        // now while the plaintext password is available.
+                        // The user sees no disruption; the stronger hash is
+                        // persisted before the session token is returned.
+                        let stored_hash = user.password_hash.clone();
                         drop(users);
+                        if needs_rehash(&stored_hash) {
+                            if let Ok(new_hash) = hash_password(password) {
+                                let mut users = self.users.write()
+                                    .unwrap_or_else(|p| p.into_inner());
+                                if let Some(record) = users.get_mut(username) {
+                                    record.password_hash = new_hash;
+                                    tracing::info!(
+                                        username,
+                                        "Password hash upgraded to hardened Argon2id params"
+                                    );
+                                }
+                                drop(users);
+                                let _ = self.persist();
+                            }
+                        }
+
                         {
                             let mut failures = self.failures.write().unwrap_or_else(|p| p.into_inner());
                             failures.entry(username.to_string()).or_insert_with(FailureState::new).reset();
@@ -651,6 +677,17 @@ fn set_file_mode_600(path: &Path) -> Result<(), ServerError> {
 }
 
 // ── Password helpers ──────────────────────────────────────────────────────────
+
+/// Returns `true` if `phc` was hashed with parameters weaker than the current
+/// hardened target (m=65536, t=3, p=4).
+///
+/// The PHC string format embeds the parameters used at hash time, e.g.:
+///   `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`
+/// Any hash that does not contain exactly `m=65536,t=3,p=4` is considered
+/// stale and will be silently upgraded on the next successful login.
+fn needs_rehash(phc: &str) -> bool {
+    !phc.contains("m=65536,t=3,p=4")
+}
 
 /// Hash a password with Argon2id using the hardened parameters from
 /// `vledger-crypto` (64 MiB / 3 iterations / 4 lanes — above OWASP minimums).
