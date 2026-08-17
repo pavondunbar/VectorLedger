@@ -323,6 +323,22 @@ enum Commands {
         #[arg(long, default_value = "true")]
         decrypt: bool,
     },
+    /// Start a WAL replication primary (Growth+ feature).
+    /// Reads config from <data_dir>/replication.json.
+    #[command(name = "start-primary")]
+    StartPrimary {
+        /// Bind address for the WAL shipper (overrides replication.json).
+        #[arg(long)]
+        bind: Option<String>,
+    },
+    /// Start a WAL replication replica (Growth+ feature).
+    /// Reads config from <data_dir>/replication.json.
+    #[command(name = "start-replica")]
+    StartReplica {
+        /// Primary address to connect to (overrides replication.json).
+        #[arg(long)]
+        primary: Option<String>,
+    },
     /// Show the active license tier, features, and expiry.
     #[command(name = "license")]
     License,
@@ -422,6 +438,8 @@ async fn main() -> Result<()> {
         Commands::User { action, ca_cert } => cmd_user(&cli.data_dir, action, ca_cert.as_deref()).await,
         Commands::License          => cmd_license(&cli.data_dir),
         Commands::BackupVerify { from, decrypt } => cmd_backup_verify(&cli.data_dir, &from, decrypt).await,
+        Commands::StartPrimary { bind }   => cmd_start_primary(&cli.data_dir, bind.as_deref()).await,
+        Commands::StartReplica { primary } => cmd_start_replica(&cli.data_dir, primary.as_deref()).await,
     }
 }
 
@@ -2533,5 +2551,221 @@ async fn cmd_self_test_phase3() -> Result<()> {
     println!("  ✓ Compliance reporting (SOC 2 + PCI-DSS evidence generation)");
     println!("  ✓ Four-eyes workflow enforcement at the server layer");
     println!("  ✓ CLI: backup, restore, rotate-keys, audit-export, compliance-report");
+    Ok(())
+}
+
+
+// ── start-primary ─────────────────────────────────────────────────────────────
+
+async fn cmd_start_primary(data_dir: &PathBuf, bind: Option<&str>) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!("Not initialised at: {} — run `vledger init` first.", data_dir.display());
+    }
+
+    // ── License check ─────────────────────────────────────────────────────
+    let license = vledger_license::LicenseStore::load_or_free(data_dir);
+    license.require_feature(vledger_license::Feature::Replication)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // ── Load or default config ─────────────────────────────────────────────
+    let cfg_path = data_dir.join("replication.json");
+    let mut cfg: vledger_replication::ReplicationConfig = if cfg_path.exists() {
+        let raw = std::fs::read_to_string(&cfg_path)
+            .context("Failed to read replication.json")?;
+        serde_json::from_str(&raw)
+            .context("Invalid replication.json — check the format")?
+    } else {
+        // No file — write a sensible default so the operator has something
+        // to customise, then proceed with that default.
+        let default = vledger_replication::ReplicationConfig::default();
+        let json = serde_json::to_string_pretty(&default)
+            .context("Failed to serialise default replication config")?;
+        std::fs::write(&cfg_path, &json)
+            .context("Failed to write default replication.json")?;
+        eprintln!(
+            "⚠  No replication.json found — wrote default config to {}.\n   \
+             Review and adjust before deploying to production.",
+            cfg_path.display()
+        );
+        default
+    };
+
+    // CLI flag overrides file.
+    if let Some(addr) = bind {
+        cfg.replication_addr = addr.to_string();
+    }
+
+    // ── Start WAL shipper ─────────────────────────────────────────────────
+    let shipper = vledger_replication::WalShipper::new(cfg.clone(), data_dir)
+        .context("Failed to initialise WAL shipper")?;
+
+    shipper.listen_and_accept().await
+        .context("Failed to bind replication listener")?;
+
+    println!("── VectorLedger Primary (WAL Shipper) ──────────────");
+    println!("  Replication : {} (TLS {})",
+        cfg.replication_addr,
+        if cfg.tls.enabled { "enabled" } else { "disabled — dev only" },
+    );
+    println!("  Hostname    : {}", cfg.tls.server_hostname);
+    println!("  Secret      : {}",
+        cfg.secret_path.as_deref()
+            .unwrap_or("replication_secret.hex (auto-generated in data dir)"),
+    );
+    println!(
+        "\n  Share the secret with each replica:\n    \
+         scp {}/replication_secret.hex replica:/path/to/vledger-data/\n",
+        data_dir.display()
+    );
+    println!("──────────────────────────────────────────────────────");
+
+    // ── Graceful shutdown + heartbeat loop ────────────────────────────────
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    {
+        let token = shutdown.clone();
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            let mut sigterm = {
+                use tokio::signal::unix::{signal, SignalKind};
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler")
+            };
+            #[cfg(unix)]
+            tokio::select! {
+                _ = ctrl_c         => {},
+                _ = sigterm.recv() => {},
+            }
+            #[cfg(not(unix))]
+            { ctrl_c.await.ok(); }
+            token.cancel();
+        });
+    }
+
+    let heartbeat_interval = tokio::time::Duration::from_millis(cfg.heartbeat_interval_ms);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                tracing::info!("Shutdown signal received — WAL shipper stopping.");
+                break;
+            }
+            _ = tokio::time::sleep(heartbeat_interval) => {
+                shipper.heartbeat().await;
+                let n = shipper.replica_count().await;
+                tracing::debug!(replicas = n, "Heartbeat sent");
+            }
+        }
+    }
+
+    println!("✓ Primary shutdown complete.");
+    Ok(())
+}
+
+// ── start-replica ─────────────────────────────────────────────────────────────
+
+async fn cmd_start_replica(data_dir: &PathBuf, primary: Option<&str>) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!("Not initialised at: {} — run `vledger init` first.", data_dir.display());
+    }
+
+    // ── License check ─────────────────────────────────────────────────────
+    let license = vledger_license::LicenseStore::load_or_free(data_dir);
+    license.require_feature(vledger_license::Feature::Replication)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // ── Load config ────────────────────────────────────────────────────────
+    let cfg_path = data_dir.join("replication.json");
+    let mut cfg: vledger_replication::ReplicationConfig = if cfg_path.exists() {
+        let raw = std::fs::read_to_string(&cfg_path)
+            .context("Failed to read replication.json")?;
+        serde_json::from_str(&raw)
+            .context("Invalid replication.json — check the format")?
+    } else {
+        anyhow::bail!(
+            "replication.json not found at {}.\n\
+             Create it with your primary's address, e.g.:\n\
+             {{\n  \
+               \"role\": \"replica\",\n  \
+               \"replication_addr\": \"<primary-host>:5434\",\n  \
+               \"tls\": {{ \"enabled\": true, \"server_hostname\": \"vledger-primary\",\n            \
+                         \"ca_cert\": \"/path/to/replication-ca.pem\" }}\n\
+             }}",
+            cfg_path.display()
+        );
+    };
+
+    // CLI flag overrides file.
+    if let Some(addr) = primary {
+        cfg.replication_addr = addr.to_string();
+    }
+
+    // ── Ensure WAL directory exists ────────────────────────────────────────
+    let wal_dir = data_dir.join("wal");
+    std::fs::create_dir_all(&wal_dir)
+        .context("Failed to create local WAL directory")?;
+
+    // ── Construct receiver ─────────────────────────────────────────────────
+    // The HMAC secret must already exist — it is not generated on the replica.
+    // Copy it from the primary: scp primary:/path/to/vledger-data/replication_secret.hex .
+    let receiver = vledger_replication::WalReceiver::new(cfg.clone(), wal_dir.clone(), data_dir)
+        .with_context(|| {
+            format!(
+                "Failed to initialise WAL receiver.\n\
+                 Ensure replication_secret.hex is present at {}/replication_secret.hex\n\
+                 (copy it from the primary node).",
+                data_dir.display()
+            )
+        })?;
+
+    println!("── VectorLedger Replica (WAL Receiver) ─────────────");
+    println!("  Primary     : {}", cfg.replication_addr);
+    println!("  TLS         : {} (SNI: {})",
+        if cfg.tls.enabled { "enabled" } else { "disabled — dev only" },
+        cfg.tls.server_hostname,
+    );
+    println!("  Local WAL   : {}", wal_dir.display());
+    println!("──────────────────────────────────────────────────────");
+
+    // ── Graceful shutdown ─────────────────────────────────────────────────
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    {
+        let token = shutdown.clone();
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            let mut sigterm = {
+                use tokio::signal::unix::{signal, SignalKind};
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler")
+            };
+            #[cfg(unix)]
+            tokio::select! {
+                _ = ctrl_c         => {},
+                _ = sigterm.recv() => {},
+            }
+            #[cfg(not(unix))]
+            { ctrl_c.await.ok(); }
+            token.cancel();
+        });
+    }
+
+    // ── Run receiver — loops forever, reconnecting on transient errors ─────
+    let recv_handle = {
+        let token = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                result = receiver.run() => {
+                    // run() normally never returns — only on unrecoverable error.
+                    if let Err(e) = result {
+                        tracing::error!("WAL receiver exited unexpectedly: {e}");
+                    }
+                }
+                _ = token.cancelled() => {
+                    tracing::info!("Shutdown signal received — WAL receiver stopping.");
+                }
+            }
+        })
+    };
+
+    recv_handle.await.ok();
+    println!("✓ Replica shutdown complete.");
     Ok(())
 }

@@ -105,22 +105,101 @@ VectorLedger makes tampering **cryptographically detectable**:
 
 ### Replication
 
-- Synchronous hot-standby WAL replication
-- Three security layers: TLS 1.3, optional mTLS, BLAKE3-keyed HMAC challenge-response inside TLS
-- Replica verifies BLAKE3 hash of every received WAL record before applying it
-- Exponential reconnect backoff with faster escalation on auth failures
-- Replication secret stored at `0o600` on disk, generated from `OsRng`
-- **Divergence detection:** periodic `DivergenceCheckpoint` messages carry a rolling BLAKE3 WAL chain hash and the primary's ledger chain tip; the replica computes the same hash over its local WAL and responds with a `DivergenceReport` — a mismatch means the replica must be re-seeded
-- **Network partition handling:** the replica's receive loop detects a dropped connection (read returns 0 bytes or an I/O error) and immediately enters the exponential reconnect loop; in-progress WAL records that were not ACKed are not applied
-- **Corrupted WAL on wire:** every `WalRecordMsg` carries `BLAKE3(record_bytes)`; the replica rejects any record whose hash does not match, sends an error ACK, and closes the connection — the primary marks that replica dead and removes it from the active set
+> **License requirement:** WAL replication requires a **Growth or Enterprise** license. Running `vledger start-primary` or `vledger start-replica` on a Free or Starter license returns a feature-not-entitled error.
 
-**Current limitations (known, planned):**
+Synchronous hot-standby WAL replication with three independent security layers:
 
-- **Failover promotion is manual.** There is no automatic primary election. If the primary crashes, an operator must explicitly reconfigure a replica as the new primary. Automated promotion via consensus (Raft/Paxos) is planned but not yet implemented.
-- **Split-brain prevention is network-layer only.** VectorLedger relies on the operator's network segmentation (e.g. AWS security groups, private subnets) to prevent two nodes from simultaneously acting as primary. There is no fencing or STONITH mechanism in the replication layer itself.
+1. **TLS 1.3** on the replication channel (self-signed by default; CA-signed recommended for production)
+2. **Optional mTLS** — the primary can require a client certificate from each replica
+3. **BLAKE3-keyed HMAC challenge-response** inside TLS before any WAL data is exchanged
+
+Additional integrity guarantees:
+- Replica verifies BLAKE3 hash of every received WAL record before applying it — a tampered record is rejected and the connection closed
+- Exponential reconnect backoff (500 ms → 30 s) with faster escalation on auth failures (max 60 s)
+- Replication secret generated from `OsRng`, stored at mode `0o600`
+- **Divergence detection** via periodic `DivergenceCheckpoint` messages carrying a rolling BLAKE3 WAL chain hash — a mismatch means the replica must be re-seeded
+
+#### Setting up replication
+
+**Step 1 — On the primary node, start the WAL shipper**
+
+```bash
+# Start the primary replication listener (binds port 5434 by default)
+vledger start-primary --data-dir ./vledger-data
+
+# Override the bind address
+vledger start-primary --data-dir ./vledger-data --bind 0.0.0.0:5434
+```
+
+On first run, if no `replication.json` exists in the data directory, a default config file is written and the server starts with it. Review and adjust the file before deploying to production.
+
+The primary auto-generates a 32-byte HMAC secret at `vledger-data/replication_secret.hex` (mode `0o600`) on first run. This secret must be copied to every replica.
+
+**Step 2 — Copy the secret to the replica node**
+
+```bash
+# From the primary, copy the secret securely to the replica
+scp vledger-data/replication_secret.hex replica-host:/path/to/vledger-data/replication_secret.hex
+```
+
+**Step 3 — Create `replication.json` on the replica**
+
+Create `vledger-data/replication.json` on the replica node:
+
+```json
+{
+  "role": "replica",
+  "replication_addr": "<primary-host>:5434",
+  "ack_timeout_ms": 5000,
+  "heartbeat_interval_ms": 1000,
+  "send_buffer_bytes": 67108864,
+  "tls": {
+    "enabled": true,
+    "server_hostname": "vledger-primary",
+    "ca_cert": "/path/to/replication-ca.pem"
+  }
+}
+```
+
+For development on a single machine with a self-signed primary cert, set `"ca_cert": null` and build with the `dev-insecure-replication` Cargo feature. Do not do this in production.
+
+**Step 4 — Start the replica**
+
+```bash
+# Start the replica (connects to primary and streams WAL continuously)
+vledger start-replica --data-dir ./vledger-data
+
+# Override the primary address
+vledger start-replica --data-dir ./vledger-data --primary <primary-host>:5434
+```
+
+The replica connects to the primary, performs the HMAC handshake, and begins streaming WAL records. It reconnects automatically on disconnection.
+
+#### `replication.json` reference
+
+| Field | Default | Description |
+|---|---|---|
+| `role` | `"primary"` | `"primary"` or `"replica"` |
+| `replication_addr` | `"127.0.0.1:5434"` | Primary: bind address. Replica: primary's `host:port` |
+| `ack_timeout_ms` | `5000` | How long the primary waits for a replica ACK (ms) |
+| `heartbeat_interval_ms` | `1000` | Heartbeat frequency (ms) |
+| `send_buffer_bytes` | `67108864` | Max bytes buffered per replica connection (64 MiB) |
+| `secret_path` | `null` | Path to HMAC secret; `null` = `<data_dir>/replication_secret.hex` |
+| `tls.enabled` | `true` | Enable TLS on the replication channel |
+| `tls.server_cert` | `null` | Primary TLS cert PEM; `null` = auto-generate self-signed |
+| `tls.server_key` | `null` | Primary TLS key PEM; `null` = auto-generate |
+| `tls.server_hostname` | `"vledger-primary"` | SNI hostname used by replica to verify the primary's cert |
+| `tls.ca_cert` | `null` | Replica: CA cert PEM to verify the primary. Required in production |
+| `tls.client_cert` | `null` | Replica client cert PEM for mTLS (optional) |
+| `tls.client_key` | `null` | Replica client key PEM for mTLS (optional) |
+
+#### Known limitations
+
+- **Failover promotion is manual.** There is no automatic primary election. If the primary crashes, an operator must explicitly reconfigure a replica as the new primary and restart it. Automated promotion via consensus (Raft/Paxos) is planned but not yet implemented.
+- **Split-brain prevention is network-layer only.** VectorLedger relies on network segmentation (e.g. AWS security groups, private subnets) to prevent two nodes from simultaneously acting as primary. There is no fencing or STONITH mechanism.
 - **Replica lag is observable but not bounded.** Heartbeat ACKs carry the replica's last applied LSN, allowing the primary to compute lag. There is no automatic write-pause when lag exceeds a threshold.
 
-These limitations are appropriate for the current stage and do not affect the security properties of the WAL integrity or tamper-evidence guarantees.
+These limitations do not affect the WAL integrity or tamper-evidence guarantees.
 
 ### Compliance Reporting
 
@@ -996,6 +1075,38 @@ vledger license --data-dir <PATH>
 
 Place the signed `license.json` file provided by VectorGuard Labs into your data directory to unlock paid features. If no file is present, the engine runs in Free tier. See the [Licensing](#licensing) section for the full tier comparison, feature list, and pricing.
 
+### `vledger start-primary`
+
+Start a WAL replication primary listener (**Growth+ license required**).
+
+```bash
+vledger start-primary [OPTIONS]
+  --data-dir <PATH>   Data directory (default: ./vledger-data)
+  --bind <ADDR>       Bind address for the WAL shipper
+                      (overrides replication.json; default: 127.0.0.1:5434)
+```
+
+Reads `<data-dir>/replication.json`. If the file does not exist, a default config is written on first run. The primary auto-generates `replication_secret.hex` (mode `0o600`) on first start — copy this file to every replica before starting them.
+
+Responds to `SIGTERM` and `CTRL-C` with a graceful shutdown.
+
+### `vledger start-replica`
+
+Start a WAL replication replica (**Growth+ license required**).
+
+```bash
+vledger start-replica [OPTIONS]
+  --data-dir <PATH>     Data directory (default: ./vledger-data)
+  --primary <ADDR>      Primary host:port to connect to
+                        (overrides replication.json)
+```
+
+Requires `<data-dir>/replication.json` to exist. The `replication_secret.hex` file must already be present (copied from the primary) before this command will succeed.
+
+The replica connects to the primary, performs the BLAKE3 HMAC handshake, and streams WAL records continuously. It reconnects automatically on disconnection with exponential backoff.
+
+Responds to `SIGTERM` and `CTRL-C` with a graceful shutdown.
+
 ### `vledger user`
 
 Manage user accounts. All subcommands read the user store directly from the data directory — the server does not need to be running.
@@ -1502,9 +1613,9 @@ Licenses are issued by VectorGuard Labs. After purchasing a subscription at [vec
 | Tier | Price | Best for |
 |---|---|---|
 | **Free** | $0 / month | Development, evaluation, internal tools |
-| **Starter** | $99 / month | Early-stage teams that need PostgreSQL client compatibility |
-| **Growth** | $399 / month | Production fintechs and SaaS companies under SOC 2 or PCI-DSS |
-| **Enterprise** | $999 / month | Banks, payment processors, PCI-DSS Level 1, hardware HSM requirements |
+| **Starter** | $199 / month | Early-stage teams that need PostgreSQL client compatibility |
+| **Growth** | $999 / month | Production fintechs and SaaS companies under SOC 2 or PCI-DSS |
+| **Enterprise** | Contact Sales | Banks, payment processors, PCI-DSS Level 1, hardware HSM requirements |
 
 Annual billing available on all paid tiers — pay for 10 months, get 12.
 Contact [sales@vectorguardlabs.com](mailto:sales@vectorguardlabs.com) for multi-instance or custom pricing.
