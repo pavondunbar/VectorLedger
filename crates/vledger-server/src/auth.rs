@@ -28,8 +28,6 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use argon2::password_hash::{rand_core::OsRng, SaltString};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -654,20 +652,24 @@ fn set_file_mode_600(path: &Path) -> Result<(), ServerError> {
 
 // ── Password helpers ──────────────────────────────────────────────────────────
 
-/// Hash a password with Argon2id (64 MiB / 3 iterations / 4 lanes).
+/// Hash a password with Argon2id using the hardened parameters from
+/// `vledger-crypto` (64 MiB / 3 iterations / 4 lanes — above OWASP minimums).
+///
+/// Delegates to `vledger_crypto::password::hash_password` so the parameters
+/// are defined in exactly one place and cannot drift between the crypto crate
+/// and the server.
 pub fn hash_password(password: &str) -> Result<String, String> {
-    let salt   = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    argon2.hash_password(password.as_bytes(), &salt)
-        .map(|h| h.to_string())
+    vledger_crypto::password::hash_password(password)
         .map_err(|e| e.to_string())
 }
 
 /// Verify a password against an Argon2id PHC string.
+///
+/// Delegates to `vledger_crypto::password::verify_password`.  The PHC string
+/// embeds the algorithm parameters used at hash time, so verification always
+/// uses the correct parameters regardless of what the current defaults are.
 pub fn verify_password(password: &str, hash: &str) -> Result<(), ()> {
-    let parsed = PasswordHash::new(hash).map_err(|_| ())?;
-    Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
+    vledger_crypto::password::verify_password(password, hash)
         .map_err(|_| ())
 }
 

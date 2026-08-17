@@ -32,8 +32,8 @@ struct IpBucket {
     last_checked: Instant,
 }
 
-const RATE_BURST: f64          = 200.0;
-const RATE_REFILL_PER_SEC: f64 = 50.0;
+const RATE_BURST: f64          = 10.0;
+const RATE_REFILL_PER_SEC: f64 = 2.0;
 const BUCKET_TTL: Duration   = Duration::from_secs(300);
 
 impl IpBucket {

@@ -483,6 +483,16 @@ async fn cmd_init(
     {
         use vledger_secrets::{KeySourceConfig, FileProvider};
 
+        // ── HSM license check ─────────────────────────────────────────────
+        // PyHSM key sources (pyhsm, remote-pyhsm) are Enterprise-only.
+        // Check before doing any work so a non-Enterprise user gets a clear
+        // error immediately rather than a partial initialisation.
+        if matches!(key_source, "pyhsm" | "remote-pyhsm" | "pyhsm-remote") {
+            let license = vledger_license::LicenseStore::load_or_free(data_dir);
+            license.require_feature(vledger_license::Feature::Hsm)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+
         let key_source_cfg = match key_source {
             "file" => {
                 let key_path = data_dir.join("keys").join("master_key.hex");
@@ -649,6 +659,15 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
 
     if pgwire {
         initial_license.require_feature(vledger_license::Feature::PgWire)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+
+    // ── Replication license check ─────────────────────────────────────────
+    // WAL replication is a Growth+ feature. Gate it now if a replication
+    // config file is present so the server refuses to start rather than
+    // silently running without replication when a user is on a lower tier.
+    if data_dir.join("replication.json").exists() {
+        initial_license.require_feature(vledger_license::Feature::Replication)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
@@ -2101,6 +2120,13 @@ async fn cmd_rotate_keys(
 ) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Not initialised at: {}", data_dir.display());
+    }
+    // ── License check ─────────────────────────────────────────────────────
+    // Key rotation requires HSM access — Enterprise-only feature.
+    {
+        let license = vledger_license::LicenseStore::load_or_free(data_dir);
+        license.require_feature(vledger_license::Feature::Hsm)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     println!("── VectorLedger Key Rotation ───────────────────");
     let rotated = key_rotation::rotate_keys(
