@@ -2137,6 +2137,29 @@ async fn cmd_audit_export(
 ) -> Result<()> {
     use vledger_audit::export::{export_csv, export_json, TimeRange};
 
+    // ── License check ─────────────────────────────────────────────────────
+    // Audit export date range is gated by tier:
+    //   Free     — last 30 days only
+    //   Starter  — last 90 days only
+    //   Growth / Enterprise — unlimited (requires AuditExportUnlimited feature)
+    //
+    // The window is enforced by clamping the effective `from` date regardless
+    // of what the caller requests. A caller cannot bypass this by omitting
+    // --from; the cap is applied to TimeRange::all() as well.
+    let license = vledger_license::LicenseStore::load_or_free(data_dir);
+    let unlimited = license.has_feature(&vledger_license::Feature::AuditExportUnlimited);
+
+    // Days the caller is allowed to look back from now.
+    let max_days: Option<i64> = if unlimited {
+        None // no cap
+    } else {
+        match license.tier {
+            vledger_license::LicenseTier::Starter => Some(90),
+            // Free tier (and any unknown/downgraded tier) — 30 days.
+            _ => Some(30),
+        }
+    };
+
     let log_path = data_dir.join("audit").join("audit.log");
     if !log_path.exists() {
         anyhow::bail!("Audit log not found at {}", log_path.display());
@@ -2152,9 +2175,37 @@ async fn cmd_audit_export(
             .map(|d| d.with_timezone(&chrono::Utc))
             .context("Invalid --to date (use RFC 3339)"))
             .transpose()?;
-        match (from_dt, to_dt) {
+
+        // Apply tier cap: compute the earliest `from` this tier is allowed.
+        let effective_from = if let Some(days) = max_days {
+            let earliest = chrono::Utc::now() - chrono::Duration::days(days);
+            match from_dt {
+                // Caller requested a range — clamp it forward if it exceeds the cap.
+                Some(requested) if requested < earliest => {
+                    eprintln!(
+                        "⚠  Your {} license limits audit export to the last {} days. \
+                         Clamping --from to {}.\n   \
+                         Upgrade at https://vectorguardlabs.com/pricing",
+                        license.tier,
+                        days,
+                        earliest.format("%Y-%m-%dT%H:%M:%SZ"),
+                    );
+                    Some(earliest)
+                }
+                // Caller's range is within the allowed window — use as-is.
+                Some(requested) => Some(requested),
+                // No --from supplied — default to the tier cap.
+                None => Some(earliest),
+            }
+        } else {
+            // Unlimited tier — honour the caller's --from (or no cap if omitted).
+            from_dt
+        };
+
+        match (effective_from, to_dt) {
             (Some(f), Some(t)) => TimeRange::new(f, t),
-            _ => TimeRange::all(),
+            (Some(f), None)    => TimeRange::new(f, chrono::Utc::now()),
+            _                  => TimeRange::all(),
         }
     };
 
