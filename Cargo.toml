@@ -20,7 +20,6 @@ members = [
     "crates/vledger-license",
     "crates/vledger",
     "tools/vledger-bench",
-    "tools/vledger-license-gen",
 ]
 
 [workspace.package]
