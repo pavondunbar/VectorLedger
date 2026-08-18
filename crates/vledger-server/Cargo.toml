@@ -14,12 +14,14 @@ repository.workspace  = true
 dev-no-auth = []
 
 [dependencies]
-vledger-secrets = { workspace = true }
-vledger-crypto  = { workspace = true }
-vledger-ledger  = { workspace = true }
-vledger-pages   = { workspace = true }
-vledger-sql     = { workspace = true }
-vledger-wal     = { workspace = true }
+vledger-secrets     = { workspace = true }
+vledger-crypto      = { workspace = true }
+vledger-ledger      = { workspace = true }
+vledger-pages       = { workspace = true }
+vledger-sql         = { workspace = true }
+vledger-wal         = { workspace = true }
+vledger-replication = { workspace = true }
+vledger-audit       = { workspace = true }
 tokio           = { workspace = true }
 tokio-util      = { workspace = true }
 rustls          = { workspace = true }

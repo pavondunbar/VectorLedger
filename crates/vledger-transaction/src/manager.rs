@@ -337,4 +337,11 @@ impl TransactionManager {
     pub fn wal_flush_state(&self) -> Option<std::sync::Arc<vledger_wal::FlushState>> {
         self.wal.flush_state.clone()
     }
+
+    /// Returns the index of the WAL segment currently being written to.
+    /// Used by the replication layer to tell replicas which segment a
+    /// shipped record belongs to.
+    pub fn active_segment_index(&self) -> u64 {
+        self.wal.active_segment_index()
+    }
 }

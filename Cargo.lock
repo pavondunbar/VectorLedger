@@ -2435,6 +2435,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "uuid",
+ "vledger-audit",
  "vledger-ledger",
 ]
 
@@ -2641,9 +2642,11 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "vledger-audit",
  "vledger-crypto",
  "vledger-ledger",
  "vledger-pages",
+ "vledger-replication",
  "vledger-secrets",
  "vledger-sql",
  "vledger-wal",

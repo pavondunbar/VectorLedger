@@ -77,6 +77,8 @@ pub async fn handle_connection(
     ledger:     Arc<RwLock<LedgerStore>>,
     config:     Arc<ServerConfig>,
     user_store: Arc<UserStore>,
+    shipper:    Option<Arc<vledger_replication::WalShipper>>,
+    audit_log:  Option<Arc<vledger_audit::AuditLog>>,
     peer_addr:  std::net::SocketAddr,
     shutdown:   CancellationToken,
 ) {
@@ -215,15 +217,22 @@ pub async fn handle_connection(
             match result {
                 Err(e) => {
                     conn_auth_failures += 1;
+                    // ── Audit: auth failure ───────────────────────────────
+                    if let Some(log) = &audit_log {
+                        let _ = log.append(vledger_audit::AuditEventKind::AuthEvent {
+                            caller_id: req.auth.as_ref()
+                                .map(|a| a.username.clone())
+                                .unwrap_or_else(|| "unknown".into()),
+                            success:   false,
+                            peer_addr: peer_addr.to_string(),
+                        });
+                    }
                     warn!(
                         peer  = %peer_addr,
                         attempt = conn_auth_failures,
                         max     = MAX_AUTH_ATTEMPTS_PER_CONN,
                         "Auth failed: {e}"
                     );
-                    // Fix #3: close the connection after too many failures so
-                    // the attacker must pay TCP + TLS reconnect overhead for
-                    // every batch of MAX_AUTH_ATTEMPTS_PER_CONN guesses.
                     if conn_auth_failures >= MAX_AUTH_ATTEMPTS_PER_CONN {
                         warn!(
                             peer = %peer_addr,
@@ -236,12 +245,17 @@ pub async fn handle_connection(
                         break;
                     }
                     send(&mut writer_half, Response::err(e)).await;
-                    // Close connection on auth failure — don't allow retries
-                    // on the same connection (forces TCP reconnect, imposes
-                    // connection-setup overhead on brute-forcers).
                     break;
                 }
                 Ok(s) => {
+                    // ── Audit: auth success ───────────────────────────────
+                    if let Some(log) = &audit_log {
+                        let _ = log.append(vledger_audit::AuditEventKind::AuthEvent {
+                            caller_id: s.username.clone(),
+                            success:   true,
+                            peer_addr: peer_addr.to_string(),
+                        });
+                    }
                     let token = s.token.clone();
                     let role  = s.role.to_string();
                     session = Some(s);
@@ -289,7 +303,7 @@ pub async fn handle_connection(
         };
 
         let sess = session.as_ref().unwrap();
-        let response = execute_sql(sql, req.with_proof, &ledger, &config, sess).await;
+        let response = execute_sql(sql, req.with_proof, &ledger, &config, sess, &shipper, &audit_log, peer_addr).await;
         send(&mut writer_half, response).await;
     }
 
@@ -306,7 +320,12 @@ async fn execute_sql(
     ledger:     &Arc<RwLock<LedgerStore>>,
     config:     &Arc<ServerConfig>,
     session:    &Session,
+    shipper:    &Option<Arc<vledger_replication::WalShipper>>,
+    audit_log:  &Option<Arc<vledger_audit::AuditLog>>,
+    peer_addr:  std::net::SocketAddr,
 ) -> Response {
+    let start = std::time::Instant::now();
+
     let stmt = match parse_one(sql) {
         Ok(s)  => s,
         Err(e) => return Response::err(format!("SQL parse error: {e}")),
@@ -322,27 +341,18 @@ async fn execute_sql(
 
     let attach = config.attach_proofs || with_proof;
 
-    // Build the query timeout duration.  A value of 0 means no timeout
-    // (operator has explicitly opted out).
     let timeout_duration: Option<std::time::Duration> = if config.query_timeout_ms > 0 {
         Some(std::time::Duration::from_millis(config.query_timeout_ms))
     } else {
         None
     };
 
-    // Write plans take an exclusive write lock.
-    // Read plans take a shared read lock — multiple concurrent SELECTs
-    // proceed without blocking each other.
+    let is_post_entry  = matches!(plan, LogicalPlan::PostEntry(_));
     let is_write = matches!(
         plan,
         LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_)
     );
 
-    /// Execute `fut` with an optional wall-clock timeout.
-    ///
-    /// Returns `Err("query_timeout")` if the deadline fires before `fut`
-    /// completes.  The write/read lock is released when `fut` is dropped so
-    /// subsequent connections are not permanently blocked.
     macro_rules! run_with_timeout {
         ($fut:expr) => {{
             match timeout_duration {
@@ -367,16 +377,61 @@ async fn execute_sql(
     }
 
     if is_write {
-        let result = run_with_timeout!(async {
+        // ── Capture bytes + segment inside the lock, then release ─────────
+        let (result, entry_bytes, segment) = run_with_timeout!(async {
             let mut guard = ledger.write().await;
-            if attach {
+            let exec_result = if attach {
                 Executor::with_proofs(&mut *guard).execute(plan)
             } else {
                 Executor::new(&mut *guard).execute(plan)
-            }
+            };
+            // Capture replication data while still holding the lock.
+            let bytes   = if exec_result.is_ok() && is_post_entry {
+                guard.last_entry_bytes()
+            } else {
+                None
+            };
+            let segment = guard.active_wal_segment();
+            (exec_result, bytes, segment)
         });
+        // Write lock released here.
+
+        // ── Ship to replicas (outside the lock) ───────────────────────────
+        if let (Some(bytes), Some(ship)) = (entry_bytes.as_ref(), shipper) {
+            if let Err(e) = ship.ship(bytes, segment).await {
+                tracing::warn!(
+                    user = %session.username,
+                    "WAL ship failed — replica may lag: {e}"
+                );
+            }
+        }
+
+        let elapsed_ms = start.elapsed().as_millis() as u64;
         match result {
-            Ok(qr) => Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message),
+            Ok(qr) => {
+                // ── Audit: EntryPosted ────────────────────────────────────
+                if is_post_entry {
+                    if let Some(log) = audit_log {
+                        let _ = log.append(vledger_audit::AuditEventKind::EntryPosted {
+                            entry_id:       qr.entry_id.unwrap_or_else(uuid::Uuid::new_v4),
+                            entry_sequence: qr.entry_sequence.unwrap_or(0),
+                            domain:         qr.domain.clone().unwrap_or_default(),
+                            amount_sum:     qr.amount_sum.unwrap_or(0),
+                            caller_id:      session.username.clone(),
+                        });
+                    }
+                }
+                // ── Audit: QueryExecuted ──────────────────────────────────
+                if let Some(log) = audit_log {
+                    let _ = log.append(vledger_audit::AuditEventKind::QueryExecuted {
+                        sql:           sql.to_string(),
+                        caller_id:     session.username.clone(),
+                        rows_affected: qr.rows_affected,
+                        duration_ms:   elapsed_ms,
+                    });
+                }
+                Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message)
+            }
             Err(e) => Response::err(e.to_string()),
         }
     } else {
@@ -388,8 +443,20 @@ async fn execute_sql(
                 ReadExecutor::new(&*guard).execute(plan)
             }
         });
+        let elapsed_ms = start.elapsed().as_millis() as u64;
         match result {
-            Ok(qr) => Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message),
+            Ok(qr) => {
+                // ── Audit: QueryExecuted (reads) ──────────────────────────
+                if let Some(log) = audit_log {
+                    let _ = log.append(vledger_audit::AuditEventKind::QueryExecuted {
+                        sql:           sql.to_string(),
+                        caller_id:     session.username.clone(),
+                        rows_affected: qr.rows_affected,
+                        duration_ms:   elapsed_ms,
+                    });
+                }
+                Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message)
+            }
             Err(e) => Response::err(e.to_string()),
         }
     }

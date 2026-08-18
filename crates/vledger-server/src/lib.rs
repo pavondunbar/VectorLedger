@@ -62,6 +62,14 @@ pub struct Server {
     config:     Arc<ServerConfig>,
     ledger:     Arc<RwLock<LedgerStore>>,
     user_store: Arc<UserStore>,
+    /// Optional WAL shipper — `Some` when this node is a replication primary.
+    /// When `Some`, every committed `PostEntry` is shipped to replicas after
+    /// the write lock is released.
+    shipper:    Option<Arc<vledger_replication::WalShipper>>,
+    /// Shared audit log — opened once at startup and threaded into every
+    /// connection handler so audit events are written with a single monotonic
+    /// sequence.
+    audit_log:  Option<Arc<vledger_audit::AuditLog>>,
 }
 
 impl Server {
@@ -80,6 +88,8 @@ impl Server {
             config:     Arc::new(config),
             ledger:     Arc::new(RwLock::new(ledger)),
             user_store: Arc::new(user_store),
+            shipper:    None,
+            audit_log:  None,
         }
     }
 
@@ -93,6 +103,8 @@ impl Server {
             config:     Arc::new(config),
             ledger:     Arc::new(RwLock::new(ledger)),
             user_store: Arc::new(user_store),
+            shipper:    None,
+            audit_log:  None,
         }
     }
 
@@ -110,6 +122,29 @@ impl Server {
             config:     Arc::new(config),
             ledger,
             user_store,
+            shipper:    None,
+            audit_log:  None,
+        }
+    }
+
+    /// Create a server with a WAL shipper and audit log already wired in.
+    ///
+    /// Use this in `cmd_start` when `replication.json` is present — the
+    /// shipper will receive every committed `PostEntry` record after the
+    /// write lock is released.
+    pub fn new_shared_with_shipper(
+        config:     ServerConfig,
+        ledger:     Arc<RwLock<LedgerStore>>,
+        user_store: Arc<UserStore>,
+        shipper:    Option<Arc<vledger_replication::WalShipper>>,
+        audit_log:  Option<Arc<vledger_audit::AuditLog>>,
+    ) -> Self {
+        Self {
+            config:     Arc::new(config),
+            ledger,
+            user_store,
+            shipper,
+            audit_log,
         }
     }
 
@@ -278,6 +313,8 @@ impl Server {
             let ledger     = Arc::clone(&self.ledger);
             let config     = Arc::clone(&self.config);
             let user_store = Arc::clone(&self.user_store);
+            let shipper    = self.shipper.clone();
+            let audit_log  = self.audit_log.clone();
             let conn_token = shutdown.clone();
 
             tokio::spawn(async move {
@@ -285,7 +322,8 @@ impl Server {
                 match acceptor.accept(tcp_stream).await {
                     Ok(tls_stream) => {
                         handler::handle_connection(
-                            tls_stream, ledger, config, user_store, peer_addr, conn_token,
+                            tls_stream, ledger, config, user_store,
+                            shipper, audit_log, peer_addr, conn_token,
                         ).await;
                     }
                     Err(e) => error!(peer = %peer_addr, "TLS handshake failed: {e}"),

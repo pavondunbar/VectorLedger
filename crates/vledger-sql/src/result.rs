@@ -103,6 +103,19 @@ pub struct QueryResult {
     pub proof: Option<MerkleProof>,
     /// Human-readable status message.
     pub message: String,
+    // ── Audit metadata (populated by PostEntry only) ──────────────────────
+    /// UUID of the posted journal entry — used by the audit log.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub entry_id: Option<uuid::Uuid>,
+    /// Sequence number of the posted entry.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub entry_sequence: Option<u64>,
+    /// Domain of the posted entry.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub domain: Option<String>,
+    /// Sum of debit amounts (in minor units) for audit telemetry.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub amount_sum: Option<i64>,
 }
 
 impl QueryResult {
@@ -113,12 +126,17 @@ impl QueryResult {
             rows_affected: 0,
             proof: None,
             message: message.into(),
+            entry_id: None,
+            entry_sequence: None,
+            domain: None,
+            amount_sum: None,
         }
     }
 
     pub fn rows(columns: Vec<String>, rows: Vec<Row>, message: impl Into<String>) -> Self {
         let n = rows.len();
-        Self { columns, rows, rows_affected: n, proof: None, message: message.into() }
+        Self { columns, rows, rows_affected: n, proof: None, message: message.into(),
+               entry_id: None, entry_sequence: None, domain: None, amount_sum: None }
     }
 
     pub fn with_proof(mut self, proof: MerkleProof) -> Self {
@@ -133,6 +151,10 @@ impl QueryResult {
             rows_affected: n,
             proof: None,
             message: message.into(),
+            entry_id: None,
+            entry_sequence: None,
+            domain: None,
+            amount_sum: None,
         }
     }
 }

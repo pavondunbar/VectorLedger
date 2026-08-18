@@ -459,6 +459,11 @@ impl WalWriter {
         );
         Ok(seq)
     }
+
+    /// Returns the index of the currently active WAL segment.
+    pub fn active_segment_index(&self) -> u64 {
+        self.active_segment.index
+    }
 }
 
 // ── Group-commit background task ──────────────────────────────────────────────

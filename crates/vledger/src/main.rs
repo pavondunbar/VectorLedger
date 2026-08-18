@@ -698,20 +698,31 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     // Write a ServerStarted audit event so audit/audit.log is created on
     // first start. This satisfies CC6.2 (audit trail present) and ensures
     // the compliance check passes even before any SQL has been executed.
-    {
+    // The Arc<AuditLog> is kept alive and threaded into every connection
+    // handler so all audit events share a single monotonic sequence.
+    let audit_log: std::sync::Arc<vledger_audit::AuditLog> = {
         let audit_path = data_dir.join("audit").join("audit.log");
         match vledger_audit::AuditLog::open(&audit_path) {
             Ok(log) => {
+                let log = std::sync::Arc::new(log);
                 let _ = log.append(vledger_audit::AuditEventKind::ServerStarted {
                     bind_addr: bind.to_string(),
                     version:   env!("CARGO_PKG_VERSION").to_string(),
                 });
+                log
             }
             Err(e) => {
                 tracing::warn!("Failed to open audit log at startup: {e}");
+                // Fall back to a fresh log at a temp path so the server
+                // can still start; events will be lost but won't panic.
+                let tmp = std::env::temp_dir().join("vledger-audit-fallback.log");
+                std::sync::Arc::new(
+                    vledger_audit::AuditLog::open(&tmp)
+                        .expect("cannot open fallback audit log")
+                )
             }
         }
-    }
+    };
 
     let config = vledger_server::ServerConfig {
         bind_addr: bind.to_string(),
@@ -834,10 +845,41 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
         });
     }
 
-    vledger_server::Server::new_shared(config_with_catalog, ledger, user_store)
-        .run(shutdown)
-        .await
-        .context("Server error")
+    vledger_server::Server::new_shared_with_shipper(
+        config_with_catalog,
+        ledger,
+        user_store,
+        // Wire the WAL shipper when replication.json is present.
+        if data_dir.join("replication.json").exists() {
+            match vledger_replication::ReplicationConfig::load(data_dir) {
+                Ok(cfg) if matches!(cfg.role, vledger_replication::ReplicationRole::Primary) => {
+                    match vledger_replication::WalShipper::new(cfg, data_dir) {
+                        Ok(s) => {
+                            let s = std::sync::Arc::new(s);
+                            if let Err(e) = s.listen_and_accept().await {
+                                tracing::warn!("WAL shipper failed to bind: {e}");
+                                None
+                            } else {
+                                tracing::info!("WAL replication shipper started");
+                                Some(s)
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Could not initialise WAL shipper: {e}");
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        },
+        Some(audit_log),
+    )
+    .run(shutdown)
+    .await
+    .context("Server error")
 }
 
 // ── status ────────────────────────────────────────────────────────────────────
@@ -2024,6 +2066,11 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
     // not running in a recovery scenario), but warn loudly.
     let key_source_path = data_dir.join("keys").join("key_source.json");
     let keys_dir = data_dir.join("keys");
+
+    // Open the audit log so the BackupCreated event is recorded.
+    let audit_path = data_dir.join("audit").join("audit.log");
+    let audit_log = vledger_audit::AuditLog::open(&audit_path).ok();
+
     let manifest = if key_source_path.exists() {
         match vledger_secrets::KeySourceConfig::from_file(&key_source_path) {
             Ok(cfg) => match vledger_secrets::build_provider(&cfg, Some(&keys_dir)) {
@@ -2031,26 +2078,41 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
                     Ok(raw_key) => {
                         let master = vledger_crypto::kdf::MasterKey::from_bytes(*raw_key);
                         println!("  Encryption : AES-256-GCM (master key loaded)");
-                        backup::create_backup_encrypted(data_dir, &out_path, &master)?
+                        match &audit_log {
+                            Some(log) => backup::create_backup_encrypted_audited(data_dir, &out_path, &master, log)?,
+                            None      => backup::create_backup_encrypted(data_dir, &out_path, &master)?,
+                        }
                     }
                     Err(e) => {
                         eprintln!("⚠  Could not load master key ({e}). Backup will be UNENCRYPTED.");
-                        backup::create_backup(data_dir, &out_path)?
+                        match &audit_log {
+                            Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
+                            None      => backup::create_backup(data_dir, &out_path)?,
+                        }
                     }
                 },
                 Err(e) => {
                     eprintln!("⚠  Could not build key provider ({e}). Backup will be UNENCRYPTED.");
-                    backup::create_backup(data_dir, &out_path)?
+                    match &audit_log {
+                        Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
+                        None      => backup::create_backup(data_dir, &out_path)?,
+                    }
                 }
             },
             Err(e) => {
                 eprintln!("⚠  Could not read key_source.json ({e}). Backup will be UNENCRYPTED.");
-                backup::create_backup(data_dir, &out_path)?
+                match &audit_log {
+                    Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
+                    None      => backup::create_backup(data_dir, &out_path)?,
+                }
             }
         }
     } else {
         eprintln!("⚠  key_source.json not found. Backup will be UNENCRYPTED.");
-        backup::create_backup(data_dir, &out_path)?
+        match &audit_log {
+            Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
+            None      => backup::create_backup(data_dir, &out_path)?,
+        }
     };
 
     println!("  Archive   : {}", out_path.display());

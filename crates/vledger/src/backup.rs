@@ -199,7 +199,7 @@ pub fn create_backup(
     data_dir:   &Path,
     output_path: &Path,
 ) -> Result<BackupManifest> {
-    create_backup_inner(data_dir, output_path, None)
+    create_backup_inner(data_dir, output_path, None, None)
 }
 
 /// Like `create_backup` but accepts an explicit master key for encryption.
@@ -208,13 +208,33 @@ pub fn create_backup_encrypted(
     output_path: &Path,
     master:      &MasterKey,
 ) -> Result<BackupManifest> {
-    create_backup_inner(data_dir, output_path, Some(master))
+    create_backup_inner(data_dir, output_path, Some(master), None)
+}
+
+/// Like `create_backup_encrypted` but also writes a `BackupCreated` audit event.
+pub fn create_backup_encrypted_audited(
+    data_dir:    &Path,
+    output_path: &Path,
+    master:      &MasterKey,
+    audit_log:   &vledger_audit::AuditLog,
+) -> Result<BackupManifest> {
+    create_backup_inner(data_dir, output_path, Some(master), Some(audit_log))
+}
+
+/// Like `create_backup` but also writes a `BackupCreated` audit event.
+pub fn create_backup_audited(
+    data_dir:    &Path,
+    output_path: &Path,
+    audit_log:   &vledger_audit::AuditLog,
+) -> Result<BackupManifest> {
+    create_backup_inner(data_dir, output_path, None, Some(audit_log))
 }
 
 fn create_backup_inner(
     data_dir:    &Path,
     output_path: &Path,
     master:      Option<&MasterKey>,
+    audit_log:   Option<&vledger_audit::AuditLog>,
 ) -> Result<BackupManifest> {
     let ts_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -343,6 +363,19 @@ fn create_backup_inner(
         manifest_hash = %&manifest.manifest_hash[..16],
         "Backup complete"
     );
+
+    // ── Audit: BackupCreated ──────────────────────────────────────────────
+    if let Some(log) = audit_log {
+        let size_bytes = std::fs::metadata(output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let _ = log.append(vledger_audit::AuditEventKind::BackupCreated {
+            path:      output_path.display().to_string(),
+            size_bytes,
+            caller_id: "vledger-backup".to_string(),
+        });
+    }
+
     Ok(manifest)
 }
 

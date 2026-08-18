@@ -156,6 +156,13 @@ pub struct LedgerStore {
 
     // ── Data directory path (for WAL flusher) ─────────────────────────────
     data_dir: Option<std::path::PathBuf>,
+
+    // ── Replication support ───────────────────────────────────────────────
+    /// Bincode bytes of the most recently committed journal entry.
+    /// Set by `post_entry()` after a successful commit; read by the server
+    /// handler to ship the record to replicas after releasing the write lock.
+    /// `None` until the first entry is posted.
+    last_committed_entry_bytes: Option<Vec<u8>>,
 }
 
 impl LedgerStore {
@@ -204,6 +211,7 @@ impl LedgerStore {
             next_entry_page: 0,
             _lock: Some(lock),
             data_dir: Some(data_dir.to_path_buf()),
+            last_committed_entry_bytes: None,
         };
 
         store.replay_from_wal(&wal_dir)?;
@@ -700,6 +708,10 @@ impl LedgerStore {
         let prev_hash = Some(entry.prev_hash);
         self.persist_row(TABLE_ENTRIES, &bytes, MutationKind::Insert, prev_hash)?;
 
+        // Cache the committed bytes so the server handler can ship them to
+        // replicas after releasing the write lock.
+        self.last_committed_entry_bytes = Some(bytes);
+
         // 7. Update in-memory state
         self.last_chain_hash = entry.chain_hash;
         if let Some(ref key) = entry.idempotency_key {
@@ -1070,6 +1082,21 @@ impl LedgerStore {
     /// The server uses this to start the background page flusher task.
     pub fn page_flush_state(&self) -> std::sync::Arc<vledger_pages::PageFlushState> {
         Arc::clone(&self.page_store.flush_state)
+    }
+
+    /// Returns the active WAL segment index.
+    /// Used by the replication layer as the `segment` parameter to
+    /// `WalShipper::ship()`.
+    pub fn active_wal_segment(&self) -> u64 {
+        self.tx_manager.active_segment_index()
+    }
+
+    /// Returns the bincode bytes of the most recently committed journal entry,
+    /// or `None` if no entry has been posted yet.
+    /// Consumed by the server handler to ship the record to replicas after
+    /// the write lock is released.
+    pub fn last_entry_bytes(&self) -> Option<Vec<u8>> {
+        self.last_committed_entry_bytes.clone()
     }
 }
 

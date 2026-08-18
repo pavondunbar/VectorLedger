@@ -18,6 +18,9 @@ pub struct FourEyesQueue {
     dir:     PathBuf,
     /// In-memory index of all pending records (rebuilt from disk on open).
     pending: Mutex<HashMap<Uuid, ApprovalRecord>>,
+    /// Optional shared audit log — when `Some`, submit/approve/reject each
+    /// write a corresponding `AuditEventKind` entry.
+    audit_log: Option<std::sync::Arc<vledger_audit::AuditLog>>,
 }
 
 impl FourEyesQueue {
@@ -30,7 +33,17 @@ impl FourEyesQueue {
         Self::load_pending(&dir, &mut pending)?;
 
         info!(dir = %dir.display(), pending = pending.len(), "FourEyesQueue opened");
-        Ok(Self { dir, pending: Mutex::new(pending) })
+        Ok(Self { dir, pending: Mutex::new(pending), audit_log: None })
+    }
+
+    /// Open with a shared audit log so every approval action is recorded.
+    pub fn open_with_audit(
+        queue_dir: impl AsRef<Path>,
+        audit_log: std::sync::Arc<vledger_audit::AuditLog>,
+    ) -> Result<Self, FourEyesError> {
+        let mut q = Self::open(queue_dir)?;
+        q.audit_log = Some(audit_log);
+        Ok(q)
     }
 
     // ── Public API ────────────────────────────────────────────────────────
@@ -64,6 +77,16 @@ impl FourEyesQueue {
         {
             let mut pending = self.pending.lock().unwrap();
             pending.insert(record.id, record.clone());
+        }
+
+        // ── Audit: FourEyesSubmitted ──────────────────────────────────────
+        if let Some(log) = &self.audit_log {
+            let _ = log.append(vledger_audit::AuditEventKind::FourEyesSubmitted {
+                approval_id: record.id,
+                entry_id:    record.id, // best proxy without separate entry_id param
+                submitter:   record.submitter_id.clone(),
+                domain:      record.domain.clone(),
+            });
         }
 
         info!(id = %record.id, submitter = %record.submitter_id, "Four-eyes entry submitted");
@@ -123,6 +146,14 @@ impl FourEyesQueue {
         self.remove_pending(approval_id)?;
         self.pending.lock().unwrap().remove(&approval_id);
 
+        // ── Audit: FourEyesApproved ───────────────────────────────────────
+        if let Some(log) = &self.audit_log {
+            let _ = log.append(vledger_audit::AuditEventKind::FourEyesApproved {
+                approval_id,
+                approver: approver_id.clone(),
+            });
+        }
+
         info!(id = %approval_id, approver = %approver_id, "Four-eyes entry approved");
         Ok(record)
     }
@@ -151,6 +182,15 @@ impl FourEyesQueue {
         self.persist_decided(&record, "rejected")?;
         self.remove_pending(approval_id)?;
         self.pending.lock().unwrap().remove(&approval_id);
+
+        // ── Audit: FourEyesRejected ───────────────────────────────────────
+        if let Some(log) = &self.audit_log {
+            let _ = log.append(vledger_audit::AuditEventKind::FourEyesRejected {
+                approval_id,
+                approver: approver_id.clone(),
+                reason:   reason.clone(),
+            });
+        }
 
         info!(id = %approval_id, approver = %approver_id, reason = %reason,
               "Four-eyes entry rejected");

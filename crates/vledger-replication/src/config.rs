@@ -113,3 +113,18 @@ impl Default for ReplicationConfig {
         }
     }
 }
+
+impl ReplicationConfig {
+    /// Load from `<data_dir>/replication.json`, falling back to `Default`
+    /// if the file is absent.
+    pub fn load(data_dir: &std::path::Path) -> Result<Self, String> {
+        let path = data_dir.join("replication.json");
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read replication.json: {e}"))?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("invalid replication.json: {e}"))
+    }
+}

@@ -499,6 +499,11 @@ impl<'a> Executor<'a> {
         let posted = self.ledger.post_entry(entry)?;
         let seq    = posted.sequence;
         let id     = posted.id;
+        let domain = posted.domain.clone();
+        let amount = posted.lines.iter()
+            .filter(|l| matches!(l.dr_cr, vledger_ledger::entry::DrCr::Debit))
+            .map(|l| l.amount.as_i64())
+            .sum::<i64>();
 
         let cols = vec!["sequence".into(), "id".into(), "status".into()];
         let rows = vec![Row::new(cols.clone(), vec![
@@ -506,7 +511,12 @@ impl<'a> Executor<'a> {
             Value::Uuid(id.to_string()),
             Value::Text("Posted".into()),
         ])];
-        Ok(QueryResult::rows(cols, rows, format!("1 entry posted (sequence={seq})")))
+        let mut qr = QueryResult::rows(cols, rows, format!("1 entry posted (sequence={seq})"));
+        qr.entry_id       = Some(id);
+        qr.entry_sequence = Some(seq);
+        qr.domain         = Some(domain);
+        qr.amount_sum     = Some(amount);
+        Ok(qr)
     }
 
     // ── INSERT INTO accounts ──────────────────────────────────────────────

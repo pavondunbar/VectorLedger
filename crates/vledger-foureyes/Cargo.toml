@@ -15,6 +15,7 @@ tracing          = { workspace = true }
 chrono           = { workspace = true }
 uuid             = { workspace = true }
 hex              = { workspace = true }
+vledger-audit    = { workspace = true }
 
 [dev-dependencies]
 tempfile       = { workspace = true }
