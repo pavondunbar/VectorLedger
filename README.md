@@ -859,8 +859,15 @@ SELECT VERIFY_CHAIN();
 -- -------+-----------------
 -- OK     | 1
 
--- Query all entries
+-- Query all entries (one row per entry)
 SELECT * FROM ledger;
+
+-- Query entries in traditional accounting format (one row per debit/credit line)
+SELECT * FROM ledger_lines LIMIT 10;
+-- date       | sequence | description      | account_id | dr_cr  | amount | currency | domain
+-- -----------+----------+------------------+------------+--------+--------+----------+-------
+-- 2026-08-17 |        1 | Customer payment | <uuid>     | Debit  |   1.00 | USD      | main
+-- 2026-08-17 |        1 | Customer payment | <uuid>     | Credit |   1.00 | USD      | main
 ```
 
 ### 8. Also start the PostgreSQL wire-protocol listener
@@ -893,6 +900,155 @@ vledger start --data-dir ./vledger-data
 ```
 
 The first `start` after a fresh `init` writes a new admin credential file. Read it, change the password, and delete the file before doing anything else (see [Step 5](#5-change-the-admin-password) above).
+
+---
+
+## SQL Reference
+
+VectorLedger supports a financial-ledger SQL dialect over both the native TLS connection (port 5433) and the PostgreSQL wire protocol (port 5432). It is **PostgreSQL-compatible** — not PostgreSQL — so standard PostgreSQL system catalog queries (`\l`, `\dt`, `pg_catalog.*`) are not supported. Use the commands below for all introspection.
+
+### Tables
+
+#### `ledger` — one row per journal entry
+```sql
+SELECT * FROM ledger;
+SELECT * FROM ledger LIMIT 100;
+SELECT * FROM ledger WHERE sequence = 406340;
+SELECT * FROM ledger WHERE domain = 'main';
+SELECT * FROM ledger WHERE status = 'Posted';
+SELECT * FROM ledger WHERE external_ref = 'TXN-001';
+```
+
+Columns: `sequence`, `id`, `status`, `description`, `domain`, `effective_at`, `posted_at`, `external_ref`, `content_hash`, `chain_hash`, `lines`
+
+The `lines` column contains all debit and credit lines as a single semicolon-separated string. Use `ledger_lines` (below) for the traditional accounting view.
+
+#### `ledger_lines` — one row per debit/credit line
+```sql
+SELECT * FROM ledger_lines LIMIT 100;
+SELECT * FROM ledger_lines WHERE sequence = 406340;
+SELECT * FROM ledger_lines WHERE domain = 'main';
+SELECT * FROM ledger_lines WHERE status = 'Posted' LIMIT 50;
+```
+
+Returns each debit and credit as its own row — the standard double-entry accounting view that accountants expect:
+
+```
+date       | sequence | entry_id | description      | domain | account_id | dr_cr  | amount | currency | status
+-----------+----------+----------+------------------+--------+------------+--------+--------+----------+-------
+2026-08-17 |        1 | <uuid>   | Customer payment | main   | <uuid>     | Debit  |   1.00 | USD      | Posted
+2026-08-17 |        1 | <uuid>   | Customer payment | main   | <uuid>     | Credit |   1.00 | USD      | Posted
+```
+
+Columns: `date`, `sequence`, `entry_id`, `description`, `domain`, `account_id`, `dr_cr`, `amount`, `currency`, `status`
+
+Amounts are displayed as decimals (e.g. `1.00`) rather than minor units.
+
+#### `accounts` — chart of accounts
+```sql
+SELECT * FROM accounts;
+SELECT * FROM accounts WHERE domain = 'main';
+```
+
+Columns: `id`, `code`, `name`, `account_type`, `currency`, `status`, `domain`, `balance`
+
+---
+
+### Write Commands
+
+#### Post a journal entry
+```sql
+INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain)
+VALUES ('Wire transfer', 'CASH', 'REVENUE', 100000, 'USD', 'main');
+```
+
+- `amount` is in **minor units** (cents for USD — 100000 = $1,000.00)
+- `debit_account` and `credit_account` accept either account `code` or UUID
+- Optional fields: `external_ref`, `idempotency_key`
+- Entries are **append-only** — `UPDATE` and `DELETE` are not supported
+
+#### Create an account
+```sql
+INSERT INTO accounts (code, name, account_type, currency, domain)
+VALUES ('CASH', 'Cash - USD', 'asset', 'USD', 'main');
+```
+
+Account types: `asset`, `liability`, `equity`, `income`, `expense`
+
+#### Post a correction (reversal)
+Corrections are made by posting a new reversal entry, never by modifying the original:
+```sql
+INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain)
+VALUES ('Reversal of TXN-001', 'REVENUE', 'CASH', 100000, 'USD', 'main');
+```
+
+---
+
+### Financial Functions
+
+```sql
+-- Account balance (returns minor units)
+SELECT BALANCE('CASH');
+SELECT BALANCE('account-uuid-here');
+
+-- Verify the entire BLAKE3 hash chain
+SELECT VERIFY_CHAIN();
+
+-- Verify a range of entries
+SELECT VERIFY_CHAIN(1, 100000);
+SELECT VERIFY_CHAIN(1000000);
+
+-- Verify a single entry's content and chain hashes
+SELECT VERIFY_ENTRY(406340);
+```
+
+---
+
+### Aggregates and Window Functions
+
+```sql
+SELECT COUNT(sequence) FROM ledger;
+SELECT SUM(amount) FROM ledger GROUP BY domain;
+SELECT AVG(amount) FROM ledger;
+SELECT MIN(sequence), MAX(sequence) FROM ledger;
+SELECT ROW_NUMBER() OVER () AS rn FROM ledger;
+SELECT RANK() OVER () FROM ledger;
+```
+
+---
+
+### Joins
+
+```sql
+SELECT * FROM ledger JOIN accounts ON ledger.domain = accounts.domain;
+```
+
+Supports `INNER JOIN` and `LEFT OUTER JOIN`.
+
+---
+
+### Compatibility Queries (ORM / connection pooler health checks)
+
+```sql
+SELECT 1;
+SELECT version();
+SELECT current_user();
+SELECT current_database();
+```
+
+---
+
+### What is NOT supported
+
+| Operation | Why |
+|---|---|
+| `UPDATE` | Append-only — entries are permanent |
+| `DELETE` | Append-only — entries are permanent |
+| `CREATE TABLE` / `DROP TABLE` | Schema is fixed |
+| `pg_catalog.*` system tables | Not PostgreSQL internally |
+| `\l`, `\dt`, `\du` psql meta-commands | Rely on `pg_catalog` |
+| Multiple databases or schemas | Single-database engine |
+| Stored procedures, triggers, sequences | Not implemented |
 
 ---
 
@@ -2009,6 +2165,7 @@ SELECT VERIFY_ENTRY(10000);
 \x
 SELECT * FROM ledger ORDER BY sequence LIMIT 10;
 SELECT * FROM ledger WHERE sequence = 5000;
+SELECT * FROM ledger_lines WHERE sequence = 5000;
 ```
 
 ---
