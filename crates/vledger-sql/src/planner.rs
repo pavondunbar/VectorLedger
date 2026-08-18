@@ -610,10 +610,10 @@ fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, S
         };
         let val = expr_to_string(&right)?;
         match (table, col.as_str()) {
-            (TABLE_LEDGER,   "sequence")     => Ok(EntryFilter::BySequence(val.parse().map_err(|_| SqlError::TypeError("sequence must be integer".into()))?)),
-            (TABLE_LEDGER,   "external_ref") => Ok(EntryFilter::ByExternalRef(val)),
-            (TABLE_LEDGER,   "domain")       => Ok(EntryFilter::ByDomain(val)),
-            (TABLE_LEDGER,   "status")       => Ok(EntryFilter::ByStatus(val)),
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "sequence")     => Ok(EntryFilter::BySequence(val.parse().map_err(|_| SqlError::TypeError("sequence must be integer".into()))?)),
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "external_ref") => Ok(EntryFilter::ByExternalRef(val)),
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "domain")       => Ok(EntryFilter::ByDomain(val)),
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "status")       => Ok(EntryFilter::ByStatus(val)),
             (TABLE_ACCOUNTS, "code")         => Ok(EntryFilter::ByDomain(format!("__account_code:{val}"))),
             (TABLE_ACCOUNTS, "domain")       => Ok(EntryFilter::ByDomain(val)),
             (TABLE_ACCOUNTS, "currency")     => Ok(EntryFilter::ByDomain(format!("__account_currency:{val}"))),
