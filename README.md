@@ -124,12 +124,19 @@ Additional integrity guarantees:
 **Step 1 — On the primary node, start the WAL shipper**
 
 ```bash
-# Start the primary replication listener (binds port 5434 by default)
+# Option A — integrated mode (recommended):
+# If replication.json is present with role=primary, vledger start
+# automatically activates the WAL shipper alongside the SQL server.
+vledger start --data-dir ./vledger-data
+
+# Option B — standalone shipper only (no SQL server):
 vledger start-primary --data-dir ./vledger-data
 
-# Override the bind address
+# Override the bind address:
 vledger start-primary --data-dir ./vledger-data --bind 0.0.0.0:5434
 ```
+
+In integrated mode (`vledger start`), every committed journal entry is shipped to connected replicas automatically — no separate process required. The shipper binds the address in `replication.json` alongside the SQL server.
 
 On first run, if no `replication.json` exists in the data directory, a default config file is written and the server starts with it. Review and adjust the file before deploying to production.
 
@@ -1087,6 +1094,8 @@ vledger start-primary [OPTIONS]
 ```
 
 Reads `<data-dir>/replication.json`. If the file does not exist, a default config is written on first run. The primary auto-generates `replication_secret.hex` (mode `0o600`) on first start — copy this file to every replica before starting them.
+
+> **Tip:** In most deployments you don't need this command. If `replication.json` exists with `role=primary`, `vledger start` automatically activates the WAL shipper and ships every committed entry to replicas — no separate process required. Use `start-primary` only when you want a shipper without a SQL server.
 
 Responds to `SIGTERM` and `CTRL-C` with a graceful shutdown.
 
