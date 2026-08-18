@@ -907,16 +907,56 @@ The first `start` after a fresh `init` writes a new admin credential file. Read 
 
 VectorLedger supports a financial-ledger SQL dialect over both the native TLS connection (port 5433) and the PostgreSQL wire protocol (port 5432). It is **PostgreSQL-compatible** — not PostgreSQL — so standard PostgreSQL system catalog queries (`\l`, `\dt`, `pg_catalog.*`) are not supported. Use the commands below for all introspection.
 
+### Scan Safety — Default Row Cap
+
+Unbounded full-table scans on a large ledger load all matching rows into memory before returning, which can exhaust server RAM and cause the OS to kill the process. VectorLedger protects against this with an automatic **10,000-entry cap** on non-point-lookup queries that have no explicit `LIMIT`.
+
+| Query pattern | Behaviour |
+|---|---|
+| `SELECT * FROM ledger WHERE sequence = N` | No cap — returns exactly 1 entry |
+| `SELECT * FROM ledger WHERE external_ref = 'X'` | No cap — point lookup |
+| `SELECT * FROM ledger LIMIT 500` | Exactly 500 rows — explicit limit honoured |
+| `SELECT * FROM ledger` | Capped at 10,000 rows + pagination notice |
+| `SELECT * FROM ledger WHERE domain = 'x'` | Capped at 10,000 rows + pagination notice |
+| `SELECT * FROM ledger WHERE status = 'Posted'` | Capped at 10,000 rows + pagination notice |
+
+When the cap fires, the result message tells you what happened:
+```
+10000 rows (capped at 10000 — use LIMIT n or WHERE sequence = x to paginate)
+```
+
+**To page through a large dataset**, use sequence-based pagination:
+```sql
+-- Page 1: entries 1 – 10,000
+SELECT * FROM ledger LIMIT 10000;
+
+-- Page 2: entries 10,001 – 20,000
+SELECT * FROM ledger WHERE sequence > 10000 LIMIT 10000;
+
+-- Page 3: entries 20,001 – 30,000
+SELECT * FROM ledger WHERE sequence > 20000 LIMIT 10000;
+```
+
+The same cap and pagination pattern applies to `ledger_lines`.
+
+---
+
 ### Tables
 
 #### `ledger` — one row per journal entry
 ```sql
-SELECT * FROM ledger;
-SELECT * FROM ledger LIMIT 100;
+-- Point lookups (no cap — always safe)
 SELECT * FROM ledger WHERE sequence = 406340;
+SELECT * FROM ledger WHERE external_ref = 'TXN-001';
+
+-- Bounded queries (always safe)
+SELECT * FROM ledger LIMIT 100;
+SELECT * FROM ledger WHERE domain = 'main' LIMIT 500;
+
+-- Full scans (auto-capped at 10,000 — paginate for more)
+SELECT * FROM ledger;
 SELECT * FROM ledger WHERE domain = 'main';
 SELECT * FROM ledger WHERE status = 'Posted';
-SELECT * FROM ledger WHERE external_ref = 'TXN-001';
 ```
 
 Columns: `sequence`, `id`, `status`, `description`, `domain`, `effective_at`, `posted_at`, `external_ref`, `content_hash`, `chain_hash`, `lines`
@@ -925,10 +965,18 @@ The `lines` column contains all debit and credit lines as a single semicolon-sep
 
 #### `ledger_lines` — one row per debit/credit line
 ```sql
-SELECT * FROM ledger_lines LIMIT 100;
+-- Point lookups (no cap — always safe)
 SELECT * FROM ledger_lines WHERE sequence = 406340;
-SELECT * FROM ledger_lines WHERE domain = 'main';
+
+-- Bounded queries (always safe)
+SELECT * FROM ledger_lines LIMIT 100;
+SELECT * FROM ledger_lines WHERE domain = 'main' LIMIT 500;
 SELECT * FROM ledger_lines WHERE status = 'Posted' LIMIT 50;
+
+-- Full scans (auto-capped at 10,000 entries — paginate for more)
+SELECT * FROM ledger_lines;
+SELECT * FROM ledger_lines WHERE domain = 'main';
+SELECT * FROM ledger_lines WHERE status = 'Posted';
 ```
 
 Returns each debit and credit as its own row — the standard double-entry accounting view that accountants expect:
@@ -942,7 +990,7 @@ date       | sequence | entry_id | description      | domain | account_id | dr_c
 
 Columns: `date`, `sequence`, `entry_id`, `description`, `domain`, `account_id`, `dr_cr`, `amount`, `currency`, `status`
 
-Amounts are displayed as decimals (e.g. `1.00`) rather than minor units.
+Amounts are displayed as decimals (e.g. `1.00`) rather than minor units. The cap applies to the number of **entries** before line expansion — a cap of 10,000 entries yields up to 20,000 rows (two lines per entry) for a standard two-line transaction.
 
 #### `accounts` — chart of accounts
 ```sql
