@@ -17,8 +17,9 @@ use crate::error::SqlError;
 
 // ── Target table names ────────────────────────────────────────────────────────
 
-const TABLE_LEDGER: &str = "ledger";
-const TABLE_ACCOUNTS: &str = "accounts";
+const TABLE_LEDGER:       &str = "ledger";
+const TABLE_LEDGER_LINES: &str = "ledger_lines";
+const TABLE_ACCOUNTS:     &str = "accounts";
 
 // ── Logical Plan ─────────────────────────────────────────────────────────────
 
@@ -28,6 +29,13 @@ const TABLE_ACCOUNTS: &str = "accounts";
 pub enum LogicalPlan {
     /// SELECT * FROM ledger [WHERE …]
     ScanEntries { filter: Option<EntryFilter> },
+
+    /// SELECT * FROM ledger_lines [WHERE …]
+    ///
+    /// Returns one row per journal line instead of one row per entry.
+    /// Each row shows: sequence, date, account_id, description, domain,
+    /// dr_cr, amount, currency — the traditional accountant's ledger view.
+    ScanLedgerLines { filter: Option<EntryFilter> },
 
     /// SELECT * FROM accounts [WHERE …]
     ScanAccounts { filter: Option<EntryFilter> },
@@ -402,8 +410,9 @@ impl LogicalPlanBuilder {
             if let Expr::Value(SqlValue::Number(n, _)) = limit_expr {
                 let n: usize = n.parse().map_err(|_| SqlError::TypeError("LIMIT must be integer".into()))?;
                 return match primary_table.as_str() {
-                    TABLE_LEDGER   => Ok(LogicalPlan::ScanEntries { filter: Some(EntryFilter::Limit(n)) }),
-                    TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter: None }),
+                    TABLE_LEDGER       => Ok(LogicalPlan::ScanEntries { filter: Some(EntryFilter::Limit(n)) }),
+                    TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter: Some(EntryFilter::Limit(n)) }),
+                    TABLE_ACCOUNTS     => Ok(LogicalPlan::ScanAccounts { filter: None }),
                     t => Err(SqlError::UnknownTable(t.into())),
                 };
             }
@@ -413,8 +422,9 @@ impl LogicalPlanBuilder {
         };
 
         match primary_table.as_str() {
-            TABLE_LEDGER   => Ok(LogicalPlan::ScanEntries { filter }),
-            TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter }),
+            TABLE_LEDGER       => Ok(LogicalPlan::ScanEntries { filter }),
+            TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter }),
+            TABLE_ACCOUNTS     => Ok(LogicalPlan::ScanAccounts { filter }),
             t => Err(SqlError::UnknownTable(t.into())),
         }
     }
@@ -631,8 +641,9 @@ fn base_scan(
         None
     };
     match table {
-        TABLE_LEDGER   => Ok(LogicalPlan::ScanEntries { filter }),
-        TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter }),
+        TABLE_LEDGER       => Ok(LogicalPlan::ScanEntries { filter }),
+        TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter }),
+        TABLE_ACCOUNTS     => Ok(LogicalPlan::ScanAccounts { filter }),
         t => Err(SqlError::UnknownTable(t.into())),
     }
 }

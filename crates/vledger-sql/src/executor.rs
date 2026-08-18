@@ -46,8 +46,9 @@ impl<'a> ReadExecutor<'a> {
     /// Returns `Err(SqlError::Unsupported)` if a write plan is passed.
     pub fn execute(&self, plan: LogicalPlan) -> Result<QueryResult, SqlError> {
         match plan {
-            LogicalPlan::ScanEntries { filter }     => self.exec_scan_entries(filter),
-            LogicalPlan::ScanAccounts { filter }    => self.exec_scan_accounts(filter),
+            LogicalPlan::ScanEntries { filter }      => self.exec_scan_entries(filter),
+            LogicalPlan::ScanLedgerLines { filter }  => self.exec_scan_ledger_lines(filter),
+            LogicalPlan::ScanAccounts { filter }     => self.exec_scan_accounts(filter),
             LogicalPlan::GetBalance { account_ref } => self.exec_get_balance(&account_ref),
             LogicalPlan::VerifyChain { from_seq, to_seq } => self.exec_verify_chain(from_seq, to_seq),
             LogicalPlan::VerifyEntry { sequence }   => self.exec_verify_entry(sequence),
@@ -138,10 +139,84 @@ impl<'a> ReadExecutor<'a> {
     }
 
 
+    // ── SELECT * FROM ledger_lines — one row per journal line ────────────
+    //
+    // Traditional accountant's view: each debit and credit appears on its
+    // own row alongside the entry metadata.  Format:
+    //
+    //  date        | sequence | description | account_id | dr_cr  | amount | currency | domain
+    //  2026-08-17  | 1        | Wire xfer   | <uuid>     | Debit  | 100.00 | USD      | main
+    //  2026-08-17  | 1        | Wire xfer   | <uuid>     | Credit | 100.00 | USD      | main
+
+    fn exec_scan_ledger_lines(&self, filter: Option<EntryFilter>) -> Result<QueryResult, SqlError> {
+        let entries = self.ledger.all_entries();
+
+        let cols = vec![
+            "date".into(),
+            "sequence".into(),
+            "entry_id".into(),
+            "description".into(),
+            "domain".into(),
+            "account_id".into(),
+            "dr_cr".into(),
+            "amount".into(),
+            "currency".into(),
+            "status".into(),
+        ];
+
+        // Apply entry-level filter first, then expand each entry into its lines.
+        let filtered_entries: Vec<_> = entries.iter().filter(|e| {
+            match &filter {
+                None => true,
+                Some(EntryFilter::BySequence(seq))  => e.sequence == *seq,
+                Some(EntryFilter::ByExternalRef(r)) => e.external_ref.as_deref() == Some(r.as_str()),
+                Some(EntryFilter::ByDomain(d))      => &e.domain == d,
+                Some(EntryFilter::ByStatus(s))      => format!("{:?}", e.status).to_lowercase() == s.to_lowercase(),
+                Some(EntryFilter::Limit(_))         => true,
+            }
+        }).collect();
+
+        let filtered_entries: Vec<_> = if let Some(EntryFilter::Limit(n)) = &filter {
+            filtered_entries.into_iter().take(*n).collect()
+        } else {
+            filtered_entries
+        };
+
+        let mut rows = Vec::new();
+
+        for entry in filtered_entries {
+            let date = entry.effective_at.format("%Y-%m-%d").to_string();
+            for line in &entry.lines {
+                let dr_cr_str = match line.dr_cr {
+                    vledger_ledger::entry::DrCr::Debit  => "Debit",
+                    vledger_ledger::entry::DrCr::Credit => "Credit",
+                };
+                // Format amount as decimal with 2 decimal places.
+                // Amounts are stored in minor units (cents), so divide by 100.
+                let amount_display = format!("{:.2}", line.amount.as_i64() as f64 / 100.0);
+
+                rows.push(Row::new(cols.clone(), vec![
+                    Value::Text(date.clone()),
+                    Value::BigInt(entry.sequence as i128),
+                    Value::Uuid(entry.id.to_string()),
+                    Value::Text(entry.description.clone()),
+                    Value::Text(entry.domain.clone()),
+                    Value::Uuid(line.account_id.to_string()),
+                    Value::Text(dr_cr_str.to_string()),
+                    Value::Text(amount_display),
+                    Value::Text(line.currency_code.clone()),
+                    Value::Text(format!("{:?}", entry.status)),
+                ]));
+            }
+        }
+
+        let n = rows.len();
+        Ok(QueryResult::rows(cols, rows, format!("{n} rows")))
+    }
+
     // ── SELECT 1 / SELECT 'hello' / constant expression ──────────────────
 
-    fn exec_constant(&self, col: String, val: String) -> Result<QueryResult, SqlError> {
-        let cols = vec![col];
+    fn exec_constant(&self, col: String, val: String) -> Result<QueryResult, SqlError> {        let cols = vec![col];
         let rows = vec![Row::new(cols.clone(), vec![Value::Text(val)])];
         Ok(QueryResult::rows(cols, rows, String::new()))
     }

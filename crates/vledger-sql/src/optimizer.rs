@@ -94,6 +94,8 @@ pub fn explain(plan: &LogicalPlan, indent: usize) -> String {
     match plan {
         LogicalPlan::ScanEntries { filter } =>
             format!("{pad}ScanEntries {{ filter: {filter:?} }}"),
+        LogicalPlan::ScanLedgerLines { filter } =>
+            format!("{pad}ScanLedgerLines {{ filter: {filter:?} }}"),
         LogicalPlan::ScanAccounts { filter } =>
             format!("{pad}ScanAccounts {{ filter: {filter:?} }}"),
         LogicalPlan::GetBalance { account_ref } =>
