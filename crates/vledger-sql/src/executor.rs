@@ -65,6 +65,12 @@ impl<'a> ReadExecutor<'a> {
 
 
     // ── SELECT FROM ledger ────────────────────────────────────────────────
+    //
+    // Safety cap: unbounded full-table scans on a large ledger will exhaust
+    // server memory.  When no LIMIT or point-lookup filter is supplied the
+    // server applies DEFAULT_SCAN_LIMIT automatically and appends a notice
+    // to the result message so the caller knows to paginate.
+    const DEFAULT_SCAN_LIMIT: usize = 10_000;
 
     fn exec_scan_entries(&self, filter: Option<EntryFilter>) -> Result<QueryResult, SqlError> {
         let entries = self.ledger.all_entries();
@@ -80,6 +86,10 @@ impl<'a> ReadExecutor<'a> {
             .map(|e| e.content_hash.to_vec())
             .collect();
 
+        let is_point_lookup = matches!(filter, Some(EntryFilter::BySequence(_)) | Some(EntryFilter::ByExternalRef(_)));
+        let explicit_limit  = if let Some(EntryFilter::Limit(n)) = &filter { Some(*n) } else { None };
+
+        // Apply filter predicate.
         let filtered: Vec<(usize, _)> = entries.iter().enumerate().filter(|(_, e)| {
             match &filter {
                 None => true,
@@ -91,16 +101,23 @@ impl<'a> ReadExecutor<'a> {
             }
         }).collect();
 
-        let filtered: Vec<(usize, _)> = if let Some(EntryFilter::Limit(n)) = &filter {
-            filtered.into_iter().take(*n).collect()
+        // Determine effective row cap:
+        // - Point lookups (by sequence / external_ref): no cap needed.
+        // - Explicit LIMIT n: honour exactly.
+        // - Everything else (full scan, by domain, by status): cap at DEFAULT_SCAN_LIMIT.
+        let (capped, cap_applied) = if is_point_lookup {
+            (filtered, false)
         } else {
-            filtered
+            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let capped = filtered.into_iter().take(limit).collect::<Vec<_>>();
+            let cap_applied = explicit_limit.is_none();
+            (capped, cap_applied)
         };
 
         let mut rows = Vec::new();
         let mut leaf_indices = Vec::new();
 
-        for (idx, entry) in &filtered {
+        for (idx, entry) in &capped {
             let lines_str = entry.lines.iter().map(|l| {
                 format!("{}: {:?} {} {}", l.account_id, l.dr_cr, l.amount.as_i64(), l.currency_code)
             }).collect::<Vec<_>>().join("; ");
@@ -122,15 +139,20 @@ impl<'a> ReadExecutor<'a> {
         }
 
         let n = rows.len();
-        let mut result = QueryResult::rows(cols, rows, format!("{n} rows"));
+        let message = if cap_applied {
+            format!(
+                "{n} rows (capped at {limit} — use LIMIT n or WHERE sequence = x to paginate)",
+                limit = Self::DEFAULT_SCAN_LIMIT
+            )
+        } else {
+            format!("{n} rows")
+        };
+        let mut result = QueryResult::rows(cols, rows, message);
 
         if self.attach_proofs && !all_leaf_data.is_empty() {
             result.proof = Some(build_merkle_proof(
                 &all_leaf_data,
                 &leaf_indices,
-                // Pass a closure that signs the root using the ledger's signing key.
-                // Returns None when no signing key is configured (unsigned proofs are
-                // still cryptographically valid — they just lack the server's attestation).
                 |root: &[u8; 32]| self.ledger.sign_bytes(root),
             ));
         }
@@ -165,6 +187,11 @@ impl<'a> ReadExecutor<'a> {
         ];
 
         // Apply entry-level filter first, then expand each entry into its lines.
+        // Point lookups (by sequence) skip the cap; everything else is capped at
+        // DEFAULT_SCAN_LIMIT entries (before line expansion) to prevent OOM.
+        let is_point_lookup = matches!(filter, Some(EntryFilter::BySequence(_)) | Some(EntryFilter::ByExternalRef(_)));
+        let explicit_limit  = if let Some(EntryFilter::Limit(n)) = &filter { Some(*n) } else { None };
+
         let filtered_entries: Vec<_> = entries.iter().filter(|e| {
             match &filter {
                 None => true,
@@ -176,15 +203,18 @@ impl<'a> ReadExecutor<'a> {
             }
         }).collect();
 
-        let filtered_entries: Vec<_> = if let Some(EntryFilter::Limit(n)) = &filter {
-            filtered_entries.into_iter().take(*n).collect()
+        let (capped_entries, cap_applied) = if is_point_lookup {
+            (filtered_entries, false)
         } else {
-            filtered_entries
+            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let capped = filtered_entries.into_iter().take(limit).collect::<Vec<_>>();
+            let cap_applied = explicit_limit.is_none();
+            (capped, cap_applied)
         };
 
         let mut rows = Vec::new();
 
-        for entry in filtered_entries {
+        for entry in capped_entries {
             let date = entry.effective_at.format("%Y-%m-%d").to_string();
             for line in &entry.lines {
                 let dr_cr_str = match line.dr_cr {
@@ -211,7 +241,15 @@ impl<'a> ReadExecutor<'a> {
         }
 
         let n = rows.len();
-        Ok(QueryResult::rows(cols, rows, format!("{n} rows")))
+        let message = if cap_applied {
+            format!(
+                "{n} rows (capped at {limit} entries — use LIMIT n or WHERE sequence = x to paginate)",
+                limit = Self::DEFAULT_SCAN_LIMIT
+            )
+        } else {
+            format!("{n} rows")
+        };
+        Ok(QueryResult::rows(cols, rows, message))
     }
 
     // ── SELECT 1 / SELECT 'hello' / constant expression ──────────────────
