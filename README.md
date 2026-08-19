@@ -79,8 +79,59 @@ VectorLedger makes tampering **cryptographically detectable**:
 ### WORM Audit Log
 - Every security-relevant event is written as a signed JSON line to `audit/audit.log`
 - Each event is BLAKE3-hashed into the next, forming a tamper-evident chain independent of the ledger chain
-- Events include: `query_executed`, `entry_posted`, `auth_event`, `key_rotated`, `four_eyes_approved`, `backup_created`, and more
+- Events recorded: `server_started`, `auth_event` (every login success/failure), `query_executed` (every SQL statement), `entry_posted` (every committed transaction), `four_eyes_submitted/approved/rejected`, `backup_created`, `key_rotated`
 - Export to JSON or CSV with optional date-range filtering via `vledger audit-export`
+- **Tiered export limits** enforced by license: Free (30 days), Starter (90 days), Growth/Enterprise (unlimited)
+
+### Cryptographic Audit Package
+
+VectorLedger can generate a portable, self-contained cryptographic audit evidence package that any third party can verify independently — no database access, no server, no credentials required.
+
+Three-tier design:
+
+**Tier 1 — Commitment package** (default, fast at any scale)
+```bash
+vledger audit-package --data-dir ./vledger-data --output audit.json
+```
+Computes the Merkle root over all entries in a single O(n) pass, signs it with the database Ed25519 key, and writes a compact JSON commitment. Completes in seconds regardless of ledger size.
+
+**Tier 2 — On-demand entry proof** (prove one specific entry)
+```bash
+vledger audit-proof --data-dir ./vledger-data \
+  --commitment audit.json \
+  --sequence 406340 \
+  --output entry-proof.json
+```
+Generates a single Merkle inclusion proof proving that entry 406340 belongs to the committed root. The auditor receives a self-contained file they can verify without database access.
+
+**Tier 3 — Full export** (small ledgers only)
+```bash
+vledger audit-package --data-dir ./vledger-data --include-entries
+```
+Embeds all entries and per-entry proofs. Only practical for ledgers with fewer than ~10,000 entries.
+
+**Verification** (no database access required):
+```bash
+vledger verify-audit-package --file audit.json
+vledger verify-audit-package --file entry-proof.json
+```
+
+Output:
+```
+  [1/3] Content hash     ✓
+  [2/3] Chain hash       ✓
+  [3/3] Merkle proof     ✓
+
+✓ VERIFIED — 1 entries, all checks passed.
+  Merkle root : 804efb54ea31539a...
+```
+
+Auditors who cannot install software can use the pre-built binary from the GitHub release (no Rust toolchain required):
+```bash
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.sh | bash
+vledger verify-audit-package --file entry-proof.json
+```
 
 ### HSM Integration
 - Pluggable `Pkcs11Provider` trait with three backends:
@@ -1150,7 +1201,16 @@ vledger start [OPTIONS]
   --with-proofs            Attach Merkle proofs to every SELECT response
 ```
 
+When started with `--with-proofs`, every SELECT response in the `vledger sql` network REPL includes:
+```
+── 5 rows
+   Merkle proof : ✓ verified (5 leaves)
+   Merkle root  : 93222d5b1519715d...
+```
+
 Responds to `SIGTERM` and `CTRL-C` with a graceful drain — in-flight connections are allowed to complete before the process exits.
+
+**Integrated replication:** If `replication.json` exists in the data directory with `role=primary`, `vledger start` automatically activates the WAL shipper alongside the SQL server — no separate `start-primary` process needed.
 
 ### `vledger sql`
 
@@ -1256,6 +1316,100 @@ Export the WORM audit log.
 ```bash
 vledger audit-export --data-dir <PATH> [--format json|csv] [--output <FILE>]
                      [--from <RFC3339>] [--to <RFC3339>]
+```
+
+Audit log export is tier-gated:
+
+| Tier | Date range allowed |
+|---|---|
+| Free | Last 30 days |
+| Starter | Last 90 days |
+| Growth / Enterprise | Unlimited |
+
+### `vledger audit-package`
+
+Generate a portable, self-contained cryptographic audit evidence package.
+
+```bash
+vledger audit-package [OPTIONS]
+  --data-dir <PATH>      Data directory (default: ./vledger-data)
+  --output <FILE>        Output JSON file (default: ./vledger-audit-package-<ts>.json)
+  --include-entries      Also embed all entries and per-entry Merkle proofs
+                         (only practical for ledgers with < ~10,000 entries)
+```
+
+Default (commitment-only) mode computes the Merkle root over all entries in a single pass, signs it with the database Ed25519 key, and writes a compact JSON commitment. Completes in seconds at any scale.
+
+Example:
+```bash
+# Generate commitment (fast — any scale)
+vledger audit-package --data-dir ./vledger-data --output audit.json
+
+# Output
+#   Entries  : 1000000
+#   Root     : 804efb54ea31539a...
+#   Signed   : yes (Ed25519)
+# ✓ Audit package generated
+```
+
+### `vledger audit-proof`
+
+Generate a single-entry inclusion proof against a commitment package.
+
+```bash
+vledger audit-proof [OPTIONS]
+  --data-dir <PATH>      Data directory
+  --commitment <FILE>    Commitment package JSON (from vledger audit-package)
+  --sequence <N>         Sequence number of the entry to prove
+  --output <FILE>        Output proof JSON (default: ./vledger-entry-proof-<N>.json)
+```
+
+Example:
+```bash
+vledger audit-proof \
+  --data-dir ./vledger-data \
+  --commitment audit.json \
+  --sequence 406340 \
+  --output entry-406340-proof.json
+```
+
+Produces a self-contained JSON file the auditor can verify without any database access.
+
+### `vledger verify-audit-package`
+
+Verify an audit package or entry proof. Requires no database access, no server, and no key files.
+
+```bash
+vledger verify-audit-package --file <FILE>
+```
+
+Works on all three package types:
+
+| Package type | What is verified |
+|---|---|
+| `commitment` | Ed25519 root signature |
+| `entry_proof` | Content hash + chain hash + Merkle inclusion proof |
+| `full` | All of the above + all entries |
+
+Example output:
+```
+── VectorLedger Audit Verifier ─────────────────
+  Type     : entry_proof
+  Entries  : 1
+
+  [1/3] Content hash     ✓
+  [2/3] Chain hash       ✓
+  [3/3] Merkle proof     ✓
+
+✓ VERIFIED — 1 entries, all checks passed.
+  Merkle root : 804efb54ea31539a...
+```
+
+Auditors who cannot install software can download a pre-built binary from the GitHub release page (no Rust toolchain required):
+```bash
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.sh | bash
+vledger verify-audit-package --file entry-406340-proof.json
 ```
 
 ### `vledger compliance-report`
@@ -2246,6 +2400,7 @@ Query the production database directly from the terminal without starting psql:
 ./target/release/vledger sql --query "SELECT VERIFY_ENTRY(500000)"
 ./target/release/vledger sql --query "SELECT VERIFY_CHAIN(1000000, 1100000)"
 ./target/release/vledger sql --query "SELECT * FROM ledger LIMIT 10"
+./target/release/vledger sql --query "SELECT * FROM ledger_lines WHERE sequence = 500000"
 ```
 
 Each `vledger sql` invocation opens a fresh TLS connection, authenticates, runs the query, and closes. There is no persistent session between calls, so credentials are prompted every time by default.
@@ -2267,6 +2422,28 @@ export VLEDGER_CLI_PASSWORD=<your-password>
 ```bash
 psql "host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require"
 # Type \q to exit
+```
+
+### 10. Audit Package (cryptographic evidence export)
+
+Generate a portable audit evidence package and verify it:
+
+```bash
+# Generate commitment (fast — works at any scale)
+./target/release/vledger audit-package \
+  --data-dir ./vledger-data \
+  --output audit-commitment.json
+
+# Prove a specific entry to an auditor
+./target/release/vledger audit-proof \
+  --data-dir ./vledger-data \
+  --commitment audit-commitment.json \
+  --sequence 500000 \
+  --output entry-500000-proof.json
+
+# Verify — no database access required
+./target/release/vledger verify-audit-package --file audit-commitment.json
+./target/release/vledger verify-audit-package --file entry-500000-proof.json
 ```
 
 ---
