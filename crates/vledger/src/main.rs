@@ -1213,6 +1213,19 @@ async fn cmd_sql_network(
         }
 
         println!("── {}", resp["message"].as_str().unwrap_or(""));
+
+        // ── Merkle proof display ──────────────────────────────────────────
+        if let Some(proof) = resp.get("proof").filter(|p| !p.is_null()) {
+            let root_hex  = proof["root_hex"].as_str().unwrap_or("");
+            let leaf_count = proof["leaf_count"].as_u64().unwrap_or(0);
+            let verified   = proof["verified"].as_bool().unwrap_or(false);
+            let verified_str = if verified { "✓ verified" } else { "✗ FAILED" };
+            println!("   Merkle proof : {} ({} leaves)", verified_str, leaf_count);
+            if !root_hex.is_empty() {
+                println!("   Merkle root  : {}", &root_hex[..root_hex.len().min(32)]);
+            }
+        }
+
         println!();
     };
 
