@@ -4,6 +4,7 @@
 //! Built by VectorGuard Labs.
 
 mod backup;
+mod audit_package;
 mod key_rotation;
 mod self_test;
 
@@ -342,6 +343,30 @@ enum Commands {
     /// Show the active license tier, features, and expiry.
     #[command(name = "license")]
     License,
+    /// Generate a portable, self-contained audit evidence package (JSON).
+    ///
+    /// The package contains every journal entry, per-entry Merkle inclusion
+    /// proofs, hash-chain linkage proofs, Merkle root, and an Ed25519
+    /// signature over the root + chain tip.  Any third party can verify it
+    /// with `vledger verify-audit-package` — no database access required.
+    #[command(name = "audit-package")]
+    AuditPackage {
+        /// Output path for the JSON file.
+        /// Default: ./vledger-audit-package-<timestamp>.json
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Verify a portable audit evidence package produced by `vledger audit-package`.
+    ///
+    /// Checks all four layers independently: content hashes, hash-chain
+    /// linkage, Merkle inclusion proofs, and Ed25519 root signature.
+    /// Requires no database access, no server, and no key files.
+    #[command(name = "verify-audit-package")]
+    VerifyAuditPackage {
+        /// Path to the audit package JSON file to verify.
+        #[arg(short = 'f', long)]
+        file: PathBuf,
+    },
 }
 
 /// Sub-actions for `vledger user`.
@@ -438,8 +463,10 @@ async fn main() -> Result<()> {
         Commands::User { action, ca_cert } => cmd_user(&cli.data_dir, action, ca_cert.as_deref()).await,
         Commands::License          => cmd_license(&cli.data_dir),
         Commands::BackupVerify { from, decrypt } => cmd_backup_verify(&cli.data_dir, &from, decrypt).await,
-        Commands::StartPrimary { bind }   => cmd_start_primary(&cli.data_dir, bind.as_deref()).await,
+        Commands::StartPrimary { bind }    => cmd_start_primary(&cli.data_dir, bind.as_deref()).await,
         Commands::StartReplica { primary } => cmd_start_replica(&cli.data_dir, primary.as_deref()).await,
+        Commands::AuditPackage { output }  => cmd_audit_package(&cli.data_dir, output.as_deref()).await,
+        Commands::VerifyAuditPackage { file } => cmd_verify_audit_package(&file).await,
     }
 }
 
@@ -2842,5 +2869,87 @@ async fn cmd_start_replica(data_dir: &PathBuf, primary: Option<&str>) -> Result<
 
     recv_handle.await.ok();
     println!("✓ Replica shutdown complete.");
+    Ok(())
+}
+
+
+// ── audit-package ─────────────────────────────────────────────────────────────
+
+async fn cmd_audit_package(
+    data_dir: &PathBuf,
+    output:   Option<&std::path::Path>,
+) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!("Not initialised at: {} — run `vledger init` first.", data_dir.display());
+    }
+
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let default_name = format!("vledger-audit-package-{ts}.json");
+    let out_path = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from(&default_name));
+
+    println!("── VectorLedger Audit Package ──────────────────");
+    println!("  Data dir : {}", data_dir.display());
+
+    let report = audit_package::generate(data_dir, &out_path)
+        .context("Failed to generate audit package")?;
+
+    println!("  Entries  : {}", report.entry_count);
+    println!("  Root     : {}", &report.root_hex[..report.root_hex.len().min(32)]);
+    println!("  Chain tip: {}", &report.chain_tip_hex[..report.chain_tip_hex.len().min(32)]);
+    println!("  Signed   : {}", if report.signed { "yes (Ed25519)" } else { "no (no signing key)" });
+    println!("  Output   : {}", report.output_path.display());
+    println!("✓ Audit package generated");
+    println!();
+    println!("  Share this file with auditors. They can verify it with:");
+    println!("  vledger verify-audit-package --file {}", report.output_path.display());
+    Ok(())
+}
+
+// ── verify-audit-package ──────────────────────────────────────────────────────
+
+async fn cmd_verify_audit_package(file: &std::path::Path) -> Result<()> {
+    if !file.exists() {
+        anyhow::bail!("File not found: {}", file.display());
+    }
+
+    println!("── VectorLedger Audit Package Verifier ─────────");
+    println!("  File     : {}", file.display());
+
+    let report = audit_package::verify(file)
+        .context("Audit package verification encountered an unexpected error")?;
+
+    println!("  Format   : v{}", report.format_version);
+    println!("  Generated: {}", report.generated_at);
+    println!("  Version  : VectorLedger {}", report.vledger_version);
+    println!("  Entries  : {}", report.entry_count);
+    println!();
+
+    let mark = |ok: bool| if ok { "✓" } else { "✗" };
+
+    println!("  [1/4] Content hashes   {}", mark(report.content_ok));
+    println!("  [2/4] Chain linkage    {}", mark(report.chain_ok));
+    println!("  [3/4] Merkle proofs    {}", mark(report.merkle_ok));
+    println!("  [4/4] Root signature   {}", match report.sig_status {
+        audit_package::SigStatus::Valid   => "✓ verified",
+        audit_package::SigStatus::Invalid => "✗ FAILED",
+        audit_package::SigStatus::Absent  => "⚠  absent (package was generated without a signing key)",
+    });
+
+    println!();
+
+    if report.passed {
+        println!("✓ VERIFIED — {} entries, all checks passed.", report.entry_count);
+        println!("  Merkle root : {}", &report.root_hex[..report.root_hex.len().min(32)]);
+        println!("  Chain tip   : {}", &report.chain_tip_hex[..report.chain_tip_hex.len().min(32)]);
+    } else {
+        println!("✗ VERIFICATION FAILED — {} error(s):", report.errors.len());
+        for e in &report.errors {
+            println!("    • {e}");
+        }
+        anyhow::bail!("Audit package verification failed");
+    }
+
     Ok(())
 }
