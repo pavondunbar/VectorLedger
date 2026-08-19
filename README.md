@@ -91,7 +91,13 @@ Three-tier design:
 
 **Tier 1 — Commitment package** (default, fast at any scale)
 ```bash
-vledger audit-package --data-dir ./vledger-data --output audit.json
+vledger audit-package \
+  --data-dir ./vledger-data \
+  --tenant "Acme Financial" \
+  --description "Q3 2026 regulatory audit" \
+  --period-start 2026-07-01 \
+  --period-end 2026-09-30 \
+  --output audit-q3-2026.json
 ```
 Computes the Merkle root over all entries in a single O(n) pass, signs it with the database Ed25519 key, and writes a compact JSON commitment. Completes in seconds regardless of ledger size.
 
@@ -1332,24 +1338,45 @@ Generate a portable, self-contained cryptographic audit evidence package.
 
 ```bash
 vledger audit-package [OPTIONS]
-  --data-dir <PATH>      Data directory (default: ./vledger-data)
-  --output <FILE>        Output JSON file (default: ./vledger-audit-package-<ts>.json)
-  --include-entries      Also embed all entries and per-entry Merkle proofs
-                         (only practical for ledgers with < ~10,000 entries)
+  --data-dir <PATH>          Data directory (default: ./vledger-data)
+  --output <FILE>            Output JSON file (default: ./vledger-audit-package-<ts>.json)
+  --tenant <NAME>            Organisation name to embed in the package
+                             Example: --tenant "Acme Financial"
+  --description <TEXT>       Description of this audit package
+                             Example: --description "Q3 2026 regulatory audit"
+  --period-start <DATE>      Start of the reporting period (YYYY-MM-DD or RFC 3339)
+  --period-end <DATE>        End of the reporting period (YYYY-MM-DD or RFC 3339)
+  --include-entries          Also embed all entries and per-entry Merkle proofs
+                             (only practical for ledgers with < ~10,000 entries)
 ```
 
 Default (commitment-only) mode computes the Merkle root over all entries in a single pass, signs it with the database Ed25519 key, and writes a compact JSON commitment. Completes in seconds at any scale.
 
 Example:
 ```bash
-# Generate commitment (fast — any scale)
-vledger audit-package --data-dir ./vledger-data --output audit.json
+vledger audit-package \
+  --data-dir ./vledger-data \
+  --tenant "Acme Financial" \
+  --description "Q3 2026 regulatory audit" \
+  --period-start 2026-07-01 \
+  --period-end 2026-09-30 \
+  --output audit-q3-2026.json
+```
 
-# Output
-#   Entries  : 1000000
-#   Root     : 804efb54ea31539a...
-#   Signed   : yes (Ed25519)
-# ✓ Audit package generated
+The output JSON `meta` block includes all provided fields:
+```json
+{
+  "meta": {
+    "tenant":       "Acme Financial",
+    "description":  "Q3 2026 regulatory audit",
+    "period_start": "2026-07-01",
+    "period_end":   "2026-09-30",
+    "entry_count":  1000000,
+    "merkle_root":  "804efb54...",
+    "root_signature": "...",
+    "generated_at": "2026-09-30T23:59:59Z"
+  }
+}
 ```
 
 ### `vledger audit-proof`
