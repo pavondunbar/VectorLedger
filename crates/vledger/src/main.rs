@@ -364,6 +364,22 @@ enum Commands {
         /// Only practical for small ledgers (< ~10,000 entries).
         #[arg(long)]
         include_entries: bool,
+        /// Organisation name to embed in the package metadata.
+        /// Example: --tenant "Acme Financial"
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Human-readable description of this audit package.
+        /// Example: --description "Q3 2026 ledger audit"
+        #[arg(long)]
+        description: Option<String>,
+        /// Start of the reporting period (YYYY-MM-DD or RFC 3339).
+        /// Example: --period-start 2026-07-01
+        #[arg(long)]
+        period_start: Option<String>,
+        /// End of the reporting period (YYYY-MM-DD or RFC 3339).
+        /// Example: --period-end 2026-09-30
+        #[arg(long)]
+        period_end: Option<String>,
     },
     /// Generate a single-entry inclusion proof against a commitment package.
     ///
@@ -493,8 +509,8 @@ async fn main() -> Result<()> {
         Commands::BackupVerify { from, decrypt } => cmd_backup_verify(&cli.data_dir, &from, decrypt).await,
         Commands::StartPrimary { bind }    => cmd_start_primary(&cli.data_dir, bind.as_deref()).await,
         Commands::StartReplica { primary } => cmd_start_replica(&cli.data_dir, primary.as_deref()).await,
-        Commands::AuditPackage { output, include_entries } =>
-            cmd_audit_package(&cli.data_dir, output.as_deref(), include_entries).await,
+        Commands::AuditPackage { output, include_entries, tenant, description, period_start, period_end } =>
+            cmd_audit_package(&cli.data_dir, output.as_deref(), include_entries, tenant, description, period_start, period_end).await,
         Commands::AuditProof { commitment, sequence, output } =>
             cmd_audit_proof(&cli.data_dir, &commitment, sequence, output.as_deref()).await,
         Commands::VerifyAuditPackage { file } => cmd_verify_audit_package(&file).await,
@@ -2910,6 +2926,10 @@ async fn cmd_audit_package(
     data_dir:        &PathBuf,
     output:          Option<&std::path::Path>,
     include_entries: bool,
+    tenant:          Option<String>,
+    description:     Option<String>,
+    period_start:    Option<String>,
+    period_end:      Option<String>,
 ) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Not initialised at: {} — run `vledger init` first.", data_dir.display());
@@ -2924,13 +2944,22 @@ async fn cmd_audit_package(
     println!("── VectorLedger Audit Package ──────────────────");
     println!("  Data dir : {}", data_dir.display());
     println!("  Mode     : {}", if include_entries { "full (entries + proofs)" } else { "commitment-only (fast)" });
+    if let Some(ref t) = tenant      { println!("  Tenant   : {t}"); }
+    if let Some(ref d) = description { println!("  Desc     : {d}"); }
+    if let Some(ref s) = period_start { println!("  Period   : {} → {}", s, period_end.as_deref().unwrap_or("?")); }
 
     if include_entries {
         println!("  ⚠  --include-entries is slow for large ledgers. Use the default");
         println!("     commitment-only mode and `vledger audit-proof` for individual entries.");
     }
 
-    let opts = audit_package::GenerateOptions { include_entries };
+    let opts = audit_package::GenerateOptions {
+        include_entries,
+        tenant,
+        description,
+        period_start,
+        period_end,
+    };
     let report = audit_package::generate(data_dir, &out_path, opts)
         .context("Failed to generate audit package")?;
 

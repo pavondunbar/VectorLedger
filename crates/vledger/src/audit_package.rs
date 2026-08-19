@@ -49,11 +49,25 @@ pub struct GenerateOptions {
     /// Only practical for ledgers with < ~10,000 entries.
     /// Default: false — commitment-only package.
     pub include_entries: bool,
+    /// Name of the organisation this package covers (e.g. "Acme Financial").
+    pub tenant: Option<String>,
+    /// Human-readable description of this audit package (e.g. "Q3 2026 ledger audit").
+    pub description: Option<String>,
+    /// Start of the reporting period (RFC 3339 or YYYY-MM-DD).
+    pub period_start: Option<String>,
+    /// End of the reporting period (RFC 3339 or YYYY-MM-DD).
+    pub period_end: Option<String>,
 }
 
 impl Default for GenerateOptions {
     fn default() -> Self {
-        Self { include_entries: false }
+        Self {
+            include_entries: false,
+            tenant:          None,
+            description:     None,
+            period_start:    None,
+            period_end:      None,
+        }
     }
 }
 
@@ -121,6 +135,11 @@ pub fn generate(data_dir: &Path, output_path: &Path, opts: GenerateOptions) -> R
             "root_signature":    root_signature_hex,
             "signing_pubkey":    signing_pubkey_hex,
             "algorithm":         "BLAKE3 + Ed25519",
+            // Optional business metadata — present only when provided.
+            "tenant":       opts.tenant.as_deref().unwrap_or(""),
+            "description":  opts.description.as_deref().unwrap_or(""),
+            "period_start": opts.period_start.as_deref().unwrap_or(""),
+            "period_end":   opts.period_end.as_deref().unwrap_or(""),
         }
     });
 
