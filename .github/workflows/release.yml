@@ -135,8 +135,11 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
           # Generate workspace-level CycloneDX JSON SBOM.
-          cargo cyclonedx --format json --all --output-cdx
-          # cargo-cyclonedx writes bom.json by default; rename to versioned name.
+          # --override-filename bom writes a single "bom.json" at the workspace root.
+          # (cargo-cyclonedx omits the .cdx extension when a custom filename override
+          # is provided, per its filename() logic — so the output is bom.json, not bom.cdx.json.)
+          cargo cyclonedx --format json --all --override-filename bom
+          # Rename to the versioned release asset name.
           mv bom.json "vledger-${VERSION}-sbom.cdx.json"
           echo "SBOM=vledger-${VERSION}-sbom.cdx.json" >> "$GITHUB_ENV"
 
