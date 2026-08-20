@@ -38,3 +38,14 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+
+# License files (generated locally — never commit)
+license.json
+*-license.json
+
+# Pitch deck (confidential)
+VG-PITCH-DECK.md
+
+# Proptest regression files (generated)
+proptest-regressions/
