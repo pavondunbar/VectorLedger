@@ -460,7 +460,7 @@ main() {
 
     # ── Temporary directory ───────────────────────────────────────────────────
 
-    local tmpdir
+    local tmpdir=""
     tmpdir=$(mktemp -d)
 
     trap 'rm -rf "$tmpdir"' EXIT
