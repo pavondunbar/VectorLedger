@@ -8,7 +8,7 @@
 
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2, Params, Version, Algorithm,
+    Algorithm, Argon2, Params, Version,
 };
 
 use crate::error::CryptoError;
@@ -40,8 +40,8 @@ pub fn hash_password(password: &str) -> Result<String, CryptoError> {
 /// Returns `Ok(())` on match, `Err(CryptoError::SignatureInvalid)` on mismatch.
 /// (We reuse `SignatureInvalid` to avoid leaking whether the user exists.)
 pub fn verify_password(password: &str, hash_str: &str) -> Result<(), CryptoError> {
-    let parsed_hash = PasswordHash::new(hash_str)
-        .map_err(|e| CryptoError::PasswordHashFailed(e.to_string()))?;
+    let parsed_hash =
+        PasswordHash::new(hash_str).map_err(|e| CryptoError::PasswordHashFailed(e.to_string()))?;
 
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)

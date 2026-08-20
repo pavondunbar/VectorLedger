@@ -40,8 +40,6 @@ pub enum SqlError {
     /// Returned when the SQL text contains more levels of parenthesis nesting
     /// than `MAX_NESTING_DEPTH`.  sqlparser-rs recurses once per nesting level;
     /// without this guard ~50 levels triggers a stack overflow (SIGABRT).
-    #[error(
-        "Query rejected: nesting depth {depth} exceeds the maximum allowed depth of {limit}"
-    )]
+    #[error("Query rejected: nesting depth {depth} exceeds the maximum allowed depth of {limit}")]
     NestingTooDeep { depth: usize, limit: usize },
 }

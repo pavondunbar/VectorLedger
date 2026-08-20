@@ -36,19 +36,37 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_readers_see_consistent_snapshot() {
-        let dir   = setup_dir();
-        let path  = dir.path();
+        let dir = setup_dir();
+        let path = dir.path();
         let store = Arc::new(RwLock::new(LedgerStore::open(path).unwrap()));
 
         // Set up accounts and a few entries under a write lock.
         let (cash_id, rev_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("CASH","Cash",AccountType::Asset,"USD","test")).unwrap();
-            let r = g.create_account(Account::new("REV","Revenue",AccountType::Income,"USD","test")).unwrap();
+            let c = g
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let r = g
+                .create_account(Account::new(
+                    "REV",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
             for i in 1u64..=10 {
                 let amt = Amount::new(i as i64 * 100).unwrap();
                 let e = JournalEntryBuilder::new(format!("e{i}"), "test")
-                    .debit(c, amt, "USD").credit(r, amt, "USD").build();
+                    .debit(c, amt, "USD")
+                    .credit(r, amt, "USD")
+                    .build();
                 g.post_entry(e).unwrap();
             }
             (c, r)
@@ -70,7 +88,10 @@ mod tests {
 
         for h in handles {
             let (bal, count) = h.await.unwrap();
-            assert_eq!(bal, expected_balance, "concurrent read must see full committed balance");
+            assert_eq!(
+                bal, expected_balance,
+                "concurrent read must see full committed balance"
+            );
             assert_eq!(count, 10, "concurrent read must see all 10 entries");
         }
         let _ = (cash_id, rev_id);
@@ -80,13 +101,17 @@ mod tests {
 
     #[tokio::test]
     async fn sequential_writes_through_rwlock_are_consistent() {
-        let dir   = setup_dir();
+        let dir = setup_dir();
         let store = Arc::new(RwLock::new(LedgerStore::open(dir.path()).unwrap()));
 
         let (cash_id, rev_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("C","Cash",AccountType::Asset,"USD","test")).unwrap();
-            let r = g.create_account(Account::new("R","Rev",AccountType::Income,"USD","test")).unwrap();
+            let c = g
+                .create_account(Account::new("C", "Cash", AccountType::Asset, "USD", "test"))
+                .unwrap();
+            let r = g
+                .create_account(Account::new("R", "Rev", AccountType::Income, "USD", "test"))
+                .unwrap();
             (c, r)
         };
 
@@ -105,7 +130,9 @@ mod tests {
             });
             handles.push(h);
         }
-        for h in handles { h.await.unwrap(); }
+        for h in handles {
+            h.await.unwrap();
+        }
 
         let g = store.read().await;
         assert_eq!(g.entry_count(), 50);
@@ -117,13 +144,17 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_idempotency_key_deduplication() {
-        let dir   = setup_dir();
+        let dir = setup_dir();
         let store = Arc::new(RwLock::new(LedgerStore::open(dir.path()).unwrap()));
 
         let (cash_id, rev_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("C","Cash",AccountType::Asset,"USD","test")).unwrap();
-            let r = g.create_account(Account::new("R","Rev",AccountType::Income,"USD","test")).unwrap();
+            let c = g
+                .create_account(Account::new("C", "Cash", AccountType::Asset, "USD", "test"))
+                .unwrap();
+            let r = g
+                .create_account(Account::new("R", "Rev", AccountType::Income, "USD", "test"))
+                .unwrap();
             (c, r)
         };
 
@@ -143,10 +174,16 @@ mod tests {
             });
             handles.push(h);
         }
-        for h in handles { h.await.unwrap(); }
+        for h in handles {
+            h.await.unwrap();
+        }
 
         let g = store.read().await;
-        assert_eq!(g.entry_count(), 1, "only one entry must exist despite 10 concurrent posts");
+        assert_eq!(
+            g.entry_count(),
+            1,
+            "only one entry must exist despite 10 concurrent posts"
+        );
         assert_eq!(g.balance(&cash_id), 500);
     }
 
@@ -154,13 +191,17 @@ mod tests {
 
     #[tokio::test]
     async fn mixed_read_write_no_stale_reads() {
-        let dir   = setup_dir();
+        let dir = setup_dir();
         let store = Arc::new(RwLock::new(LedgerStore::open(dir.path()).unwrap()));
 
         let (cash_id, rev_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("C","Cash",AccountType::Asset,"USD","test")).unwrap();
-            let r = g.create_account(Account::new("R","Rev",AccountType::Income,"USD","test")).unwrap();
+            let c = g
+                .create_account(Account::new("C", "Cash", AccountType::Asset, "USD", "test"))
+                .unwrap();
+            let r = g
+                .create_account(Account::new("R", "Rev", AccountType::Income, "USD", "test"))
+                .unwrap();
             (c, r)
         };
 
@@ -184,28 +225,38 @@ mod tests {
             // Reader (runs after at least some writes)
             let sr = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
-                let g   = sr.read().await;
+                let g = sr.read().await;
                 let bal = g.balance(&cash_id);
                 // Balance must always be a multiple of 100 (atomic writes)
-                assert_eq!(bal % 100, 0, "balance must be a multiple of 100 — no partial writes visible");
+                assert_eq!(
+                    bal % 100,
+                    0,
+                    "balance must be a multiple of 100 — no partial writes visible"
+                );
                 g.verify_chain_integrity().unwrap();
             }));
         }
 
-        for h in handles { h.await.unwrap(); }
+        for h in handles {
+            h.await.unwrap();
+        }
     }
 
     // ── Test 5: write+verify_chain under concurrent writes ───────────────
 
     #[tokio::test]
     async fn hash_chain_valid_under_concurrent_writes() {
-        let dir   = setup_dir();
+        let dir = setup_dir();
         let store = Arc::new(RwLock::new(LedgerStore::open(dir.path()).unwrap()));
 
         let (cash_id, rev_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("C","Cash",AccountType::Asset,"USD","test")).unwrap();
-            let r = g.create_account(Account::new("R","Rev",AccountType::Income,"USD","test")).unwrap();
+            let c = g
+                .create_account(Account::new("C", "Cash", AccountType::Asset, "USD", "test"))
+                .unwrap();
+            let r = g
+                .create_account(Account::new("R", "Rev", AccountType::Income, "USD", "test"))
+                .unwrap();
             (c, r)
         };
 

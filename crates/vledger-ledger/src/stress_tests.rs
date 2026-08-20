@@ -13,10 +13,10 @@
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use tokio::sync::RwLock;
+    use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::sync::RwLock;
 
     use crate::{
         account::{Account, AccountType},
@@ -28,7 +28,7 @@ mod tests {
     // ── Helper ─────────────────────────────────────────────────────────────
 
     async fn run_concurrent_stress(
-        n_clients:        usize,
+        n_clients: usize,
         entries_per_client: usize,
         amount_per_entry: i64,
     ) {
@@ -41,8 +41,24 @@ mod tests {
         // Create accounts under a write lock
         let (cash_id, rev_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("CASH", "Cash", AccountType::Asset, "USD", "test")).unwrap();
-            let r = g.create_account(Account::new("REV", "Revenue", AccountType::Income, "USD", "test")).unwrap();
+            let c = g
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let r = g
+                .create_account(Account::new(
+                    "REV",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
             (c, r)
         };
 
@@ -52,7 +68,7 @@ mod tests {
         // Spawn N concurrent write tasks
         let mut handles = Vec::with_capacity(n_clients);
         for client_id in 0..n_clients {
-            let store_clone   = Arc::clone(&store);
+            let store_clone = Arc::clone(&store);
             let success_clone = Arc::clone(&success_count);
 
             let handle = tokio::spawn(async move {
@@ -81,7 +97,7 @@ mod tests {
         }
 
         let total_successful = success_count.load(Ordering::Relaxed) as usize;
-        let expected_total   = n_clients * entries_per_client;
+        let expected_total = n_clients * entries_per_client;
 
         // Verify all invariants
         let g = store.read().await;
@@ -97,7 +113,8 @@ mod tests {
 
         let expected_balance = total_successful as i128 * amount_per_entry as i128;
         assert_eq!(
-            g.balance(&cash_id), expected_balance,
+            g.balance(&cash_id),
+            expected_balance,
             "[{n_clients} clients]: balance mismatch"
         );
 
@@ -107,11 +124,14 @@ mod tests {
         for entry in entries {
             assert!(
                 entry.sequence > prev_seq,
-                "[{n_clients} clients]: sequence {} not > {prev_seq}", entry.sequence
+                "[{n_clients} clients]: sequence {} not > {prev_seq}",
+                entry.sequence
             );
             assert_eq!(
-                entry.sequence, prev_seq + 1,
-                "[{n_clients} clients]: sequence gap at {}", entry.sequence
+                entry.sequence,
+                prev_seq + 1,
+                "[{n_clients} clients]: sequence gap at {}",
+                entry.sequence
             );
             prev_seq = entry.sequence;
         }
@@ -126,7 +146,8 @@ mod tests {
         for entry in entries {
             assert!(
                 entry.verify_hashes(),
-                "[{n_clients} clients]: entry {} has invalid hashes", entry.sequence
+                "[{n_clients} clients]: entry {} has invalid hashes",
+                entry.sequence
             );
         }
     }
@@ -183,12 +204,28 @@ mod tests {
 
         let (cash_id, rev_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("CASH", "Cash", AccountType::Asset, "USD", "test")).unwrap();
-            let r = g.create_account(Account::new("REV", "Revenue", AccountType::Income, "USD", "test")).unwrap();
+            let c = g
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let r = g
+                .create_account(Account::new(
+                    "REV",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
             (c, r)
         };
 
-        let n_clients  = 500;
+        let n_clients = 500;
         let shared_key = "RACE-KEY-UNIQUE-001";
 
         let mut handles = Vec::with_capacity(n_clients);
@@ -213,14 +250,23 @@ mod tests {
         }
 
         let successes = results.iter().filter(|&&ok| ok).count();
-        assert_eq!(successes, n_clients,
-            "all {n_clients} idempotent posts must return Ok (first posts, rest are no-ops)");
+        assert_eq!(
+            successes, n_clients,
+            "all {n_clients} idempotent posts must return Ok (first posts, rest are no-ops)"
+        );
 
         let g = store.read().await;
-        assert_eq!(g.entry_count(), 1,
-            "idempotency race: exactly 1 entry must be posted, got {}", g.entry_count());
-        assert_eq!(g.balance(&cash_id), 9_999,
-            "idempotency race: balance must be 9999 (exactly one post)");
+        assert_eq!(
+            g.entry_count(),
+            1,
+            "idempotency race: exactly 1 entry must be posted, got {}",
+            g.entry_count()
+        );
+        assert_eq!(
+            g.balance(&cash_id),
+            9_999,
+            "idempotency race: balance must be 9999 (exactly one post)"
+        );
         assert!(g.verify_chain_integrity().is_ok());
     }
 
@@ -239,8 +285,24 @@ mod tests {
 
         let (cash_id, rev_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("CASH", "Cash", AccountType::Asset, "USD", "test")).unwrap();
-            let r = g.create_account(Account::new("REV", "Revenue", AccountType::Income, "USD", "test")).unwrap();
+            let c = g
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let r = g
+                .create_account(Account::new(
+                    "REV",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
             (c, r)
         };
 
@@ -253,8 +315,8 @@ mod tests {
 
         // Spawn writers
         for w in 0..n_writers {
-            let store_c  = Arc::clone(&store);
-            let count_c  = Arc::clone(&write_success);
+            let store_c = Arc::clone(&store);
+            let count_c = Arc::clone(&write_success);
             let h = tokio::spawn(async move {
                 let amt = Amount::new(amount_per_entry).unwrap();
                 let e = JournalEntryBuilder::new(format!("writer-{w}"), "stress")
@@ -275,7 +337,7 @@ mod tests {
             let store_c = Arc::clone(&store);
             let h = tokio::spawn(async move {
                 let g = store_c.read().await;
-                let balance   = g.balance(&cash_id);
+                let balance = g.balance(&cash_id);
                 let n_entries = g.entry_count() as i128;
                 // Balance must always equal n_entries * amount_per_entry
                 // (no partial entries visible)
@@ -295,7 +357,10 @@ mod tests {
         let total_written = write_success.load(Ordering::Relaxed) as usize;
         let g = store.read().await;
         assert_eq!(g.entry_count(), total_written);
-        assert_eq!(g.balance(&cash_id), total_written as i128 * amount_per_entry as i128);
+        assert_eq!(
+            g.balance(&cash_id),
+            total_written as i128 * amount_per_entry as i128
+        );
         assert!(g.verify_chain_integrity().is_ok());
     }
 
@@ -314,8 +379,24 @@ mod tests {
 
         let (cash_id, rev_id, original_entry_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("CASH", "Cash", AccountType::Asset, "USD", "test")).unwrap();
-            let r = g.create_account(Account::new("REV", "Revenue", AccountType::Income, "USD", "test")).unwrap();
+            let c = g
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let r = g
+                .create_account(Account::new(
+                    "REV",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
             let amt = Amount::new(50_000).unwrap();
             let e = JournalEntryBuilder::new("original", "test")
                 .debit(c, amt, "USD")
@@ -331,7 +412,8 @@ mod tests {
             let store_c = Arc::clone(&store);
             let h = tokio::spawn(async move {
                 let mut g = store_c.write().await;
-                g.reverse_entry(original_entry_id, "race-reversal", "test").is_ok()
+                g.reverse_entry(original_entry_id, "race-reversal", "test")
+                    .is_ok()
             });
             handles.push(h);
         }
@@ -349,7 +431,11 @@ mod tests {
 
         let g = store.read().await;
         // 2 entries: original + reversal
-        assert_eq!(g.entry_count(), 2, "must have original + exactly 1 reversal");
+        assert_eq!(
+            g.entry_count(),
+            2,
+            "must have original + exactly 1 reversal"
+        );
         assert_eq!(g.balance(&cash_id), 0, "balance must be 0 after reversal");
         assert!(g.verify_chain_integrity().is_ok());
     }
@@ -369,8 +455,24 @@ mod tests {
 
         let (cash_id, rev_id) = {
             let mut g = store.write().await;
-            let c = g.create_account(Account::new("CASH", "Cash", AccountType::Asset, "USD", "test")).unwrap();
-            let r = g.create_account(Account::new("REV", "Revenue", AccountType::Income, "USD", "test")).unwrap();
+            let c = g
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let r = g
+                .create_account(Account::new(
+                    "REV",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
             (c, r)
         };
 

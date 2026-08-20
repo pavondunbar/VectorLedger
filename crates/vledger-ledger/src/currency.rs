@@ -23,7 +23,12 @@ pub struct Currency {
 }
 
 impl Currency {
-    pub fn new(code: impl Into<String>, precision: u8, name: impl Into<String>, is_crypto: bool) -> Self {
+    pub fn new(
+        code: impl Into<String>,
+        precision: u8,
+        name: impl Into<String>,
+        is_crypto: bool,
+    ) -> Self {
         Self {
             code: code.into().to_uppercase(),
             precision,

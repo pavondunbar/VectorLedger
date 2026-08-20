@@ -23,7 +23,7 @@ mod tests {
     use crate::{FourEyesError, FourEyesQueue};
 
     fn setup_queue() -> (TempDir, FourEyesQueue) {
-        let dir   = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let queue = FourEyesQueue::open(dir.path()).unwrap();
         (dir, queue)
     }
@@ -34,7 +34,7 @@ mod tests {
     fn self_approval_rejected() {
         let (_dir, queue) = setup_queue();
         let payload = b"journal-entry-bytes";
-        let rec     = queue.submit(payload, "Sale", "test", "alice").unwrap();
+        let rec = queue.submit(payload, "Sale", "test", "alice").unwrap();
 
         let result = queue.approve(rec.id, "alice", |_| Ok(()));
         assert!(
@@ -51,7 +51,7 @@ mod tests {
     fn nonexistent_approval_id_rejected() {
         let (_dir, queue) = setup_queue();
         let fake_id = Uuid::new_v4();
-        let result  = queue.approve(fake_id, "bob", |_| Ok(()));
+        let result = queue.approve(fake_id, "bob", |_| Ok(()));
         assert!(
             matches!(result, Err(FourEyesError::NotFound(_))),
             "approving a non-existent ID must return NotFound"
@@ -63,16 +63,24 @@ mod tests {
     #[test]
     fn double_approve_is_idempotent_not_double_post() {
         let (_dir, queue) = setup_queue();
-        let payload  = b"entry";
-        let rec      = queue.submit(payload, "desc", "test", "alice").unwrap();
+        let payload = b"entry";
+        let rec = queue.submit(payload, "desc", "test", "alice").unwrap();
         let mut post_count = 0usize;
 
         // First approval
-        queue.approve(rec.id, "bob", |_| { post_count += 1; Ok(()) }).unwrap();
+        queue
+            .approve(rec.id, "bob", |_| {
+                post_count += 1;
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(post_count, 1);
 
         // Second approval attempt on the same id — must NOT call post_fn again.
-        let result = queue.approve(rec.id, "carol", |_| { post_count += 1; Ok(()) });
+        let result = queue.approve(rec.id, "carol", |_| {
+            post_count += 1;
+            Ok(())
+        });
         // Idempotency: already-approved record returns Ok but does not post again.
         assert!(result.is_ok(), "second approve must be idempotent Ok");
         assert_eq!(post_count, 1, "post_fn must be called exactly once");
@@ -85,10 +93,12 @@ mod tests {
     fn approve_after_rejection_fails() {
         let (_dir, queue) = setup_queue();
         let payload = b"transfer";
-        let rec     = queue.submit(payload, "Transfer", "test", "alice").unwrap();
+        let rec = queue.submit(payload, "Transfer", "test", "alice").unwrap();
 
         // Bob rejects.
-        queue.reject(rec.id, "bob", "Insufficient documentation").unwrap();
+        queue
+            .reject(rec.id, "bob", "Insufficient documentation")
+            .unwrap();
         assert_eq!(queue.list_pending().len(), 0);
 
         // Bob tries to approve the same (now rejected, not pending) entry.
@@ -121,9 +131,12 @@ mod tests {
     fn user_id_prefix_match_cannot_bypass_self_approval() {
         let (_dir, queue) = setup_queue();
         // "alice" vs "alice2" — different users, must not trigger self-approval
-        let rec    = queue.submit(b"entry", "desc", "test", "alice").unwrap();
+        let rec = queue.submit(b"entry", "desc", "test", "alice").unwrap();
         let result = queue.approve(rec.id, "alice2", |_| Ok(()));
-        assert!(result.is_ok(), "'alice2' is a different user from 'alice' and must be allowed to approve");
+        assert!(
+            result.is_ok(),
+            "'alice2' is a different user from 'alice' and must be allowed to approve"
+        );
     }
 
     // ── 7. LedgerStore rejects direct post to four-eyes account ───────────
@@ -132,23 +145,31 @@ mod tests {
     fn ledger_rejects_post_without_four_eyes_approval() {
         use tempfile::TempDir;
 
-        let dir  = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("wal")).unwrap();
         std::fs::create_dir_all(dir.path().join("pages")).unwrap();
 
         let mut store = vledger_ledger::LedgerStore::open(dir.path()).unwrap();
 
         let mut acct = vledger_ledger::Account::new(
-            "CTRL", "Controlled Account",
+            "CTRL",
+            "Controlled Account",
             vledger_ledger::AccountType::Asset,
-            "USD", "test"
+            "USD",
+            "test",
         );
         acct.require_four_eyes = true;
         let ctrl_id = store.create_account(acct).unwrap();
 
-        let rev_id = store.create_account(
-            vledger_ledger::Account::new("REV","Revenue",vledger_ledger::AccountType::Income,"USD","test")
-        ).unwrap();
+        let rev_id = store
+            .create_account(vledger_ledger::Account::new(
+                "REV",
+                "Revenue",
+                vledger_ledger::AccountType::Income,
+                "USD",
+                "test",
+            ))
+            .unwrap();
 
         let amt = vledger_ledger::Amount::new(1_000).unwrap();
         let entry = vledger_ledger::entry::JournalEntryBuilder::new("direct post", "test")
@@ -172,11 +193,15 @@ mod tests {
 
         // post_fn fails — this simulates a ledger validation error.
         let result = queue.approve(rec.id, "bob", |_| Err("ledger error".to_string()));
-        assert!(result.is_err(), "approval with failing post_fn must return Err");
+        assert!(
+            result.is_err(),
+            "approval with failing post_fn must return Err"
+        );
 
         // Record must still be pending (not moved to approved or deleted).
         assert_eq!(
-            queue.list_pending().len(), 1,
+            queue.list_pending().len(),
+            1,
             "record must remain pending when post_fn fails"
         );
     }
@@ -194,7 +219,11 @@ mod tests {
 
         // Approve only r1.
         queue.approve(r1.id, "bob", |_| Ok(())).unwrap();
-        assert_eq!(queue.list_pending().len(), 2, "approving r1 must not affect r2 or r3");
+        assert_eq!(
+            queue.list_pending().len(),
+            2,
+            "approving r1 must not affect r2 or r3"
+        );
 
         // r2 still pending.
         assert!(queue.get(r2.id).is_some());
@@ -206,7 +235,9 @@ mod tests {
     #[test]
     fn rejection_reason_is_accurate_and_preserved() {
         let (_dir, queue) = setup_queue();
-        let rec = queue.submit(b"entry", "Wire transfer", "test", "alice").unwrap();
+        let rec = queue
+            .submit(b"entry", "Wire transfer", "test", "alice")
+            .unwrap();
 
         let reason = "Amount exceeds daily limit for manual approval";
         let rejected = queue.reject(rec.id, "bob", reason).unwrap();
@@ -230,7 +261,7 @@ mod tests {
     fn empty_submitter_and_approver_ids_trigger_self_approval_check() {
         let (_dir, queue) = setup_queue();
         // Both empty — structurally the same user.
-        let rec    = queue.submit(b"entry", "desc", "test", "").unwrap();
+        let rec = queue.submit(b"entry", "desc", "test", "").unwrap();
         let result = queue.approve(rec.id, "", |_| Ok(()));
         assert!(
             matches!(result, Err(FourEyesError::SelfApproval(_))),
@@ -243,7 +274,7 @@ mod tests {
     #[test]
     fn unicode_user_ids_handled_correctly() {
         let (_dir, queue) = setup_queue();
-        let rec    = queue.submit(b"e", "d", "t", "用户甲").unwrap();
+        let rec = queue.submit(b"e", "d", "t", "用户甲").unwrap();
         // Self-approval
         assert!(queue.approve(rec.id, "用户甲", |_| Ok(())).is_err());
         // Different user

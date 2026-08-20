@@ -19,9 +19,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rcgen::{generate_simple_self_signed, CertifiedKey};
-use rustls::ServerConfig as RustlsConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::ServerConfig as RustlsConfig;
 use tokio_rustls::TlsAcceptor;
 use tracing::info;
 
@@ -33,12 +33,12 @@ use crate::error::ServerError;
 ///
 /// `mtls_ca_cert` — if `Some`, enable mutual TLS using this CA certificate.
 pub fn acceptor_from_files(
-    cert_path:    &Path,
-    key_path:     &Path,
+    cert_path: &Path,
+    key_path: &Path,
     mtls_ca_cert: Option<&str>,
 ) -> Result<TlsAcceptor, ServerError> {
     let certs = load_certs(cert_path)?;
-    let key   = load_key(key_path)?;
+    let key = load_key(key_path)?;
     build_acceptor(certs, key, mtls_ca_cert)
 }
 
@@ -53,14 +53,14 @@ pub fn acceptor_from_files(
 ///
 /// `mtls_ca_cert` — if `Some`, enable mutual TLS using this CA certificate.
 pub fn self_signed_acceptor(
-    hostname:     &str,
-    catalog_dir:  Option<&str>,
+    hostname: &str,
+    catalog_dir: Option<&str>,
     mtls_ca_cert: Option<&str>,
 ) -> Result<TlsAcceptor, ServerError> {
     // If catalog_dir is set, try to load existing persisted cert first.
     if let Some(dir) = catalog_dir {
         let cert_path = std::path::Path::new(dir).join("tls_cert.pem");
-        let key_path  = std::path::Path::new(dir).join("tls_key.pem");
+        let key_path = std::path::Path::new(dir).join("tls_key.pem");
 
         if cert_path.exists() && key_path.exists() {
             info!(
@@ -79,7 +79,10 @@ pub fn self_signed_acceptor(
     }
 
     // No catalog_dir — ephemeral cert (self-tests / pgwire with no data dir).
-    info!(hostname, "Generating ephemeral self-signed TLS certificate (not persisted)");
+    info!(
+        hostname,
+        "Generating ephemeral self-signed TLS certificate (not persisted)"
+    );
     let ck = generate_self_signed(hostname)?;
     let (certs, key) = certified_to_der(&ck);
     build_acceptor(certs, key, mtls_ca_cert)
@@ -87,21 +90,15 @@ pub fn self_signed_acceptor(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-fn generate_self_signed(
-    hostname: &str,
-) -> Result<CertifiedKey, ServerError> {
+fn generate_self_signed(hostname: &str) -> Result<CertifiedKey, ServerError> {
     generate_simple_self_signed(vec![hostname.to_string()])
         .map_err(|e| ServerError::Tls(e.to_string()))
 }
 
 /// Convert a `CertifiedKey` into the DER types rustls needs.
-fn certified_to_der(
-    ck: &CertifiedKey,
-) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+fn certified_to_der(ck: &CertifiedKey) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
     let cert_der = CertificateDer::from(ck.cert.der().to_vec());
-    let key_der  = PrivateKeyDer::Pkcs8(
-        PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der())
-    );
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der()));
     (vec![cert_der], key_der)
 }
 
@@ -114,15 +111,12 @@ fn certified_to_der(
 /// completely different keypair to disk, so the acceptor used cert A while
 /// the file contained cert B.  On restart the server would load cert B and
 /// any client that had pinned cert A would fail to connect.
-fn persist_cert_key(
-    dir:        &str,
-    certified:  &CertifiedKey,
-) -> Result<(), ServerError> {
+fn persist_cert_key(dir: &str, certified: &CertifiedKey) -> Result<(), ServerError> {
     let cert_pem = certified.cert.pem();
-    let key_pem  = certified.key_pair.serialize_pem();
+    let key_pem = certified.key_pair.serialize_pem();
 
     let cert_path = std::path::Path::new(dir).join("tls_cert.pem");
-    let key_path  = std::path::Path::new(dir).join("tls_key.pem");
+    let key_path = std::path::Path::new(dir).join("tls_key.pem");
 
     std::fs::write(&cert_path, &cert_pem)
         .map_err(|e| ServerError::Tls(format!("write tls_cert.pem: {e}")))?;
@@ -153,8 +147,8 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, ServerError> {
 }
 
 fn build_acceptor(
-    certs:        Vec<CertificateDer<'static>>,
-    key:          PrivateKeyDer<'static>,
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
     mtls_ca_cert: Option<&str>,
 ) -> Result<TlsAcceptor, ServerError> {
     let config = if let Some(ca_path) = mtls_ca_cert {

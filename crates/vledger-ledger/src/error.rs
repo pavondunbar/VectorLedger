@@ -22,8 +22,14 @@ pub enum LedgerError {
     #[error("Amount must be non-zero")]
     ZeroAmount,
 
-    #[error("Balance would go negative for account {account_id} (balance {balance}, debit {debit})")]
-    InsufficientFunds { account_id: String, balance: i128, debit: i128 },
+    #[error(
+        "Balance would go negative for account {account_id} (balance {balance}, debit {debit})"
+    )]
+    InsufficientFunds {
+        account_id: String,
+        balance: i128,
+        debit: i128,
+    },
 
     #[error("Account {0} not found")]
     AccountNotFound(String),
@@ -32,7 +38,10 @@ pub enum LedgerError {
     AccountClosed(String),
 
     #[error("Currency mismatch: account uses {account_currency}, entry uses {entry_currency}")]
-    CurrencyMismatch { account_currency: String, entry_currency: String },
+    CurrencyMismatch {
+        account_currency: String,
+        entry_currency: String,
+    },
 
     #[error("Idempotency key conflict: {0}")]
     IdempotencyConflict(String),
@@ -46,8 +55,14 @@ pub enum LedgerError {
     #[error("Entry {0} was already reversed by {1}")]
     AlreadyReversed(String, String),
 
-    #[error("Exposure limit exceeded for account {account_id}: limit {limit}, attempted {attempted}")]
-    ExposureLimitExceeded { account_id: String, limit: i128, attempted: i128 },
+    #[error(
+        "Exposure limit exceeded for account {account_id}: limit {limit}, attempted {attempted}"
+    )]
+    ExposureLimitExceeded {
+        account_id: String,
+        limit: i128,
+        attempted: i128,
+    },
 
     #[error("Four-eyes control violation: entry requires a second approver")]
     FourEyesRequired,

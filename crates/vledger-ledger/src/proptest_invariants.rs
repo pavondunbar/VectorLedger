@@ -52,12 +52,13 @@ mod tests {
     #[derive(Debug, Clone)]
     struct Tx {
         amount_cents: i64,
-        desc_seed:    u32,
+        desc_seed: u32,
     }
 
     fn tx_strategy() -> impl Strategy<Value = Tx> {
-        (1i64..=1_000_000i64, 0u32..=u32::MAX).prop_map(|(amount_cents, desc_seed)| {
-            Tx { amount_cents, desc_seed }
+        (1i64..=1_000_000i64, 0u32..=u32::MAX).prop_map(|(amount_cents, desc_seed)| Tx {
+            amount_cents,
+            desc_seed,
         })
     }
 

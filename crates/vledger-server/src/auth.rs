@@ -74,19 +74,29 @@ pub enum Role {
 }
 
 impl Role {
-    pub fn can_select(self)          -> bool { true }
-    pub fn can_insert_ledger(self)   -> bool { matches!(self, Role::Admin | Role::Operator) }
-    pub fn can_insert_accounts(self) -> bool { matches!(self, Role::Admin | Role::Operator) }
-    pub fn can_verify(self)          -> bool { matches!(self, Role::Admin | Role::Operator | Role::Auditor) }
-    pub fn can_admin(self)           -> bool { matches!(self, Role::Admin) }
+    pub fn can_select(self) -> bool {
+        true
+    }
+    pub fn can_insert_ledger(self) -> bool {
+        matches!(self, Role::Admin | Role::Operator)
+    }
+    pub fn can_insert_accounts(self) -> bool {
+        matches!(self, Role::Admin | Role::Operator)
+    }
+    pub fn can_verify(self) -> bool {
+        matches!(self, Role::Admin | Role::Operator | Role::Auditor)
+    }
+    pub fn can_admin(self) -> bool {
+        matches!(self, Role::Admin)
+    }
 }
 
 impl std::fmt::Display for Role {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Role::Admin    => write!(f, "admin"),
+            Role::Admin => write!(f, "admin"),
             Role::Operator => write!(f, "operator"),
-            Role::Auditor  => write!(f, "auditor"),
+            Role::Auditor => write!(f, "auditor"),
             Role::ReadOnly => write!(f, "readonly"),
         }
     }
@@ -96,9 +106,9 @@ impl std::str::FromStr for Role {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "admin"                  => Ok(Role::Admin),
-            "operator"               => Ok(Role::Operator),
-            "auditor"                => Ok(Role::Auditor),
+            "admin" => Ok(Role::Admin),
+            "operator" => Ok(Role::Operator),
+            "auditor" => Ok(Role::Auditor),
             "readonly" | "read_only" => Ok(Role::ReadOnly),
             other => Err(format!(
                 "unknown role '{other}' — use: admin, operator, auditor, readonly"
@@ -112,12 +122,12 @@ impl std::str::FromStr for Role {
 /// A single user account stored in `users.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserRecord {
-    pub username:      String,
+    pub username: String,
     /// Argon2id PHC string (`$argon2id$v=19$...`).
     pub password_hash: String,
-    pub role:          Role,
-    pub enabled:       bool,
-    pub created_at:    String,
+    pub role: Role,
+    pub enabled: bool,
+    pub created_at: String,
     /// Optional per-user domain restriction — `None` = all domains.
     pub domain_filter: Option<String>,
 }
@@ -127,9 +137,9 @@ pub struct UserRecord {
 /// An authenticated session.
 #[derive(Debug, Clone)]
 pub struct Session {
-    pub username:   String,
-    pub role:       Role,
-    pub token:      String,
+    pub username: String,
+    pub role: Role,
+    pub token: String,
     pub expires_at: SystemTime,
 }
 
@@ -145,21 +155,24 @@ impl Session {
 #[derive(Debug)]
 struct FailureState {
     /// Number of consecutive failures since last success.
-    count:       u32,
+    count: u32,
     /// Wall-clock time of the first failure in the current run.
-    locked_at:   Option<Instant>,
+    locked_at: Option<Instant>,
 }
 
 impl FailureState {
     fn new() -> Self {
-        Self { count: 0, locked_at: None }
+        Self {
+            count: 0,
+            locked_at: None,
+        }
     }
 
     /// Returns true if this account is currently locked out.
     fn is_locked(&self) -> bool {
         match self.locked_at {
             Some(t) => t.elapsed() < LOCKOUT_DURATION,
-            None    => false,
+            None => false,
         }
     }
 
@@ -173,7 +186,7 @@ impl FailureState {
 
     /// Reset on successful authentication.
     fn reset(&mut self) {
-        self.count     = 0;
+        self.count = 0;
         self.locked_at = None;
     }
 
@@ -181,8 +194,7 @@ impl FailureState {
     /// Doubles with each attempt, capped at MAX_FAIL_DELAY_MS.
     fn delay_ms(&self) -> u64 {
         // 2^attempts, saturating, capped at MAX_FAIL_DELAY_MS
-        let exp = BASE_FAIL_DELAY_MS
-            .saturating_mul(1u64 << self.count.min(10) as u64);
+        let exp = BASE_FAIL_DELAY_MS.saturating_mul(1u64 << self.count.min(10) as u64);
         exp.min(MAX_FAIL_DELAY_MS)
     }
 }
@@ -209,14 +221,14 @@ impl FailureState {
 /// `tokio::task::block_in_place` so it remains callable from the blocking
 /// thread that handles the Argon2 computation.
 pub struct UserStore {
-    users_path:    PathBuf,
-    users:         RwLock<HashMap<String, UserRecord>>,
+    users_path: PathBuf,
+    users: RwLock<HashMap<String, UserRecord>>,
     /// Fix #4: tokio-aware RwLock — async callers yield instead of blocking
     /// the thread-pool thread during the eviction scan.
-    sessions:      tokio::sync::RwLock<HashMap<String, Session>>,
+    sessions: tokio::sync::RwLock<HashMap<String, Session>>,
     server_secret: [u8; 32],
-    session_ttl:   Duration,
-    failures:      RwLock<HashMap<String, FailureState>>,
+    session_ttl: Duration,
+    failures: RwLock<HashMap<String, FailureState>>,
 }
 
 impl UserStore {
@@ -225,23 +237,22 @@ impl UserStore {
     /// If the file doesn't exist, a default `admin` account is created with a
     /// random 24-character password printed to stdout once.
     pub fn open(catalog_dir: &Path) -> Result<Self, ServerError> {
-        let users_path  = catalog_dir.join("users.json");
+        let users_path = catalog_dir.join("users.json");
         let secret_path = catalog_dir.join(".server_secret");
 
         // ── Fix #3: server secret with mode 0o600 ─────────────────────────
         let server_secret: [u8; 32] = if secret_path.exists() {
-            let hex = std::fs::read_to_string(&secret_path)
-                .map_err(ServerError::Io)?;
+            let hex = std::fs::read_to_string(&secret_path).map_err(ServerError::Io)?;
             let bytes = hex::decode(hex.trim())
                 .map_err(|e| ServerError::Auth(format!("corrupt server secret: {e}")))?;
-            bytes.try_into()
+            bytes
+                .try_into()
                 .map_err(|_| ServerError::Auth("corrupt server secret length".into()))?
         } else {
             use rand::RngCore;
             let mut secret = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut secret);
-            std::fs::write(&secret_path, hex::encode(secret))
-                .map_err(ServerError::Io)?;
+            std::fs::write(&secret_path, hex::encode(secret)).map_err(ServerError::Io)?;
             // Fix #3: restrict to owner read/write only.
             set_file_mode_600(&secret_path)?;
             secret
@@ -264,14 +275,13 @@ impl UserStore {
                 .take(24)
                 .map(char::from)
                 .collect();
-            let hash = hash_password(&initial_password)
-                .map_err(ServerError::Auth)?;
+            let hash = hash_password(&initial_password).map_err(ServerError::Auth)?;
             let admin = UserRecord {
-                username:      "admin".into(),
+                username: "admin".into(),
                 password_hash: hash,
-                role:          Role::Admin,
-                enabled:       true,
-                created_at:    chrono::Utc::now().to_rfc3339(),
+                role: Role::Admin,
+                enabled: true,
+                created_at: chrono::Utc::now().to_rfc3339(),
                 domain_filter: None,
             };
 
@@ -298,8 +308,7 @@ impl UserStore {
                 initial_password,
                 cred_path.display(),
             );
-            std::fs::write(&cred_path, &cred_content)
-                .map_err(ServerError::Io)?;
+            std::fs::write(&cred_path, &cred_content).map_err(ServerError::Io)?;
             // Restrict to owner-read/write only immediately after creation.
             set_file_mode_600(&cred_path)?;
 
@@ -324,11 +333,11 @@ impl UserStore {
 
         Ok(Self {
             users_path,
-            users:         RwLock::new(users),
-            sessions:      tokio::sync::RwLock::new(HashMap::new()),
+            users: RwLock::new(users),
+            sessions: tokio::sync::RwLock::new(HashMap::new()),
             server_secret,
-            session_ttl:   Duration::from_secs(3600),
-            failures:      RwLock::new(HashMap::new()),
+            session_ttl: Duration::from_secs(3600),
+            failures: RwLock::new(HashMap::new()),
         })
     }
 
@@ -348,14 +357,15 @@ impl UserStore {
                 if state.is_locked() {
                     warn!(username, "Account locked due to too many failed attempts");
                     return Err(ServerError::Auth(
-                        "account temporarily locked — too many failed attempts".into()
+                        "account temporarily locked — too many failed attempts".into(),
                     ));
                 }
             }
         }
 
         let users = self.users.read().unwrap_or_else(|p| p.into_inner());
-        let user  = users.get(username)
+        let user = users
+            .get(username)
             .ok_or_else(|| ServerError::Auth("invalid credentials".into()));
 
         // Shadow the result so we can apply the delay before returning.
@@ -382,12 +392,12 @@ impl UserStore {
                     }
                     Ok(()) => {
                         // Success — reset failure counter.
-                        let token   = self.mint_token(username, user.role);
+                        let token = self.mint_token(username, user.role);
                         let expires = SystemTime::now() + self.session_ttl;
                         let session = Session {
-                            username:   username.to_string(),
-                            role:       user.role,
-                            token:      token.clone(),
+                            username: username.to_string(),
+                            role: user.role,
+                            token: token.clone(),
                             expires_at: expires,
                         };
 
@@ -403,8 +413,8 @@ impl UserStore {
                         drop(users);
                         if needs_rehash(&stored_hash) {
                             if let Ok(new_hash) = hash_password(password) {
-                                let mut users = self.users.write()
-                                    .unwrap_or_else(|p| p.into_inner());
+                                let mut users =
+                                    self.users.write().unwrap_or_else(|p| p.into_inner());
                                 if let Some(record) = users.get_mut(username) {
                                     record.password_hash = new_hash;
                                     tracing::info!(
@@ -418,15 +428,19 @@ impl UserStore {
                         }
 
                         {
-                            let mut failures = self.failures.write().unwrap_or_else(|p| p.into_inner());
-                            failures.entry(username.to_string()).or_insert_with(FailureState::new).reset();
+                            let mut failures =
+                                self.failures.write().unwrap_or_else(|p| p.into_inner());
+                            failures
+                                .entry(username.to_string())
+                                .or_insert_with(FailureState::new)
+                                .reset();
                         }
                         // Fix #4: insert_session_bounded is async (tokio::sync::RwLock).
                         // authenticate is called from a blocking thread (it calls
                         // thread::sleep), so we bridge back into async via block_in_place.
                         tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(
-                                self.insert_session_bounded(token.clone(), session.clone())
+                                self.insert_session_bounded(token.clone(), session.clone()),
                             )
                         });
                         info!(username, role = %session.role, "Authenticated");
@@ -443,7 +457,9 @@ impl UserStore {
     fn record_failure(&self, username: &str) {
         let delay_ms = {
             let mut failures = self.failures.write().unwrap_or_else(|p| p.into_inner());
-            let state = failures.entry(username.to_string()).or_insert_with(FailureState::new);
+            let state = failures
+                .entry(username.to_string())
+                .or_insert_with(FailureState::new);
             let d = state.delay_ms();
             state.record_failure();
             warn!(username, attempts = state.count, "Authentication failure");
@@ -463,7 +479,8 @@ impl UserStore {
             sessions.retain(|_, s| !s.is_expired());
         }
         let sessions = self.sessions.read().await;
-        sessions.get(token)
+        sessions
+            .get(token)
             .filter(|s| !s.is_expired())
             .cloned()
             .ok_or_else(|| ServerError::Auth("invalid or expired session token".into()))
@@ -476,22 +493,24 @@ impl UserStore {
         &self,
         username: &str,
         password: &str,
-        role:     Role,
-        domain:   Option<String>,
+        role: Role,
+        domain: Option<String>,
     ) -> Result<(), ServerError> {
         let hash = hash_password(password).map_err(ServerError::Auth)?;
         let record = UserRecord {
-            username:      username.to_string(),
+            username: username.to_string(),
             password_hash: hash,
             role,
-            enabled:       true,
-            created_at:    chrono::Utc::now().to_rfc3339(),
+            enabled: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
             domain_filter: domain,
         };
         {
             let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
             if users.contains_key(username) {
-                return Err(ServerError::Auth(format!("user '{username}' already exists")));
+                return Err(ServerError::Auth(format!(
+                    "user '{username}' already exists"
+                )));
             }
             users.insert(username.to_string(), record);
         }
@@ -507,7 +526,8 @@ impl UserStore {
         let hash = hash_password(new_password).map_err(ServerError::Auth)?;
         {
             let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
-            let user = users.get_mut(username)
+            let user = users
+                .get_mut(username)
                 .ok_or_else(|| ServerError::Auth(format!("user '{username}' not found")))?;
             user.password_hash = hash;
         }
@@ -527,7 +547,8 @@ impl UserStore {
     pub fn set_enabled(&self, username: &str, enabled: bool) -> Result<(), ServerError> {
         {
             let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
-            let user = users.get_mut(username)
+            let user = users
+                .get_mut(username)
                 .ok_or_else(|| ServerError::Auth(format!("user '{username}' not found")))?;
             user.enabled = enabled;
         }
@@ -543,7 +564,10 @@ impl UserStore {
 
     /// List all users (without password hashes).
     pub fn list_users(&self) -> Vec<(String, Role, bool)> {
-        self.users.read().unwrap_or_else(|p| p.into_inner()).values()
+        self.users
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
             .map(|u| (u.username.clone(), u.role, u.enabled))
             .collect()
     }
@@ -553,12 +577,18 @@ impl UserStore {
     /// All active sessions for `username` are immediately revoked before the
     /// account record is removed, so no in-flight token survives deletion.
     pub fn delete_user(&self, username: &str) -> Result<(), ServerError> {
-        self.users.write().unwrap_or_else(|p| p.into_inner()).remove(username)
+        self.users
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(username)
             .ok_or_else(|| ServerError::Auth(format!("user '{username}' not found")))?;
         // Task #4: purge sessions before persisting the deletion.
         let revoked = self.revoke_sessions_for(username);
         if revoked > 0 {
-            warn!(username, revoked, "Sessions revoked due to account deletion");
+            warn!(
+                username,
+                revoked, "Sessions revoked due to account deletion"
+            );
         }
         self.persist()
     }
@@ -617,11 +647,15 @@ impl UserStore {
     pub async fn purge_expired_sessions(&self) -> usize {
         let mut sessions = self.sessions.write().await;
         let before = sessions.len();
-        let now    = SystemTime::now();
+        let now = SystemTime::now();
         sessions.retain(|_, s| s.expires_at > now);
         let evicted = before - sessions.len();
         if evicted > 0 {
-            tracing::debug!(evicted, remaining = sessions.len(), "Purged expired sessions");
+            tracing::debug!(
+                evicted,
+                remaining = sessions.len(),
+                "Purged expired sessions"
+            );
         }
         evicted
     }
@@ -648,8 +682,8 @@ impl UserStore {
     /// Fix #6: always restores mode 0o600 after writing.
     fn persist(&self) -> Result<(), ServerError> {
         let users = self.users.read().unwrap_or_else(|p| p.into_inner());
-        let json  = serde_json::to_string_pretty(&*users)
-            .map_err(|e| ServerError::Auth(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(&*users).map_err(|e| ServerError::Auth(e.to_string()))?;
         std::fs::write(&self.users_path, json).map_err(ServerError::Io)?;
         set_file_mode_600(&self.users_path)?;
         Ok(())
@@ -696,8 +730,7 @@ fn needs_rehash(phc: &str) -> bool {
 /// are defined in exactly one place and cannot drift between the crypto crate
 /// and the server.
 pub fn hash_password(password: &str) -> Result<String, String> {
-    vledger_crypto::password::hash_password(password)
-        .map_err(|e| e.to_string())
+    vledger_crypto::password::hash_password(password).map_err(|e| e.to_string())
 }
 
 /// Verify a password against an Argon2id PHC string.
@@ -706,8 +739,7 @@ pub fn hash_password(password: &str) -> Result<String, String> {
 /// embeds the algorithm parameters used at hash time, so verification always
 /// uses the correct parameters regardless of what the current defaults are.
 pub fn verify_password(password: &str, hash: &str) -> Result<(), ()> {
-    vledger_crypto::password::verify_password(password, hash)
-        .map_err(|_| ())
+    vledger_crypto::password::verify_password(password, hash).map_err(|_| ())
 }
 
 // ── Privilege check (Fix #7 — native server handler) ─────────────────────────
@@ -718,20 +750,30 @@ pub fn verify_password(password: &str, hash: &str) -> Result<(), ()> {
 /// text — immune to whitespace/comment bypass.
 pub fn check_plan_privilege(
     session: &Session,
-    plan:    &vledger_sql::planner::LogicalPlan,
+    plan: &vledger_sql::planner::LogicalPlan,
 ) -> Result<(), String> {
     use vledger_sql::planner::LogicalPlan::*;
     match plan {
-        PostEntry(_) if !session.role.can_insert_ledger() =>
-            Err(format!("role '{}' cannot post journal entries", session.role)),
-        CreateAccount(_) if !session.role.can_insert_accounts() =>
-            Err(format!("role '{}' cannot create accounts", session.role)),
-        VerifyChain if !session.role.can_verify() =>
-            Err(format!("role '{}' cannot run VERIFY_CHAIN", session.role)),
-        ScanEntries { .. } | ScanAccounts { .. } | GetBalance { .. }
-        | Join(_) | Aggregate(_) | Window(_)
+        PostEntry(_) if !session.role.can_insert_ledger() => Err(format!(
+            "role '{}' cannot post journal entries",
+            session.role
+        )),
+        CreateAccount(_) if !session.role.can_insert_accounts() => {
+            Err(format!("role '{}' cannot create accounts", session.role))
+        }
+        VerifyChain if !session.role.can_verify() => {
+            Err(format!("role '{}' cannot run VERIFY_CHAIN", session.role))
+        }
+        ScanEntries { .. }
+        | ScanAccounts { .. }
+        | GetBalance { .. }
+        | Join(_)
+        | Aggregate(_)
+        | Window(_)
             if !session.role.can_select() =>
-            Err(format!("role '{}' cannot execute SELECT", session.role)),
+        {
+            Err(format!("role '{}' cannot execute SELECT", session.role))
+        }
         _ => Ok(()),
     }
 }
@@ -752,19 +794,33 @@ pub fn check_privilege(session: &Session, plan_sql: &str) -> Result<(), String> 
     }
 
     // Fallback: original string check (used only if parsing fails).
-    let upper           = plan_sql.trim().to_uppercase();
-    let is_insert       = upper.starts_with("INSERT");
+    let upper = plan_sql.trim().to_uppercase();
+    let is_insert = upper.starts_with("INSERT");
     let is_insert_ledger = is_insert && upper.contains("INTO LEDGER");
-    let is_insert_acct   = is_insert && upper.contains("INTO ACCOUNTS");
-    let is_verify        = upper.contains("VERIFY_CHAIN");
-    let is_admin_op      = upper.starts_with("CREATE USER")
+    let is_insert_acct = is_insert && upper.contains("INTO ACCOUNTS");
+    let is_verify = upper.contains("VERIFY_CHAIN");
+    let is_admin_op = upper.starts_with("CREATE USER")
         || upper.starts_with("DROP USER")
         || upper.starts_with("ALTER USER");
 
-    if is_admin_op       && !session.role.can_admin()           { return Err(format!("role '{}' cannot perform admin operations", session.role)); }
-    if is_insert_ledger  && !session.role.can_insert_ledger()   { return Err(format!("role '{}' cannot post journal entries", session.role)); }
-    if is_insert_acct    && !session.role.can_insert_accounts() { return Err(format!("role '{}' cannot create accounts", session.role)); }
-    if is_verify         && !session.role.can_verify()          { return Err(format!("role '{}' cannot run VERIFY_CHAIN", session.role)); }
+    if is_admin_op && !session.role.can_admin() {
+        return Err(format!(
+            "role '{}' cannot perform admin operations",
+            session.role
+        ));
+    }
+    if is_insert_ledger && !session.role.can_insert_ledger() {
+        return Err(format!(
+            "role '{}' cannot post journal entries",
+            session.role
+        ));
+    }
+    if is_insert_acct && !session.role.can_insert_accounts() {
+        return Err(format!("role '{}' cannot create accounts", session.role));
+    }
+    if is_verify && !session.role.can_verify() {
+        return Err(format!("role '{}' cannot run VERIFY_CHAIN", session.role));
+    }
 
     Ok(())
 }

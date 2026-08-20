@@ -36,9 +36,9 @@ use anyhow::Result;
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Barrier;
+use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::pki_types::ServerName;
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -107,21 +107,30 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyCert 
         _server_name: &ServerName,
         _ocsp_response: &[u8],
         _now: tokio_rustls::rustls::pki_types::UnixTime,
-    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error> {
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
+    {
         Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
     }
     fn verify_tls12_signature(
-        &self, _: &[u8],
+        &self,
+        _: &[u8],
         _: &tokio_rustls::rustls::pki_types::CertificateDer,
         _: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
     fn verify_tls13_signature(
-        &self, _: &[u8],
+        &self,
+        _: &[u8],
         _: &tokio_rustls::rustls::pki_types::CertificateDer,
         _: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
     fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
@@ -143,45 +152,58 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyCert 
 
 struct ClientResult {
     latencies_us: Vec<u64>,
-    errors:       usize,
+    errors: usize,
 }
 
 // ── Single-client worker ──────────────────────────────────────────────────────
 
 async fn run_client(
-    cli:       Arc<Cli>,
-    tls_cfg:   Arc<ClientConfig>,
-    barrier:   Arc<Barrier>,
+    cli: Arc<Cli>,
+    tls_cfg: Arc<ClientConfig>,
+    barrier: Arc<Barrier>,
     client_id: usize,
 ) -> ClientResult {
     let mut latencies = Vec::with_capacity(cli.transactions);
-    let mut errors    = 0usize;
+    let mut errors = 0usize;
 
-    let addr      = &cli.server;
+    let addr = &cli.server;
     let host_part = addr.split(':').next().unwrap_or("127.0.0.1");
-    let port: u16 = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
+    let port: u16 = addr
+        .split(':')
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(5433);
 
     let tcp = match tokio::net::TcpStream::connect((host_part, port)).await {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => {
             eprintln!("[client {client_id}] TCP connect failed: {e}");
-            return ClientResult { latencies_us: vec![], errors: cli.transactions };
+            return ClientResult {
+                latencies_us: vec![],
+                errors: cli.transactions,
+            };
         }
     };
 
-    let connector   = TlsConnector::from(tls_cfg);
+    let connector = TlsConnector::from(tls_cfg);
     let server_name = match ServerName::try_from(host_part.to_string()) {
-        Ok(n)  => n,
+        Ok(n) => n,
         Err(e) => {
             eprintln!("[client {client_id}] Invalid server name: {e}");
-            return ClientResult { latencies_us: vec![], errors: cli.transactions };
+            return ClientResult {
+                latencies_us: vec![],
+                errors: cli.transactions,
+            };
         }
     };
     let tls = match connector.connect(server_name, tcp).await {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => {
             eprintln!("[client {client_id}] TLS handshake failed: {e}");
-            return ClientResult { latencies_us: vec![], errors: cli.transactions };
+            return ClientResult {
+                latencies_us: vec![],
+                errors: cli.transactions,
+            };
         }
     };
 
@@ -192,24 +214,41 @@ async fn run_client(
     let auth = serde_json::json!({
         "auth": { "username": cli.username, "password": cli.password }
     });
-    if write_half.write_all(format!("{auth}\n").as_bytes()).await.is_err() {
-        return ClientResult { latencies_us: vec![], errors: cli.transactions };
+    if write_half
+        .write_all(format!("{auth}\n").as_bytes())
+        .await
+        .is_err()
+    {
+        return ClientResult {
+            latencies_us: vec![],
+            errors: cli.transactions,
+        };
     }
     let auth_line = match lines.next_line().await {
         Ok(Some(l)) => l,
-        _ => return ClientResult { latencies_us: vec![], errors: cli.transactions },
+        _ => {
+            return ClientResult {
+                latencies_us: vec![],
+                errors: cli.transactions,
+            }
+        }
     };
     let auth_resp: serde_json::Value = serde_json::from_str(&auth_line).unwrap_or_default();
     if !auth_resp["ok"].as_bool().unwrap_or(false) {
-        eprintln!("[client {client_id}] Auth failed: {}",
-            auth_resp["error"].as_str().unwrap_or("unknown"));
-        return ClientResult { latencies_us: vec![], errors: cli.transactions };
+        eprintln!(
+            "[client {client_id}] Auth failed: {}",
+            auth_resp["error"].as_str().unwrap_or("unknown")
+        );
+        return ClientResult {
+            latencies_us: vec![],
+            errors: cli.transactions,
+        };
     }
     let token = auth_resp["token"].as_str().unwrap_or("").to_string();
 
     // Ensure benchmark accounts exist for this client
     for (code, acct_type) in [
-        (format!("bench-debit-{client_id}"),  "asset"),
+        (format!("bench-debit-{client_id}"), "asset"),
         (format!("bench-credit-{client_id}"), "income"),
     ] {
         let sql = format!(
@@ -238,13 +277,20 @@ async fn run_client(
         let req = serde_json::json!({ "sql": sql, "token": token });
 
         let t0 = Instant::now();
-        if write_half.write_all(format!("{req}\n").as_bytes()).await.is_err() {
+        if write_half
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .is_err()
+        {
             errors += 1;
             continue;
         }
         let resp_line = match lines.next_line().await {
             Ok(Some(l)) => l,
-            _ => { errors += 1; continue; }
+            _ => {
+                errors += 1;
+                continue;
+            }
         };
         let elapsed_us = t0.elapsed().as_micros() as u64;
 
@@ -252,8 +298,10 @@ async fn run_client(
         if !resp["ok"].as_bool().unwrap_or(false) {
             errors += 1;
             if cli.verbose {
-                eprintln!("[client {client_id}] txn {i} error: {}",
-                    resp["error"].as_str().unwrap_or("?"));
+                eprintln!(
+                    "[client {client_id}] txn {i} error: {}",
+                    resp["error"].as_str().unwrap_or("?")
+                );
             }
         } else {
             latencies.push(elapsed_us);
@@ -263,7 +311,10 @@ async fn run_client(
         }
     }
 
-    ClientResult { latencies_us: latencies, errors }
+    ClientResult {
+        latencies_us: latencies,
+        errors,
+    }
 }
 
 // ── SQL workload generator ────────────────────────────────────────────────────
@@ -296,27 +347,29 @@ fn make_sql(workload: &str, client_id: usize, seq: usize) -> String {
 // ── Statistics ────────────────────────────────────────────────────────────────
 
 fn percentile(sorted: &[u64], p: f64) -> u64 {
-    if sorted.is_empty() { return 0; }
+    if sorted.is_empty() {
+        return 0;
+    }
     let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
 }
 
 fn print_histogram(sorted: &[u64]) {
-    if sorted.is_empty() { return; }
-    let min     = *sorted.first().unwrap();
-    let max     = *sorted.last().unwrap();
-    let range   = (max - min).max(1);
+    if sorted.is_empty() {
+        return;
+    }
+    let min = *sorted.first().unwrap();
+    let max = *sorted.last().unwrap();
+    let range = (max - min).max(1);
     let buckets = 10usize;
-    let width   = range / buckets as u64 + 1;
+    let width = range / buckets as u64 + 1;
 
     println!("\n  Latency histogram (µs):");
     for b in 0..buckets {
-        let lo    = min + b as u64 * width;
-        let hi    = lo + width;
+        let lo = min + b as u64 * width;
+        let hi = lo + width;
         let count = sorted.iter().filter(|&&v| v >= lo && v < hi).count();
-        let bar   = "#".repeat(
-            (count * 40 / sorted.len().max(1)).max(if count > 0 { 1 } else { 0 })
-        );
+        let bar = "#".repeat((count * 40 / sorted.len().max(1)).max(if count > 0 { 1 } else { 0 }));
         println!("  {:>7}–{:<7} | {:<40} {}", lo, hi, bar, count);
     }
 }
@@ -325,7 +378,9 @@ fn print_histogram(sorted: &[u64]) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    rustls::crypto::aws_lc_rs::default_provider().install_default().ok();
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .ok();
 
     let cli = Arc::new(Cli::parse());
 
@@ -347,7 +402,7 @@ async fn main() -> Result<()> {
         ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
-            .with_no_client_auth()
+            .with_no_client_auth(),
     );
 
     let barrier = Arc::new(Barrier::new(cli.clients));
@@ -371,23 +426,30 @@ async fn main() -> Result<()> {
     let mut total_errors = 0usize;
     for handle in handles {
         match handle.await {
-            Ok(r)  => { all_latencies.extend_from_slice(&r.latencies_us); total_errors += r.errors; }
+            Ok(r) => {
+                all_latencies.extend_from_slice(&r.latencies_us);
+                total_errors += r.errors;
+            }
             Err(e) => eprintln!("Client task panicked: {e}"),
         }
     }
 
     let wall_elapsed = wall_start.elapsed();
-    let successful   = all_latencies.len();
+    let successful = all_latencies.len();
     all_latencies.sort_unstable();
 
-    let tps     = successful as f64 / wall_elapsed.as_secs_f64();
-    let avg_us  = if successful > 0 { all_latencies.iter().sum::<u64>() / successful as u64 } else { 0 };
-    let min_us  = all_latencies.first().copied().unwrap_or(0);
-    let max_us  = all_latencies.last().copied().unwrap_or(0);
-    let p50_us  = percentile(&all_latencies, 50.0);
-    let p90_us  = percentile(&all_latencies, 90.0);
-    let p95_us  = percentile(&all_latencies, 95.0);
-    let p99_us  = percentile(&all_latencies, 99.0);
+    let tps = successful as f64 / wall_elapsed.as_secs_f64();
+    let avg_us = if successful > 0 {
+        all_latencies.iter().sum::<u64>() / successful as u64
+    } else {
+        0
+    };
+    let min_us = all_latencies.first().copied().unwrap_or(0);
+    let max_us = all_latencies.last().copied().unwrap_or(0);
+    let p50_us = percentile(&all_latencies, 50.0);
+    let p90_us = percentile(&all_latencies, 90.0);
+    let p95_us = percentile(&all_latencies, 95.0);
+    let p99_us = percentile(&all_latencies, 99.0);
     let p999_us = percentile(&all_latencies, 99.9);
 
     println!("done.\n");
@@ -398,14 +460,46 @@ async fn main() -> Result<()> {
     println!("  TPS           : {tps:.1}");
     println!();
     println!("  Latency       µs          ms");
-    println!("    min  : {:>10}   {:>8.3}", min_us,  min_us  as f64 / 1000.0);
-    println!("    avg  : {:>10}   {:>8.3}", avg_us,  avg_us  as f64 / 1000.0);
-    println!("    p50  : {:>10}   {:>8.3}", p50_us,  p50_us  as f64 / 1000.0);
-    println!("    p90  : {:>10}   {:>8.3}", p90_us,  p90_us  as f64 / 1000.0);
-    println!("    p95  : {:>10}   {:>8.3}", p95_us,  p95_us  as f64 / 1000.0);
-    println!("    p99  : {:>10}   {:>8.3}", p99_us,  p99_us  as f64 / 1000.0);
-    println!("    p99.9: {:>10}   {:>8.3}", p999_us, p999_us as f64 / 1000.0);
-    println!("    max  : {:>10}   {:>8.3}", max_us,  max_us  as f64 / 1000.0);
+    println!(
+        "    min  : {:>10}   {:>8.3}",
+        min_us,
+        min_us as f64 / 1000.0
+    );
+    println!(
+        "    avg  : {:>10}   {:>8.3}",
+        avg_us,
+        avg_us as f64 / 1000.0
+    );
+    println!(
+        "    p50  : {:>10}   {:>8.3}",
+        p50_us,
+        p50_us as f64 / 1000.0
+    );
+    println!(
+        "    p90  : {:>10}   {:>8.3}",
+        p90_us,
+        p90_us as f64 / 1000.0
+    );
+    println!(
+        "    p95  : {:>10}   {:>8.3}",
+        p95_us,
+        p95_us as f64 / 1000.0
+    );
+    println!(
+        "    p99  : {:>10}   {:>8.3}",
+        p99_us,
+        p99_us as f64 / 1000.0
+    );
+    println!(
+        "    p99.9: {:>10}   {:>8.3}",
+        p999_us,
+        p999_us as f64 / 1000.0
+    );
+    println!(
+        "    max  : {:>10}   {:>8.3}",
+        max_us,
+        max_us as f64 / 1000.0
+    );
 
     print_histogram(&all_latencies);
 

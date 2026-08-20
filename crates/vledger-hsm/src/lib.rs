@@ -25,12 +25,11 @@ pub mod pkcs11;
 pub mod protocol;
 pub mod remote;
 
-pub use client::{HsmClient, KeyProvider, default_pyhsm_address};
+pub use client::{default_pyhsm_address, HsmClient, KeyProvider};
 pub use error::HsmError;
 pub use pkcs11::{
-    AwsCloudHsmConfig, AwsCloudHsmProvider,
-    AzureHsmConfig, AzureHsmProvider,
-    HsmProviderConfig, Pkcs11Provider, SoftHsmProvider,
+    AwsCloudHsmConfig, AwsCloudHsmProvider, AzureHsmConfig, AzureHsmProvider, HsmProviderConfig,
+    Pkcs11Provider, SoftHsmProvider,
 };
 pub use protocol::KeyPolicy;
 pub use remote::{HsmTransport, RemotePyHsmConfig};

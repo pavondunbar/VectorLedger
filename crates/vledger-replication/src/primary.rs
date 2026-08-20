@@ -34,9 +34,8 @@ use tracing::{debug, error, info, warn};
 use crate::config::ReplicationConfig;
 use crate::error::ReplicationError;
 use crate::protocol::{
-    self, AckMessage, AuthChallenge, AuthResponse, AuthResult,
-    HeartbeatMsg, ReplicationMessage, WalRecordMsg, Lsn,
-    compute_mac, mac_eq, encode_handshake,
+    self, compute_mac, encode_handshake, mac_eq, AckMessage, AuthChallenge, AuthResponse,
+    AuthResult, HeartbeatMsg, Lsn, ReplicationMessage, WalRecordMsg,
 };
 use crate::secret;
 use crate::tls as repl_tls;
@@ -49,8 +48,8 @@ type TlsServerStream = tokio_rustls::server::TlsStream<TcpStream>;
 
 /// Primary-side WAL shipper.
 pub struct WalShipper {
-    config:   ReplicationConfig,
-    secret:   [u8; 32],
+    config: ReplicationConfig,
+    secret: [u8; 32],
     replicas: Arc<Mutex<Vec<ReplicaConn>>>,
     next_lsn: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -58,17 +57,18 @@ pub struct WalShipper {
 struct ReplicaConn {
     writer: tokio::io::WriteHalf<TlsServerStream>,
     reader: BufReader<tokio::io::ReadHalf<TlsServerStream>>,
-    peer:   std::net::SocketAddr,
+    peer: std::net::SocketAddr,
 }
 
 impl WalShipper {
     /// Create a new `WalShipper`.  Loads (or generates) the HMAC secret from
     /// `data_dir`.
     pub fn new(
-        config:   ReplicationConfig,
+        config: ReplicationConfig,
         data_dir: &std::path::Path,
     ) -> Result<Self, ReplicationError> {
-        let secret_path = config.secret_path
+        let secret_path = config
+            .secret_path
             .as_deref()
             .map(PathBuf::from)
             .unwrap_or_else(|| secret::default_secret_path(data_dir));
@@ -86,11 +86,11 @@ impl WalShipper {
     /// Bind the replication port and accept authenticated TLS replica
     /// connections in the background.
     pub async fn listen_and_accept(&self) -> Result<(), ReplicationError> {
-        let addr     = self.config.replication_addr.clone();
+        let addr = self.config.replication_addr.clone();
         let replicas = self.replicas.clone();
-        let secret   = self.secret;
-        let hs_ms    = self.config.ack_timeout_ms;
-        let tls_cfg  = self.config.tls.clone();
+        let secret = self.secret;
+        let hs_ms = self.config.ack_timeout_ms;
+        let tls_cfg = self.config.tls.clone();
 
         let listener = TcpListener::bind(&addr).await?;
 
@@ -122,8 +122,8 @@ impl WalShipper {
         listener: TcpListener,
         acceptor: TlsAcceptor,
         replicas: Arc<Mutex<Vec<ReplicaConn>>>,
-        secret:   [u8; 32],
-        hs_ms:    u64,
+        secret: [u8; 32],
+        hs_ms: u64,
     ) {
         loop {
             match listener.accept().await {
@@ -134,7 +134,9 @@ impl WalShipper {
                         match acceptor.accept(stream).await {
                             Err(e) => warn!(%peer, "TLS handshake failed: {e}"),
                             Ok(tls_stream) => {
-                                match authenticate_replica_tls(tls_stream, peer, &secret, hs_ms).await {
+                                match authenticate_replica_tls(tls_stream, peer, &secret, hs_ms)
+                                    .await
+                                {
                                     Ok(conn) => {
                                         info!(%peer, "Replica authenticated (TLS)");
                                         replicas.lock().await.push(conn);
@@ -154,24 +156,27 @@ impl WalShipper {
     async fn accept_loop_plain(
         listener: TcpListener,
         replicas: Arc<Mutex<Vec<ReplicaConn>>>,
-        secret:   [u8; 32],
-        hs_ms:    u64,
+        secret: [u8; 32],
+        hs_ms: u64,
     ) {
         // Wrap the plain TCP stream in a "null" TLS layer using rcgen so the
         // rest of the code is type-uniform. In practice dev mode won't reach
         // production so we use a throwaway self-signed acceptor.
         let dummy_tls_cfg = crate::config::ReplicationTlsConfig {
-            enabled:         true,
-            server_cert:     None,
-            server_key:      None,
+            enabled: true,
+            server_cert: None,
+            server_key: None,
             server_hostname: "dev-primary".into(),
-            ca_cert:         None,
-            client_cert:     None,
-            client_key:      None,
+            ca_cert: None,
+            client_cert: None,
+            client_key: None,
         };
         let acceptor = match repl_tls::build_acceptor(&dummy_tls_cfg) {
             Ok(a) => a,
-            Err(e) => { error!("Cannot build dev TLS acceptor: {e}"); return; }
+            Err(e) => {
+                error!("Cannot build dev TLS acceptor: {e}");
+                return;
+            }
         };
         Self::accept_loop_tls(listener, acceptor, replicas, secret, hs_ms).await;
     }
@@ -179,19 +184,18 @@ impl WalShipper {
     // ── WAL shipping ──────────────────────────────────────────────────────
 
     /// Ship a WAL record to all connected replicas synchronously.
-    pub async fn ship(
-        &self,
-        record_bytes: &[u8],
-        segment:      u64,
-    ) -> Result<Lsn, ReplicationError> {
+    pub async fn ship(&self, record_bytes: &[u8], segment: u64) -> Result<Lsn, ReplicationError> {
         use std::sync::atomic::Ordering;
 
-        let lsn             = self.next_lsn.fetch_add(1, Ordering::SeqCst);
-        let record_hex      = hex::encode(record_bytes);
+        let lsn = self.next_lsn.fetch_add(1, Ordering::SeqCst);
+        let record_hex = hex::encode(record_bytes);
         let record_hash_hex = hex::encode(blake3::hash(record_bytes).as_bytes());
 
         let msg = ReplicationMessage::WalRecord(WalRecordMsg {
-            lsn, segment, record_hex, record_hash_hex,
+            lsn,
+            segment,
+            record_hex,
+            record_hash_hex,
         });
 
         let wire = protocol::encode_replication(&msg)
@@ -214,7 +218,10 @@ impl WalShipper {
                 Err(_) => {
                     warn!(peer = %conn.peer, lsn, "Replica ACK timeout");
                     dead.push(i);
-                    return Err(ReplicationError::AckTimeout { lsn, ms: self.config.ack_timeout_ms });
+                    return Err(ReplicationError::AckTimeout {
+                        lsn,
+                        ms: self.config.ack_timeout_ms,
+                    });
                 }
                 Ok(Err(e)) => {
                     warn!(peer = %conn.peer, "Replica read error: {e}");
@@ -226,24 +233,23 @@ impl WalShipper {
                     dead.push(i);
                     return Err(ReplicationError::StreamEnded);
                 }
-                Ok(Ok(_)) => {
-                    match protocol::decode_ack(&line) {
-                        Err(e) => warn!(peer = %conn.peer, "Bad ACK JSON: {e}"),
-                        Ok(AckMessage::Ack(ack)) => {
-                            if ack.lsn != lsn {
-                                return Err(ReplicationError::AckMismatch {
-                                    expected: lsn, got: ack.lsn,
-                                });
-                            }
-                            debug!(peer = %conn.peer, lsn, "Replica ACK received");
+                Ok(Ok(_)) => match protocol::decode_ack(&line) {
+                    Err(e) => warn!(peer = %conn.peer, "Bad ACK JSON: {e}"),
+                    Ok(AckMessage::Ack(ack)) => {
+                        if ack.lsn != lsn {
+                            return Err(ReplicationError::AckMismatch {
+                                expected: lsn,
+                                got: ack.lsn,
+                            });
                         }
-                        Ok(AckMessage::Error(err)) => {
-                            error!(peer = %conn.peer, "Replica error: {}", err.message);
-                            dead.push(i);
-                        }
-                        Ok(_) => {}
+                        debug!(peer = %conn.peer, lsn, "Replica ACK received");
                     }
-                }
+                    Ok(AckMessage::Error(err)) => {
+                        error!(peer = %conn.peer, "Replica error: {}", err.message);
+                        dead.push(i);
+                    }
+                    Ok(_) => {}
+                },
             }
         }
 
@@ -256,7 +262,10 @@ impl WalShipper {
     /// Send a heartbeat to all replicas.
     pub async fn heartbeat(&self) {
         let msg = ReplicationMessage::Heartbeat(HeartbeatMsg {
-            last_lsn: self.next_lsn.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(1),
+            last_lsn: self
+                .next_lsn
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .saturating_sub(1),
             ts: chrono::Utc::now().to_rfc3339(),
         });
         let wire = match protocol::encode_replication(&msg) {
@@ -285,9 +294,9 @@ impl WalShipper {
 
 async fn authenticate_replica_tls(
     tls_stream: TlsServerStream,
-    peer:       std::net::SocketAddr,
-    secret:     &[u8; 32],
-    hs_ms:      u64,
+    peer: std::net::SocketAddr,
+    secret: &[u8; 32],
+    hs_ms: u64,
 ) -> Result<ReplicaConn, ReplicationError> {
     let timeout_dur = Duration::from_millis(hs_ms);
     let (r, mut w) = tokio::io::split(tls_stream);
@@ -296,9 +305,11 @@ async fn authenticate_replica_tls(
     // 1. Send challenge.
     let mut nonce = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
-    let challenge = AuthChallenge { nonce: hex::encode(nonce) };
-    let wire = encode_handshake(&challenge)
-        .map_err(|e| ReplicationError::Serialisation(e.to_string()))?;
+    let challenge = AuthChallenge {
+        nonce: hex::encode(nonce),
+    };
+    let wire =
+        encode_handshake(&challenge).map_err(|e| ReplicationError::Serialisation(e.to_string()))?;
     timeout(timeout_dur, w.write_all(&wire))
         .await
         .map_err(|_| ReplicationError::AuthFailed("timeout sending challenge".into()))?
@@ -312,7 +323,9 @@ async fn authenticate_replica_tls(
         .map_err(|_| ReplicationError::AuthFailed("timeout on auth response".into()))?
         .map_err(|e| ReplicationError::AuthFailed(format!("read response: {e}")))?;
     if n == 0 {
-        return Err(ReplicationError::AuthFailed("replica closed connection".into()));
+        return Err(ReplicationError::AuthFailed(
+            "replica closed connection".into(),
+        ));
     }
 
     let response: AuthResponse = serde_json::from_str(line.trim())
@@ -326,23 +339,35 @@ async fn authenticate_replica_tls(
     // 3. Verify (constant-time).
     let expected = compute_mac(secret, &nonce);
     if !mac_eq(&expected, &replica_mac) {
-        let reject = AuthResult { ok: false, error: Some("invalid MAC".into()) };
+        let reject = AuthResult {
+            ok: false,
+            error: Some("invalid MAC".into()),
+        };
         if let Ok(wire) = encode_handshake(&reject) {
             let _ = w.write_all(&wire).await;
             let _ = w.flush().await;
         }
         warn!(%peer, "Replica rejected: MAC mismatch");
-        return Err(ReplicationError::AuthFailed(format!("MAC mismatch from {peer}")));
+        return Err(ReplicationError::AuthFailed(format!(
+            "MAC mismatch from {peer}"
+        )));
     }
 
     // 4. Confirm.
-    let ok = AuthResult { ok: true, error: None };
-    let wire = encode_handshake(&ok)
-        .map_err(|e| ReplicationError::Serialisation(e.to_string()))?;
-    w.write_all(&wire).await
+    let ok = AuthResult {
+        ok: true,
+        error: None,
+    };
+    let wire = encode_handshake(&ok).map_err(|e| ReplicationError::Serialisation(e.to_string()))?;
+    w.write_all(&wire)
+        .await
         .map_err(|e| ReplicationError::AuthFailed(format!("write auth result: {e}")))?;
     let _ = w.flush().await;
 
     debug!(%peer, "Replication handshake complete (TLS)");
-    Ok(ReplicaConn { writer: w, reader, peer })
+    Ok(ReplicaConn {
+        writer: w,
+        reader,
+        peer,
+    })
 }

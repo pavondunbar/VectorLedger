@@ -24,13 +24,13 @@ impl ComplianceEngine {
     pub fn generate_report(
         &self,
         standard: ComplianceStandard,
-        range:    ReportDateRange,
+        range: ReportDateRange,
     ) -> Result<ComplianceReport, ComplianceError> {
         let evidence = evaluate(standard, &self.data_dir, &range)?;
         Ok(ComplianceReport {
             standard,
             generated_at: Utc::now(),
-            date_range:   range,
+            date_range: range,
             evidence,
         })
     }

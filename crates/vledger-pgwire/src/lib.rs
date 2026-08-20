@@ -19,10 +19,10 @@
 //! - Terminate (X)
 
 pub mod codec;
-pub mod messages;
-pub mod server;
 #[cfg(test)]
 mod malformed_tests;
+pub mod messages;
+pub mod server;
 
-pub use codec::{read_startup, read_message};
+pub use codec::{read_message, read_startup};
 pub use server::{PgWireConfig, PgWireServer};

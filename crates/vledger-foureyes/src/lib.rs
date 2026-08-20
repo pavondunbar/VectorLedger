@@ -22,11 +22,11 @@
 //! `require_four_eyes` flag on every account touched by a POST and routes
 //! through `FourEyesQueue` instead of `LedgerStore::post_entry` directly.
 
+#[cfg(test)]
+mod bypass_tests;
 pub mod error;
 pub mod queue;
 pub mod record;
-#[cfg(test)]
-mod bypass_tests;
 
 pub use error::FourEyesError;
 pub use queue::FourEyesQueue;

@@ -44,22 +44,15 @@ pub trait Pkcs11Provider: Send + Sync + 'static {
     async fn encrypt(&self, label: &str, plaintext: &[u8]) -> Result<Vec<u8>, HsmError>;
 
     /// Decrypt `ciphertext` with the AES-256-GCM key identified by `label`.
-    async fn decrypt(
-        &self,
-        label: &str,
-        ciphertext: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, HsmError>;
+    async fn decrypt(&self, label: &str, ciphertext: &[u8])
+        -> Result<Zeroizing<Vec<u8>>, HsmError>;
 
     /// Sign `message` with the Ed25519 key identified by `label`.
     async fn sign(&self, label: &str, message: &[u8]) -> Result<Vec<u8>, HsmError>;
 
     /// Verify `signature` over `message` using the key identified by `label`.
-    async fn verify(
-        &self,
-        label: &str,
-        message: &[u8],
-        signature: &[u8],
-    ) -> Result<bool, HsmError>;
+    async fn verify(&self, label: &str, message: &[u8], signature: &[u8])
+        -> Result<bool, HsmError>;
 
     /// Rotate the key identified by `label` (old version kept for decryption).
     async fn rotate_key(&self, label: &str) -> Result<(), HsmError>;
@@ -86,7 +79,6 @@ pub trait Pkcs11Provider: Send + Sync + 'static {
         Ok(())
     }
 }
-
 
 // ── SoftHsmProvider ───────────────────────────────────────────────────────────
 
@@ -167,7 +159,6 @@ impl Pkcs11Provider for SoftHsmProvider {
     }
 }
 
-
 // ── AWS CloudHSM ──────────────────────────────────────────────────────────────
 
 /// Configuration for the AWS CloudHSM bridge.
@@ -194,10 +185,7 @@ pub struct AwsCloudHsmConfig {
 impl Default for AwsCloudHsmConfig {
     fn default() -> Self {
         Self {
-            bridge_socket: format!(
-                "{}/.vledger-hsm-aws/bridge.sock",
-                home_dir()
-            ),
+            bridge_socket: format!("{}/.vledger-hsm-aws/bridge.sock", home_dir()),
             cluster_id: String::new(),
             crypto_user: "vgdb-cu".into(),
             verify_bridge_tls: true,
@@ -253,7 +241,6 @@ impl Pkcs11Provider for AwsCloudHsmProvider {
     }
 }
 
-
 // ── Azure Dedicated HSM ───────────────────────────────────────────────────────
 
 /// Configuration for the Azure Dedicated HSM bridge.
@@ -276,10 +263,7 @@ pub struct AzureHsmConfig {
 impl Default for AzureHsmConfig {
     fn default() -> Self {
         Self {
-            bridge_socket: format!(
-                "{}/.vledger-hsm-azure/bridge.sock",
-                home_dir()
-            ),
+            bridge_socket: format!("{}/.vledger-hsm-azure/bridge.sock", home_dir()),
             resource_group: String::new(),
             device_host: String::new(),
             partition: "vledger".into(),
@@ -347,16 +331,17 @@ fn home_dir() -> String {
     if let Ok(h) = std::env::var("USERPROFILE") {
         return h;
     }
-    if let (Ok(drive), Ok(path)) = (
-        std::env::var("HOMEDRIVE"),
-        std::env::var("HOMEPATH"),
-    ) {
+    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
         return format!("{drive}{path}");
     }
     #[cfg(windows)]
-    { r"C:\Users\Default".into() }
+    {
+        r"C:\Users\Default".into()
+    }
     #[cfg(not(windows))]
-    { "/root".into() }
+    {
+        "/root".into()
+    }
 }
 
 // ── HsmProviderConfig — selects backend at startup ────────────────────────────
@@ -366,9 +351,7 @@ fn home_dir() -> String {
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum HsmProviderConfig {
     /// Local software HSM (PyHSM daemon) — default for dev/test.
-    Soft {
-        socket_path: Option<String>,
-    },
+    Soft { socket_path: Option<String> },
     /// AWS CloudHSM via bridge sidecar.
     AwsCloudHsm(AwsCloudHsmConfig),
     /// Azure Dedicated HSM via bridge sidecar.
@@ -388,7 +371,7 @@ impl HsmProviderConfig {
             Self::Soft { socket_path } => {
                 let p = match socket_path {
                     Some(path) => SoftHsmProvider::new(path),
-                    None       => SoftHsmProvider::new_default(),
+                    None => SoftHsmProvider::new_default(),
                 };
                 Box::new(p)
             }

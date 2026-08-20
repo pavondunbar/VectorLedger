@@ -30,5 +30,7 @@ pub enum ServerError {
 }
 
 impl From<std::io::Error> for ServerError {
-    fn from(e: std::io::Error) -> Self { Self::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }

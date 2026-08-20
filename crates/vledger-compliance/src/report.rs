@@ -10,7 +10,7 @@ use crate::rules::ComplianceStandard;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportDateRange {
     pub from: DateTime<Utc>,
-    pub to:   DateTime<Utc>,
+    pub to: DateTime<Utc>,
 }
 
 impl ReportDateRange {
@@ -20,14 +20,14 @@ impl ReportDateRange {
 
     /// Last 90 days up to now — typical SOC 2 Type II window.
     pub fn last_90_days() -> Self {
-        let to   = Utc::now();
+        let to = Utc::now();
         let from = to - Duration::days(90);
         Self { from, to }
     }
 
     /// Last 365 days (annual PCI-DSS review).
     pub fn last_year() -> Self {
-        let to   = Utc::now();
+        let to = Utc::now();
         let from = to - Duration::days(365);
         Self { from, to }
     }
@@ -36,25 +36,43 @@ impl ReportDateRange {
 /// The complete output of a compliance evaluation run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceReport {
-    pub standard:     ComplianceStandard,
+    pub standard: ComplianceStandard,
     pub generated_at: DateTime<Utc>,
-    pub date_range:   ReportDateRange,
-    pub evidence:     Vec<Evidence>,
+    pub date_range: ReportDateRange,
+    pub evidence: Vec<Evidence>,
 }
 
 impl ComplianceReport {
     /// Count of PASS / WARN / FAIL / N/A controls.
     pub fn counts(&self) -> (usize, usize, usize, usize) {
-        let pass = self.evidence.iter().filter(|e| e.status == EvidenceStatus::Pass).count();
-        let warn = self.evidence.iter().filter(|e| e.status == EvidenceStatus::Warn).count();
-        let fail = self.evidence.iter().filter(|e| e.status == EvidenceStatus::Fail).count();
-        let na   = self.evidence.iter().filter(|e| e.status == EvidenceStatus::NotApplicable).count();
+        let pass = self
+            .evidence
+            .iter()
+            .filter(|e| e.status == EvidenceStatus::Pass)
+            .count();
+        let warn = self
+            .evidence
+            .iter()
+            .filter(|e| e.status == EvidenceStatus::Warn)
+            .count();
+        let fail = self
+            .evidence
+            .iter()
+            .filter(|e| e.status == EvidenceStatus::Fail)
+            .count();
+        let na = self
+            .evidence
+            .iter()
+            .filter(|e| e.status == EvidenceStatus::NotApplicable)
+            .count();
         (pass, warn, fail, na)
     }
 
     /// Whether every evaluated control passes (warnings are allowed).
     pub fn is_compliant(&self) -> bool {
-        self.evidence.iter().all(|e| e.status != EvidenceStatus::Fail)
+        self.evidence
+            .iter()
+            .all(|e| e.status != EvidenceStatus::Fail)
     }
 
     /// One-line summary string.
@@ -65,8 +83,15 @@ impl ComplianceReport {
             self.standard,
             self.date_range.from.format("%Y-%m-%d"),
             self.date_range.to.format("%Y-%m-%d"),
-            pass, warn, fail, na,
-            if self.is_compliant() { "COMPLIANT" } else { "NON-COMPLIANT" },
+            pass,
+            warn,
+            fail,
+            na,
+            if self.is_compliant() {
+                "COMPLIANT"
+            } else {
+                "NON-COMPLIANT"
+            },
         )
     }
 
@@ -99,7 +124,11 @@ impl ComplianceReport {
         }
         let (pass, warn, fail, na) = self.counts();
         let result_label = if self.is_compliant() {
-            if warn > 0 { "COMPLIANT WITH WARNINGS" } else { "COMPLIANT" }
+            if warn > 0 {
+                "COMPLIANT WITH WARNINGS"
+            } else {
+                "COMPLIANT"
+            }
         } else {
             "NON-COMPLIANT"
         };

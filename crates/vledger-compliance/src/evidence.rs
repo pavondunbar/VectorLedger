@@ -20,10 +20,10 @@ pub enum EvidenceStatus {
 impl std::fmt::Display for EvidenceStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Pass           => write!(f, "PASS"),
-            Self::Fail           => write!(f, "FAIL"),
-            Self::Warn           => write!(f, "WARN"),
-            Self::NotApplicable  => write!(f, "N/A"),
+            Self::Pass => write!(f, "PASS"),
+            Self::Fail => write!(f, "FAIL"),
+            Self::Warn => write!(f, "WARN"),
+            Self::NotApplicable => write!(f, "N/A"),
         }
     }
 }
@@ -32,77 +32,77 @@ impl std::fmt::Display for EvidenceStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Evidence {
     /// Control identifier, e.g. `"CC6.1"` (SOC 2) or `"PCI-DSS-3.4"`.
-    pub control_id:  String,
+    pub control_id: String,
     /// Human-readable control title.
-    pub title:       String,
+    pub title: String,
     /// Pass / Fail / N/A.
-    pub status:      EvidenceStatus,
+    pub status: EvidenceStatus,
     /// Human-readable description of what was checked.
     pub description: String,
     /// Specific findings or details supporting the status.
-    pub findings:    Vec<String>,
+    pub findings: Vec<String>,
     /// When this evidence was collected.
     pub collected_at: DateTime<Utc>,
 }
 
 impl Evidence {
     pub fn pass(
-        control_id:  impl Into<String>,
-        title:       impl Into<String>,
+        control_id: impl Into<String>,
+        title: impl Into<String>,
         description: impl Into<String>,
     ) -> Self {
         Self {
-            control_id:   control_id.into(),
-            title:        title.into(),
-            status:       EvidenceStatus::Pass,
-            description:  description.into(),
-            findings:     vec![],
+            control_id: control_id.into(),
+            title: title.into(),
+            status: EvidenceStatus::Pass,
+            description: description.into(),
+            findings: vec![],
             collected_at: Utc::now(),
         }
     }
 
     pub fn fail(
-        control_id:  impl Into<String>,
-        title:       impl Into<String>,
+        control_id: impl Into<String>,
+        title: impl Into<String>,
         description: impl Into<String>,
-        findings:    Vec<String>,
+        findings: Vec<String>,
     ) -> Self {
         Self {
-            control_id:   control_id.into(),
-            title:        title.into(),
-            status:       EvidenceStatus::Fail,
-            description:  description.into(),
+            control_id: control_id.into(),
+            title: title.into(),
+            status: EvidenceStatus::Fail,
+            description: description.into(),
             findings,
             collected_at: Utc::now(),
         }
     }
 
     pub fn na(
-        control_id:  impl Into<String>,
-        title:       impl Into<String>,
-        reason:      impl Into<String>,
+        control_id: impl Into<String>,
+        title: impl Into<String>,
+        reason: impl Into<String>,
     ) -> Self {
         Self {
-            control_id:   control_id.into(),
-            title:        title.into(),
-            status:       EvidenceStatus::NotApplicable,
-            description:  reason.into(),
-            findings:     vec![],
+            control_id: control_id.into(),
+            title: title.into(),
+            status: EvidenceStatus::NotApplicable,
+            description: reason.into(),
+            findings: vec![],
             collected_at: Utc::now(),
         }
     }
 
     pub fn warn(
-        control_id:  impl Into<String>,
-        title:       impl Into<String>,
+        control_id: impl Into<String>,
+        title: impl Into<String>,
         description: impl Into<String>,
-        findings:    Vec<String>,
+        findings: Vec<String>,
     ) -> Self {
         Self {
-            control_id:   control_id.into(),
-            title:        title.into(),
-            status:       EvidenceStatus::Warn,
-            description:  description.into(),
+            control_id: control_id.into(),
+            title: title.into(),
+            status: EvidenceStatus::Warn,
+            description: description.into(),
             findings,
             collected_at: Utc::now(),
         }

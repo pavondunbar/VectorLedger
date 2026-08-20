@@ -21,11 +21,12 @@ ignore = ["RUSTSEC-2025-0141"]
 
 # RUSTSEC-2025-0134 — rustls-pemfile is unmaintained
 #
-# Status: RESOLVED — rustls-pemfile has been removed from the codebase.
-# PEM parsing now uses rustls-pki-types::pem::PemObject directly.
-# This entry is kept as a historical record; once the Cargo.lock no longer
-# contains rustls-pemfile this advisory will stop appearing.
-# ignore = ["RUSTSEC-2025-0134"]   # uncomment if a transitive dep re-adds it
+# Status: Ignored — rustls-pemfile remains a transitive dependency via
+# tokio-rustls and rustls ecosystem crates. No security vulnerability
+# exists; the crate is feature-complete and the warning is advisory only.
+# Will be removed automatically if the dependency graph is updated upstream.
+ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2025-0134"]
+
 
 [output]
 # Deny actual vulnerabilities; only warn on unmaintained/unsound advisories.

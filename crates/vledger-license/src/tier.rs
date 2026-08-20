@@ -23,12 +23,12 @@ pub enum Feature {
 impl std::fmt::Display for Feature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Feature::PgWire               => "pgwire",
-            Feature::Replication          => "replication",
-            Feature::Hsm                  => "hsm",
-            Feature::ComplianceReport     => "compliance_report",
+            Feature::PgWire => "pgwire",
+            Feature::Replication => "replication",
+            Feature::Hsm => "hsm",
+            Feature::ComplianceReport => "compliance_report",
             Feature::AuditExportUnlimited => "audit_export_unlimited",
-            Feature::MultiNode            => "multi_node",
+            Feature::MultiNode => "multi_node",
         };
         write!(f, "{s}")
     }
@@ -38,12 +38,12 @@ impl std::str::FromStr for Feature {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "pgwire"                 => Ok(Feature::PgWire),
-            "replication"            => Ok(Feature::Replication),
-            "hsm"                    => Ok(Feature::Hsm),
-            "compliance_report"      => Ok(Feature::ComplianceReport),
+            "pgwire" => Ok(Feature::PgWire),
+            "replication" => Ok(Feature::Replication),
+            "hsm" => Ok(Feature::Hsm),
+            "compliance_report" => Ok(Feature::ComplianceReport),
             "audit_export_unlimited" => Ok(Feature::AuditExportUnlimited),
-            "multi_node"             => Ok(Feature::MultiNode),
+            "multi_node" => Ok(Feature::MultiNode),
             other => Err(format!("unknown feature '{other}'")),
         }
     }
@@ -69,9 +69,9 @@ impl LicenseTier {
     /// Human-readable name for error messages and display.
     pub fn display_name(&self) -> &'static str {
         match self {
-            LicenseTier::Free       => "Free",
-            LicenseTier::Starter    => "Starter",
-            LicenseTier::Growth     => "Growth",
+            LicenseTier::Free => "Free",
+            LicenseTier::Starter => "Starter",
+            LicenseTier::Growth => "Growth",
             LicenseTier::Enterprise => "Enterprise",
         }
     }
@@ -117,11 +117,13 @@ impl std::str::FromStr for LicenseTier {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "free"       => Ok(LicenseTier::Free),
-            "starter"    => Ok(LicenseTier::Starter),
-            "growth"     => Ok(LicenseTier::Growth),
+            "free" => Ok(LicenseTier::Free),
+            "starter" => Ok(LicenseTier::Starter),
+            "growth" => Ok(LicenseTier::Growth),
             "enterprise" => Ok(LicenseTier::Enterprise),
-            other => Err(format!("unknown tier '{other}' — use: free, starter, growth, enterprise")),
+            other => Err(format!(
+                "unknown tier '{other}' — use: free, starter, growth, enterprise"
+            )),
         }
     }
 }

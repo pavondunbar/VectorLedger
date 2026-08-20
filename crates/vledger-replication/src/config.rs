@@ -26,7 +26,6 @@ pub struct ReplicationTlsConfig {
     pub enabled: bool,
 
     // ── Server (primary) side ──────────────────────────────────────────
-
     /// Path to the primary's TLS certificate PEM.
     /// `None` → generate a self-signed certificate at startup.
     pub server_cert: Option<String>,
@@ -38,7 +37,6 @@ pub struct ReplicationTlsConfig {
     pub server_hostname: String,
 
     // ── Client (replica) side ──────────────────────────────────────────
-
     /// Path to the CA certificate PEM used by the replica to verify the
     /// primary's certificate.
     /// `None` → disable server certificate verification (dev only).
@@ -54,13 +52,13 @@ pub struct ReplicationTlsConfig {
 impl Default for ReplicationTlsConfig {
     fn default() -> Self {
         Self {
-            enabled:         true,
-            server_cert:     None,
-            server_key:      None,
+            enabled: true,
+            server_cert: None,
+            server_key: None,
             server_hostname: "vledger-primary".into(),
-            ca_cert:         None,
-            client_cert:     None,
-            client_key:      None,
+            ca_cert: None,
+            client_cert: None,
+            client_key: None,
         }
     }
 }
@@ -103,13 +101,13 @@ pub struct ReplicationConfig {
 impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
-            role:                  ReplicationRole::Primary,
-            replication_addr:      "127.0.0.1:5434".into(),
-            ack_timeout_ms:        5_000,
+            role: ReplicationRole::Primary,
+            replication_addr: "127.0.0.1:5434".into(),
+            ack_timeout_ms: 5_000,
             heartbeat_interval_ms: 1_000,
-            send_buffer_bytes:     64 * 1024 * 1024,
-            secret_path:           None,
-            tls:                   ReplicationTlsConfig::default(),
+            send_buffer_bytes: 64 * 1024 * 1024,
+            secret_path: None,
+            tls: ReplicationTlsConfig::default(),
         }
     }
 }
@@ -124,7 +122,6 @@ impl ReplicationConfig {
         }
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read replication.json: {e}"))?;
-        serde_json::from_str(&raw)
-            .map_err(|e| format!("invalid replication.json: {e}"))
+        serde_json::from_str(&raw).map_err(|e| format!("invalid replication.json: {e}"))
     }
 }

@@ -6,10 +6,10 @@
 //! acts as the primary key index.  Phase 2 will replace this with a persistent
 //! B+ tree backed by the page store.
 
-pub mod error;
 pub mod btree;
+pub mod error;
 pub mod hash_index;
 
-pub use error::IndexError;
 pub use btree::BTreeIndex;
+pub use error::IndexError;
 pub use hash_index::HashIndex;

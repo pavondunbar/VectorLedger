@@ -22,20 +22,24 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
-use vledger_crypto::{encrypt::{decrypt, encrypt, EncryptionKey}, merkle::merkle_root, Hash};
+use vledger_crypto::{
+    encrypt::{decrypt, encrypt, EncryptionKey},
+    merkle::merkle_root,
+    Hash,
+};
 
 use crate::error::PageError;
 use crate::page::Page;
 use crate::DEFAULT_PAGE_SIZE;
 
-const PAGE_EXT:      &str = "pages";
-const EPAGE_EXT:     &str = "epages";
-const GCM_OVERHEAD:  usize = 32; // nonce(12) + tag(16) + footer(4)
+const PAGE_EXT: &str = "pages";
+const EPAGE_EXT: &str = "epages";
+const GCM_OVERHEAD: usize = 32; // nonce(12) + tag(16) + footer(4)
 
 // ── PageFlushState ────────────────────────────────────────────────────────────
 
@@ -57,7 +61,9 @@ impl PageFlushState {
 
 impl Default for PageFlushState {
     fn default() -> Self {
-        Self { dirty: AtomicBool::new(false) }
+        Self {
+            dirty: AtomicBool::new(false),
+        }
     }
 }
 
@@ -107,14 +113,14 @@ impl PageStore {
     pub fn write_page(&mut self, page: &Page) -> Result<(), PageError> {
         assert!(page.sealed, "only sealed pages may be written to disk");
         let table_id = page.header.table_id;
-        let page_id  = page.header.page_id;
+        let page_id = page.header.page_id;
 
         if let Some(key) = self.table_keys.get(&table_id) {
             let record_size = self.page_size + GCM_OVERHEAD;
-            let offset      = page_id * record_size as u64;
-            let aad         = Self::make_aad(table_id, page_id);
-            let mut ciphertext = encrypt(key, page.as_bytes(), Some(&aad))
-                .map_err(PageError::Crypto)?;
+            let offset = page_id * record_size as u64;
+            let aad = Self::make_aad(table_id, page_id);
+            let mut ciphertext =
+                encrypt(key, page.as_bytes(), Some(&aad)).map_err(PageError::Crypto)?;
             // Append 4-byte plaintext-length footer
             ciphertext.extend_from_slice(&(self.page_size as u32).to_le_bytes());
             debug_assert_eq!(ciphertext.len(), record_size);
@@ -125,7 +131,7 @@ impl PageStore {
             debug!(page_id, table_id, "Encrypted page written (buffered)");
         } else {
             let offset = page_id * self.page_size as u64;
-            let file   = self.file_for_table(table_id)?;
+            let file = self.file_for_table(table_id)?;
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(page.as_bytes())?;
             // No sync_all() — background flusher handles durability.
@@ -156,22 +162,22 @@ impl PageStore {
     pub fn read_page(&mut self, table_id: u32, page_id: u64) -> Result<Page, PageError> {
         if let Some(key) = self.table_keys.get(&table_id).cloned() {
             let record_size = self.page_size + GCM_OVERHEAD;
-            let offset      = page_id * record_size as u64;
-            let file        = self.efile_for_table(table_id)?;
+            let offset = page_id * record_size as u64;
+            let file = self.efile_for_table(table_id)?;
             file.seek(SeekFrom::Start(offset))?;
             let mut record = vec![0u8; record_size];
             file.read_exact(&mut record)?;
             // ciphertext = record[..record_size-4], footer = record[record_size-4..]
             let ct_len = record_size - 4; // nonce+encrypted_page+tag = page_size+28
-            let aad       = Self::make_aad(table_id, page_id);
-            let plaintext = decrypt(&key, &record[..ct_len], Some(&aad))
-                .map_err(PageError::Crypto)?;
+            let aad = Self::make_aad(table_id, page_id);
+            let plaintext =
+                decrypt(&key, &record[..ct_len], Some(&aad)).map_err(PageError::Crypto)?;
             debug!(page_id, table_id, "Encrypted page decrypted");
             Page::from_bytes(plaintext)
         } else {
-            let ps     = self.page_size;
+            let ps = self.page_size;
             let offset = page_id * ps as u64;
-            let file   = self.file_for_table(table_id)?;
+            let file = self.file_for_table(table_id)?;
             file.seek(SeekFrom::Start(offset))?;
             let mut buf = vec![0u8; ps];
             file.read_exact(&mut buf)?;
@@ -181,8 +187,12 @@ impl PageStore {
     }
 
     pub fn table_merkle_root(&mut self, table_id: u32) -> Result<Hash, PageError> {
-        let encrypted   = self.table_keys.contains_key(&table_id);
-        let record_size = if encrypted { self.page_size + GCM_OVERHEAD } else { self.page_size };
+        let encrypted = self.table_keys.contains_key(&table_id);
+        let record_size = if encrypted {
+            self.page_size + GCM_OVERHEAD
+        } else {
+            self.page_size
+        };
 
         let file_len = if encrypted {
             self.efile_for_table(table_id)?.metadata()?.len()
@@ -190,7 +200,9 @@ impl PageStore {
             self.file_for_table(table_id)?.metadata()?.len()
         };
         let page_count = file_len / record_size as u64;
-        if page_count == 0 { return Ok(vledger_crypto::ZERO_HASH); }
+        if page_count == 0 {
+            return Ok(vledger_crypto::ZERO_HASH);
+        }
 
         let mut hashes: Vec<Vec<u8>> = Vec::with_capacity(page_count as usize);
         for pid in 0..page_count {
@@ -209,8 +221,12 @@ impl PageStore {
     }
 
     pub fn page_count(&mut self, table_id: u32) -> Result<u64, PageError> {
-        let encrypted   = self.table_keys.contains_key(&table_id);
-        let record_size = if encrypted { self.page_size + GCM_OVERHEAD } else { self.page_size } as u64;
+        let encrypted = self.table_keys.contains_key(&table_id);
+        let record_size = if encrypted {
+            self.page_size + GCM_OVERHEAD
+        } else {
+            self.page_size
+        } as u64;
         let file_len = if encrypted {
             self.efile_for_table(table_id)?.metadata()?.len()
         } else {
@@ -229,7 +245,11 @@ impl PageStore {
     fn file_for_table(&mut self, table_id: u32) -> Result<&mut File, PageError> {
         if !self.handles.contains_key(&table_id) {
             let path = self.dir.join(format!("{:08x}.{}", table_id, PAGE_EXT));
-            let f = OpenOptions::new().create(true).read(true).write(true).open(&path)?;
+            let f = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&path)?;
             self.handles.insert(table_id, f);
         }
         Ok(self.handles.get_mut(&table_id).unwrap())
@@ -239,7 +259,11 @@ impl PageStore {
         let key = table_id.wrapping_add(0x8000_0000);
         if !self.handles.contains_key(&key) {
             let path = self.dir.join(format!("{:08x}.{}", table_id, EPAGE_EXT));
-            let f = OpenOptions::new().create(true).read(true).write(true).open(&path)?;
+            let f = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&path)?;
             self.handles.insert(key, f);
         }
         Ok(self.handles.get_mut(&key).unwrap())
@@ -257,10 +281,10 @@ impl PageStore {
 /// The `pages_dir` is re-scanned on each tick so that newly opened table
 /// files are picked up automatically.
 pub fn spawn_page_commit_flusher(
-    pages_dir:   PathBuf,
+    pages_dir: PathBuf,
     flush_state: Arc<PageFlushState>,
-    delay_ms:    u64,
-    shutdown:    tokio_util::sync::CancellationToken,
+    delay_ms: u64,
+    shutdown: tokio_util::sync::CancellationToken,
 ) {
     tokio::spawn(async move {
         let interval = Duration::from_millis(delay_ms);
@@ -344,7 +368,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn make_store(dir: &Path) -> PageStore { PageStore::open(dir).unwrap() }
+    fn make_store(dir: &Path) -> PageStore {
+        PageStore::open(dir).unwrap()
+    }
 
     #[test]
     fn plaintext_roundtrip() {
@@ -356,7 +382,10 @@ mod tests {
         store.write_page(&page).unwrap();
         // Explicitly sync before reading back to ensure data is on disk.
         store.sync().unwrap();
-        assert_eq!(store.read_page(1, 0).unwrap().read_slot(0).unwrap(), b"hello ledger");
+        assert_eq!(
+            store.read_page(1, 0).unwrap().read_slot(0).unwrap(),
+            b"hello ledger"
+        );
     }
 
     #[test]
@@ -414,7 +443,10 @@ mod tests {
             store.write_page(&page).unwrap();
         }
         store.sync().unwrap();
-        assert_ne!(store.table_merkle_root(11).unwrap(), vledger_crypto::ZERO_HASH);
+        assert_ne!(
+            store.table_merkle_root(11).unwrap(),
+            vledger_crypto::ZERO_HASH
+        );
     }
 
     #[test]

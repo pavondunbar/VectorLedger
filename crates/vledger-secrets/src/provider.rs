@@ -40,7 +40,6 @@ pub trait MasterKeyProvider: Send + Sync + 'static {
     fn description(&self) -> String;
 }
 
-
 // ── KeySourceConfig — persisted to key_source.json ───────────────────────────
 
 /// Top-level configuration serialised to `vledger-data/keys/key_source.json`.
@@ -59,9 +58,7 @@ pub enum KeySourceConfig {
 
     /// Read key from a hex file on disk (dev / last-resort fallback only).
     /// The file must contain exactly 64 hex characters and have mode 0o600.
-    File {
-        path: String,
-    },
+    File { path: String },
 
     /// HashiCorp Vault KV v2 backend.
     ///
@@ -206,29 +203,43 @@ pub enum KeySourceConfig {
     },
 }
 
-fn default_env_var()     -> String { "VectorLedger_MASTER_KEY".into() }
-fn default_vault_field() -> String { "value".into() }
-fn default_pyhsm_socket()    -> String {
-    #[cfg(unix)]
-    { "/tmp/pyhsm.sock".into() }
-    #[cfg(not(unix))]
-    { "127.0.0.1:7777".into() }
+fn default_env_var() -> String {
+    "VectorLedger_MASTER_KEY".into()
 }
-fn default_pyhsm_caller_id() -> String { "vledger".into() }
-fn default_pyhsm_key_id()    -> String { "vledger.master-key".into() }
-fn default_remote_timeout_ms()  -> u64 { 5_000 }
-fn default_remote_max_retries() -> u32 { 3 }
+fn default_vault_field() -> String {
+    "value".into()
+}
+fn default_pyhsm_socket() -> String {
+    #[cfg(unix)]
+    {
+        "/tmp/pyhsm.sock".into()
+    }
+    #[cfg(not(unix))]
+    {
+        "127.0.0.1:7777".into()
+    }
+}
+fn default_pyhsm_caller_id() -> String {
+    "vledger".into()
+}
+fn default_pyhsm_key_id() -> String {
+    "vledger.master-key".into()
+}
+fn default_remote_timeout_ms() -> u64 {
+    5_000
+}
+fn default_remote_max_retries() -> u32 {
+    3
+}
 
 impl KeySourceConfig {
     /// Load config from a JSON file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, SecretsError> {
-        let data = std::fs::read_to_string(path.as_ref())
-            .map_err(|e| SecretsError::FileError {
-                path:   path.as_ref().display().to_string(),
-                reason: e.to_string(),
-            })?;
-        serde_json::from_str(&data)
-            .map_err(|e| SecretsError::Serialisation(e.to_string()))
+        let data = std::fs::read_to_string(path.as_ref()).map_err(|e| SecretsError::FileError {
+            path: path.as_ref().display().to_string(),
+            reason: e.to_string(),
+        })?;
+        serde_json::from_str(&data).map_err(|e| SecretsError::Serialisation(e.to_string()))
     }
 
     /// Save config to a JSON file with mode 0o600.
@@ -249,55 +260,70 @@ impl KeySourceConfig {
 /// of the process working directory.  Pass `None` only in tests or when no
 /// data directory exists yet.
 pub fn build_provider(
-    cfg:       &KeySourceConfig,
+    cfg: &KeySourceConfig,
     cache_dir: Option<&Path>,
 ) -> Result<Box<dyn MasterKeyProvider>, SecretsError> {
     let cache = cache_dir.map(|p| p.to_path_buf());
     match cfg {
-        KeySourceConfig::Env { var } =>
-            Ok(Box::new(EnvVarProvider { var: var.clone() })),
-        KeySourceConfig::File { path } =>
-            Ok(Box::new(FileProvider { path: PathBuf::from(path) })),
-        KeySourceConfig::Vault { addr, mount, secret_path, field, namespace } =>
-            Ok(Box::new(HashiCorpVaultProvider {
-                addr:        addr.clone(),
-                mount:       mount.clone(),
-                secret_path: secret_path.clone(),
-                field:       field.clone(),
-                namespace:   namespace.clone(),
-            })),
-        KeySourceConfig::AwsKms { key_id, region, encryption_context } =>
-            Ok(Box::new(AwsKmsProvider {
-                key_id:             key_id.clone(),
-                region:             region.clone(),
-                encryption_context: encryption_context.clone(),
-                cache_dir:          cache.clone(),
-            })),
-        KeySourceConfig::PyHsm { socket_path, caller_id, key_id } =>
-            Ok(Box::new(PyHsmProvider {
-                socket_path: socket_path.clone(),
-                caller_id:   caller_id.clone(),
-                key_id:      key_id.clone(),
-                cache_dir:   cache.clone(),
-            })),
+        KeySourceConfig::Env { var } => Ok(Box::new(EnvVarProvider { var: var.clone() })),
+        KeySourceConfig::File { path } => Ok(Box::new(FileProvider {
+            path: PathBuf::from(path),
+        })),
+        KeySourceConfig::Vault {
+            addr,
+            mount,
+            secret_path,
+            field,
+            namespace,
+        } => Ok(Box::new(HashiCorpVaultProvider {
+            addr: addr.clone(),
+            mount: mount.clone(),
+            secret_path: secret_path.clone(),
+            field: field.clone(),
+            namespace: namespace.clone(),
+        })),
+        KeySourceConfig::AwsKms {
+            key_id,
+            region,
+            encryption_context,
+        } => Ok(Box::new(AwsKmsProvider {
+            key_id: key_id.clone(),
+            region: region.clone(),
+            encryption_context: encryption_context.clone(),
+            cache_dir: cache.clone(),
+        })),
+        KeySourceConfig::PyHsm {
+            socket_path,
+            caller_id,
+            key_id,
+        } => Ok(Box::new(PyHsmProvider {
+            socket_path: socket_path.clone(),
+            caller_id: caller_id.clone(),
+            key_id: key_id.clone(),
+            cache_dir: cache.clone(),
+        })),
         KeySourceConfig::RemotePyHsm {
-            endpoint, ca_cert, client_cert, client_key,
-            timeout_ms, max_retries, caller_id, key_id,
-        } =>
-            Ok(Box::new(RemotePyHsmProvider {
-                endpoint:    endpoint.clone(),
-                ca_cert:     ca_cert.clone(),
-                client_cert: client_cert.clone(),
-                client_key:  client_key.clone(),
-                timeout_ms:  *timeout_ms,
-                max_retries: *max_retries,
-                caller_id:   caller_id.clone(),
-                key_id:      key_id.clone(),
-                cache_dir:   cache,
-            })),
+            endpoint,
+            ca_cert,
+            client_cert,
+            client_key,
+            timeout_ms,
+            max_retries,
+            caller_id,
+            key_id,
+        } => Ok(Box::new(RemotePyHsmProvider {
+            endpoint: endpoint.clone(),
+            ca_cert: ca_cert.clone(),
+            client_cert: client_cert.clone(),
+            client_key: client_key.clone(),
+            timeout_ms: *timeout_ms,
+            max_retries: *max_retries,
+            caller_id: caller_id.clone(),
+            key_id: key_id.clone(),
+            cache_dir: cache,
+        })),
     }
 }
-
 
 // ── EnvVarProvider ────────────────────────────────────────────────────────────
 
@@ -309,8 +335,9 @@ pub struct EnvVarProvider {
 #[async_trait]
 impl MasterKeyProvider for EnvVarProvider {
     async fn load_master_key(&self) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
-        let hex_val = std::env::var(&self.var)
-            .map_err(|_| SecretsError::EnvVarMissing { var: self.var.clone() })?;
+        let hex_val = std::env::var(&self.var).map_err(|_| SecretsError::EnvVarMissing {
+            var: self.var.clone(),
+        })?;
         parse_hex_key(hex_val.trim())
     }
 
@@ -331,11 +358,10 @@ pub struct FileProvider {
 #[async_trait]
 impl MasterKeyProvider for FileProvider {
     async fn load_master_key(&self) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
-        let hex_val = std::fs::read_to_string(&self.path)
-            .map_err(|e| SecretsError::FileError {
-                path:   self.path.display().to_string(),
-                reason: e.to_string(),
-            })?;
+        let hex_val = std::fs::read_to_string(&self.path).map_err(|e| SecretsError::FileError {
+            path: self.path.display().to_string(),
+            reason: e.to_string(),
+        })?;
         parse_hex_key(hex_val.trim())
     }
 
@@ -357,10 +383,11 @@ impl FileProvider {
             path = %path.as_ref().display(),
             "Master key written to disk file. For production use --key-source env, vault, or aws_kms."
         );
-        Ok(Self { path: path.as_ref().to_path_buf() })
+        Ok(Self {
+            path: path.as_ref().to_path_buf(),
+        })
     }
 }
-
 
 // ── HashiCorpVaultProvider ────────────────────────────────────────────────────
 
@@ -373,20 +400,18 @@ impl FileProvider {
 /// - The secret must have a field named `field` (default `"value"`) whose
 ///   value is the 64-character hex-encoded 32-byte master key.
 pub struct HashiCorpVaultProvider {
-    pub addr:        String,
-    pub mount:       String,
+    pub addr: String,
+    pub mount: String,
     pub secret_path: String,
-    pub field:       String,
-    pub namespace:   Option<String>,
+    pub field: String,
+    pub namespace: Option<String>,
 }
 
 #[async_trait]
 impl MasterKeyProvider for HashiCorpVaultProvider {
     async fn load_master_key(&self) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
         let token = std::env::var("VAULT_TOKEN")
-            .map_err(|_| SecretsError::Vault(
-                "VAULT_TOKEN environment variable not set".into()
-            ))?;
+            .map_err(|_| SecretsError::Vault("VAULT_TOKEN environment variable not set".into()))?;
 
         // Fix #6: check the token's TTL before fetching the secret.
         // A token that expires between deployments will cause a silent startup
@@ -404,14 +429,14 @@ impl MasterKeyProvider for HashiCorpVaultProvider {
         );
 
         let client = build_reqwest_client()?;
-        let mut req = client
-            .get(&url)
-            .header("X-Vault-Token", &token);
+        let mut req = client.get(&url).header("X-Vault-Token", &token);
         if let Some(ns) = &self.namespace {
             req = req.header("X-Vault-Namespace", ns);
         }
 
-        let resp = req.send().await
+        let resp = req
+            .send()
+            .await
             .map_err(|e| SecretsError::Http(e.to_string()))?;
 
         let status = resp.status();
@@ -423,16 +448,20 @@ impl MasterKeyProvider for HashiCorpVaultProvider {
         }
 
         // KV v2 response shape: { "data": { "data": { "<field>": "<hex>" } } }
-        let body: serde_json::Value = resp.json().await
+        let body: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| SecretsError::Vault(format!("parse response: {e}")))?;
 
         let hex_val = body
             .pointer(&format!("/data/data/{}", self.field))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| SecretsError::Vault(format!(
-                "field '{}' not found in KV v2 secret at '{}'",
-                self.field, self.secret_path
-            )))?;
+            .ok_or_else(|| {
+                SecretsError::Vault(format!(
+                    "field '{}' not found in KV v2 secret at '{}'",
+                    self.field, self.secret_path
+                ))
+            })?;
 
         parse_hex_key(hex_val.trim())
     }
@@ -461,24 +490,33 @@ impl HashiCorpVaultProvider {
             self.addr.trim_end_matches('/')
         );
         let client = match build_reqwest_client() {
-            Ok(c)  => c,
-            Err(e) => { tracing::debug!("Vault TTL check: cannot build client: {e}"); return; }
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!("Vault TTL check: cannot build client: {e}");
+                return;
+            }
         };
         let mut req = client.get(&url).header("X-Vault-Token", token);
         if let Some(ns) = &self.namespace {
             req = req.header("X-Vault-Namespace", ns);
         }
         let resp = match req.send().await {
-            Ok(r)  => r,
-            Err(e) => { tracing::debug!("Vault TTL check request failed: {e}"); return; }
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("Vault TTL check request failed: {e}");
+                return;
+            }
         };
         if !resp.status().is_success() {
             tracing::debug!("Vault TTL check returned {}", resp.status());
             return;
         }
         let body: serde_json::Value = match resp.json().await {
-            Ok(b)  => b,
-            Err(e) => { tracing::debug!("Vault TTL check: parse error: {e}"); return; }
+            Ok(b) => b,
+            Err(e) => {
+                tracing::debug!("Vault TTL check: parse error: {e}");
+                return;
+            }
         };
         // Response shape: { "data": { "ttl": <seconds>, "expire_time": "<rfc3339>" } }
         let ttl = body
@@ -522,7 +560,6 @@ impl HashiCorpVaultProvider {
     }
 }
 
-
 // ── AwsKmsProvider ────────────────────────────────────────────────────────────
 
 /// Derives the master key from AWS KMS via reqwest (Fix #1).
@@ -542,8 +579,8 @@ impl HashiCorpVaultProvider {
 /// KMS blob without also knowing the AWS credentials (which are used as
 /// the HMAC key derivation input).
 pub struct AwsKmsProvider {
-    pub key_id:             String,
-    pub region:             String,
+    pub key_id: String,
+    pub region: String,
     pub encryption_context: std::collections::HashMap<String, String>,
     /// Directory where `kms_data_key.enc` is cached (mode 0o600).
     pub cache_dir: Option<std::path::PathBuf>,
@@ -568,8 +605,7 @@ impl AwsKmsProvider {
 
     /// Compute HMAC-SHA256 over `data` using `key`.
     fn compute_hmac(key: &[u8], data: &str) -> String {
-        let mut mac = HmacSha256::new_from_slice(key)
-            .expect("HMAC-SHA256 accepts any key length");
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
         mac.update(data.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
@@ -598,20 +634,18 @@ impl AwsKmsProvider {
         let raw = std::fs::read_to_string(cache)
             .map_err(|e| SecretsError::AwsKms(format!("read kms_data_key.enc: {e}")))?;
         let mut lines = raw.lines();
-        let blob_b64 = lines.next()
-            .ok_or_else(|| SecretsError::AwsKms(
-                "kms_data_key.enc: missing ciphertext line".into()
-            ))?;
-        let stored_hmac = lines.next()
-            .ok_or_else(|| SecretsError::AwsKms(
+        let blob_b64 = lines.next().ok_or_else(|| {
+            SecretsError::AwsKms("kms_data_key.enc: missing ciphertext line".into())
+        })?;
+        let stored_hmac = lines.next().ok_or_else(|| {
+            SecretsError::AwsKms(
                 "kms_data_key.enc: missing HMAC line — file may be from an older version, \
-                 delete it to trigger re-generation".into()
-            ))?;
+                 delete it to trigger re-generation"
+                    .into(),
+            )
+        })?;
 
-        let expected_hmac = Self::compute_hmac(
-            &Self::hmac_key(creds, &self.region),
-            blob_b64,
-        );
+        let expected_hmac = Self::compute_hmac(&Self::hmac_key(creds, &self.region), blob_b64);
 
         // Constant-time comparison to resist timing attacks.
         use subtle::ConstantTimeEq;
@@ -619,7 +653,8 @@ impl AwsKmsProvider {
         if !bool::from(ok) {
             return Err(SecretsError::AwsKms(
                 "kms_data_key.enc HMAC verification FAILED — file may have been tampered with. \
-                 Delete it to force re-generation from KMS.".into()
+                 Delete it to force re-generation from KMS."
+                    .into(),
             ));
         }
 
@@ -641,9 +676,9 @@ impl MasterKeyProvider for AwsKmsProvider {
         }
 
         // GenerateDataKey path — first boot.
-        let (plaintext, ct_b64) = kms_generate_data_key(
-            &self.region, &self.key_id, &self.encryption_context, &creds,
-        ).await?;
+        let (plaintext, ct_b64) =
+            kms_generate_data_key(&self.region, &self.key_id, &self.encryption_context, &creds)
+                .await?;
         self.write_cache(&cache, &ct_b64, &creds)?;
         tracing::info!(path = %cache.display(), "AWS KMS: cached ciphertext blob with HMAC");
         Ok(plaintext)
@@ -654,13 +689,12 @@ impl MasterKeyProvider for AwsKmsProvider {
     }
 }
 
-
 // ── AWS credentials ───────────────────────────────────────────────────────────
 
 struct AwsCredentials {
-    access_key_id:     String,
+    access_key_id: String,
     secret_access_key: String,
-    session_token:     Option<String>,
+    session_token: Option<String>,
 }
 
 impl AwsCredentials {
@@ -670,7 +704,11 @@ impl AwsCredentials {
         let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY")
             .map_err(|_| SecretsError::AwsKms("AWS_SECRET_ACCESS_KEY not set".into()))?;
         let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
-        Ok(Self { access_key_id, secret_access_key, session_token })
+        Ok(Self {
+            access_key_id,
+            secret_access_key,
+            session_token,
+        })
     }
 }
 
@@ -696,15 +734,15 @@ fn derive_signing_key(secret: &str, date: &str, region: &str, service: &str) -> 
 
 /// Build `(Authorization-header-value, X-Amz-Date-value)` for a KMS POST.
 fn sigv4_auth(
-    host:   &str,
+    host: &str,
     target: &str,
-    body:   &str,
+    body: &str,
     region: &str,
-    creds:  &AwsCredentials,
+    creds: &AwsCredentials,
 ) -> (String, String) {
-    let now      = chrono::Utc::now();
+    let now = chrono::Utc::now();
     let date_str = now.format("%Y%m%d").to_string();
-    let dt_str   = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let dt_str = now.format("%Y%m%dT%H%M%SZ").to_string();
 
     let body_hash = sha256_hex(body.as_bytes());
 
@@ -719,13 +757,13 @@ fn sigv4_auth(
     }
 
     let canonical = format!("POST\n/\n\n{ch}\n{sh}\n{body_hash}");
-    let scope     = format!("{date_str}/{region}/kms/aws4_request");
-    let sts       = format!(
+    let scope = format!("{date_str}/{region}/kms/aws4_request");
+    let sts = format!(
         "AWS4-HMAC-SHA256\n{dt_str}\n{scope}\n{}",
         sha256_hex(canonical.as_bytes())
     );
     let sig_key = derive_signing_key(&creds.secret_access_key, &date_str, region, "kms");
-    let sig     = hex::encode(hmac_sha256_bytes(&sig_key, sts.as_bytes()));
+    let sig = hex::encode(hmac_sha256_bytes(&sig_key, sts.as_bytes()));
 
     let auth = format!(
         "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={sh}, Signature={sig}",
@@ -734,24 +772,23 @@ fn sigv4_auth(
     (auth, dt_str)
 }
 
-
 // ── KMS API calls (Fix #1: reqwest replaces hand-rolled HTTP) ─────────────────
 
 async fn kms_generate_data_key(
-    region:  &str,
-    key_id:  &str,
+    region: &str,
+    key_id: &str,
     enc_ctx: &std::collections::HashMap<String, String>,
-    creds:   &AwsCredentials,
+    creds: &AwsCredentials,
 ) -> Result<(Zeroizing<[u8; 32]>, String), SecretsError> {
-    let host   = format!("kms.{region}.amazonaws.com");
+    let host = format!("kms.{region}.amazonaws.com");
     let target = "TrentService.GenerateDataKey";
     let mut payload = serde_json::json!({ "KeyId": key_id, "KeySpec": "AES_256" });
     if !enc_ctx.is_empty() {
         payload["EncryptionContext"] = serde_json::to_value(enc_ctx)
             .map_err(|e| SecretsError::Serialisation(e.to_string()))?;
     }
-    let body = serde_json::to_string(&payload)
-        .map_err(|e| SecretsError::Serialisation(e.to_string()))?;
+    let body =
+        serde_json::to_string(&payload).map_err(|e| SecretsError::Serialisation(e.to_string()))?;
     let (auth, dt) = sigv4_auth(&host, target, &body, region, creds);
 
     let client = build_reqwest_client()?;
@@ -765,7 +802,10 @@ async fn kms_generate_data_key(
         req = req.header("X-Amz-Security-Token", tok);
     }
 
-    let resp = req.body(body).send().await
+    let resp = req
+        .body(body)
+        .send()
+        .await
         .map_err(|e| SecretsError::Http(e.to_string()))?;
     let status = resp.status();
     if !status.is_success() {
@@ -775,31 +815,35 @@ async fn kms_generate_data_key(
         )));
     }
 
-    let json: serde_json::Value = resp.json().await
+    let json: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| SecretsError::AwsKms(format!("parse: {e}")))?;
-    let pt_b64 = json["Plaintext"].as_str()
+    let pt_b64 = json["Plaintext"]
+        .as_str()
         .ok_or_else(|| SecretsError::AwsKms("Plaintext missing".into()))?;
-    let ct_b64 = json["CiphertextBlob"].as_str()
+    let ct_b64 = json["CiphertextBlob"]
+        .as_str()
         .ok_or_else(|| SecretsError::AwsKms("CiphertextBlob missing".into()))?
         .to_string();
     Ok((decode_kms_key(pt_b64)?, ct_b64))
 }
 
 async fn kms_decrypt(
-    region:  &str,
-    ct_b64:  &str,
+    region: &str,
+    ct_b64: &str,
     enc_ctx: &std::collections::HashMap<String, String>,
-    creds:   &AwsCredentials,
+    creds: &AwsCredentials,
 ) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
-    let host   = format!("kms.{region}.amazonaws.com");
+    let host = format!("kms.{region}.amazonaws.com");
     let target = "TrentService.Decrypt";
     let mut payload = serde_json::json!({ "CiphertextBlob": ct_b64 });
     if !enc_ctx.is_empty() {
         payload["EncryptionContext"] = serde_json::to_value(enc_ctx)
             .map_err(|e| SecretsError::Serialisation(e.to_string()))?;
     }
-    let body = serde_json::to_string(&payload)
-        .map_err(|e| SecretsError::Serialisation(e.to_string()))?;
+    let body =
+        serde_json::to_string(&payload).map_err(|e| SecretsError::Serialisation(e.to_string()))?;
     let (auth, dt) = sigv4_auth(&host, target, &body, region, creds);
 
     let client = build_reqwest_client()?;
@@ -813,7 +857,10 @@ async fn kms_decrypt(
         req = req.header("X-Amz-Security-Token", tok);
     }
 
-    let resp = req.body(body).send().await
+    let resp = req
+        .body(body)
+        .send()
+        .await
         .map_err(|e| SecretsError::Http(e.to_string()))?;
     let status = resp.status();
     if !status.is_success() {
@@ -823,9 +870,12 @@ async fn kms_decrypt(
         )));
     }
 
-    let json: serde_json::Value = resp.json().await
+    let json: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| SecretsError::AwsKms(format!("parse: {e}")))?;
-    let pt_b64 = json["Plaintext"].as_str()
+    let pt_b64 = json["Plaintext"]
+        .as_str()
         .ok_or_else(|| SecretsError::AwsKms("Plaintext missing in Decrypt response".into()))?;
     decode_kms_key(pt_b64)
 }
@@ -840,7 +890,8 @@ fn decode_kms_key(b64: &str) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
         .decode(b64.trim())
         .map_err(|e| SecretsError::AwsKms(format!("base64 decode: {e}")))?;
     let len = bytes.len();
-    bytes.try_into()
+    bytes
+        .try_into()
         .map(Zeroizing::new)
         .map_err(|_| SecretsError::InvalidKeyLength { got: len })
 }
@@ -848,8 +899,7 @@ fn decode_kms_key(b64: &str) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 fn parse_hex_key(hex_str: &str) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| SecretsError::HexDecode(e.to_string()))?;
+    let bytes = hex::decode(hex_str).map_err(|e| SecretsError::HexDecode(e.to_string()))?;
     let len = bytes.len();
     let key: [u8; 32] = bytes
         .try_into()
@@ -873,8 +923,6 @@ fn set_mode_600(path: &Path) {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
 }
-
-
 
 // ── PyHsmProvider ─────────────────────────────────────────────────────────────
 
@@ -904,10 +952,10 @@ fn set_mode_600(path: &Path) {
 /// use cannot forge a valid seal.
 pub struct PyHsmProvider {
     pub socket_path: String,
-    pub caller_id:   String,
-    pub key_id:      String,
+    pub caller_id: String,
+    pub key_id: String,
     /// Directory where `pyhsm_master_key.enc` is cached.  `None` → current dir.
-    pub cache_dir:   Option<std::path::PathBuf>,
+    pub cache_dir: Option<std::path::PathBuf>,
 }
 
 impl PyHsmProvider {
@@ -1045,15 +1093,12 @@ impl PyHsmProvider {
     /// Fix #5: this method never logs the `req` object because it may contain
     /// a `"plaintext"` field with key material.  Callers are responsible for
     /// emitting their own sanitized debug logs before calling `ipc_call`.
-    async fn ipc_call(
-        &self,
-        req: &serde_json::Value,
-    ) -> Result<serde_json::Value, SecretsError> {
+    async fn ipc_call(&self, req: &serde_json::Value) -> Result<serde_json::Value, SecretsError> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::time::{timeout, Duration};
 
-        let mut line = serde_json::to_string(req)
-            .map_err(|e| SecretsError::Serialisation(e.to_string()))?;
+        let mut line =
+            serde_json::to_string(req).map_err(|e| SecretsError::Serialisation(e.to_string()))?;
         line.push('\n');
 
         #[cfg(unix)]
@@ -1099,15 +1144,20 @@ impl PyHsmProvider {
             // Start PyHSM with PYHSM_TCP_PORT=7777 (or whichever port you use).
             let addr = &self.socket_path;
 
-            let stream = timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(addr))
-                .await
-                .map_err(|_| SecretsError::PyHsm("PyHSM TCP connect timeout (10 s)".into()))?
-                .map_err(|e| SecretsError::PyHsm(format!(
+            let stream = timeout(
+                Duration::from_secs(10),
+                tokio::net::TcpStream::connect(addr),
+            )
+            .await
+            .map_err(|_| SecretsError::PyHsm("PyHSM TCP connect timeout (10 s)".into()))?
+            .map_err(|e| {
+                SecretsError::PyHsm(format!(
                     "PyHSM TCP connect to '{}' failed: {e}\n\
                      Is the PyHSM daemon running with PYHSM_TCP_PORT set?\n\
                      Start it with: $env:PYHSM_TCP_PORT=7777; npx tsx pyhsm-ts/process.ts",
                     addr
-                )))?;
+                ))
+            })?;
 
             let (reader_half, mut writer) = tokio::io::split(stream);
 
@@ -1166,7 +1216,7 @@ impl MasterKeyProvider for PyHsmProvider {
         // before embedding in the JSON request (Fix #5: encoding happens
         // inside hsm_encrypt so no intermediate hex binding is created that
         // could be accidentally logged by the caller).
-        let ct_b64  = self.hsm_encrypt(raw.as_ref()).await?;
+        let ct_b64 = self.hsm_encrypt(raw.as_ref()).await?;
 
         // Cache the encrypted blob with HMAC integrity seal.
         self.write_cache(&cache, &ct_b64)?;
@@ -1191,7 +1241,10 @@ fn pyhsm_parse_response(line: &str) -> Result<serde_json::Value, SecretsError> {
     let resp: serde_json::Value = serde_json::from_str(line)
         .map_err(|e| SecretsError::PyHsm(format!("PyHSM bad JSON response: {e}")))?;
     if resp["ok"].as_bool() != Some(true) {
-        let msg = resp["error"].as_str().unwrap_or("unknown error").to_string();
+        let msg = resp["error"]
+            .as_str()
+            .unwrap_or("unknown error")
+            .to_string();
         return Err(SecretsError::PyHsm(format!("PyHSM returned error: {msg}")));
     }
     Ok(resp)
@@ -1206,8 +1259,6 @@ fn bytes_to_key32(plaintext: &[u8]) -> Result<Zeroizing<[u8; 32]>, SecretsError>
         .map_err(|e| SecretsError::PyHsm(format!("plaintext is not valid UTF-8: {e}")))?;
     parse_hex_key(s.trim())
 }
-
-
 
 // ── RemotePyHsmProvider ───────────────────────────────────────────────────────
 
@@ -1232,16 +1283,16 @@ fn bytes_to_key32(plaintext: &[u8]) -> Result<Zeroizing<[u8; 32]>, SecretsError>
 /// and a `timestamp` (RFC 3339).  PyHSM is expected to reject duplicate
 /// request IDs within a replay window and stale timestamps.
 pub struct RemotePyHsmProvider {
-    pub endpoint:    String,
-    pub ca_cert:     String,
+    pub endpoint: String,
+    pub ca_cert: String,
     pub client_cert: Option<String>,
-    pub client_key:  Option<String>,
-    pub timeout_ms:  u64,
+    pub client_key: Option<String>,
+    pub timeout_ms: u64,
     pub max_retries: u32,
-    pub caller_id:   String,
-    pub key_id:      String,
+    pub caller_id: String,
+    pub key_id: String,
     /// Directory where `pyhsm_master_key.enc` is cached.  `None` → current dir.
-    pub cache_dir:   Option<std::path::PathBuf>,
+    pub cache_dir: Option<std::path::PathBuf>,
 }
 
 impl RemotePyHsmProvider {
@@ -1284,7 +1335,8 @@ impl RemotePyHsmProvider {
         let stored_hmac = lines.next().ok_or_else(|| {
             SecretsError::PyHsm(
                 "pyhsm_master_key.enc: missing HMAC line — \
-                 delete the file to trigger re-generation".into(),
+                 delete the file to trigger re-generation"
+                    .into(),
             )
         })?;
         let expected = Self::compute_hmac(&self.hmac_key(), ct_b64);
@@ -1293,7 +1345,8 @@ impl RemotePyHsmProvider {
             return Err(SecretsError::PyHsm(
                 "pyhsm_master_key.enc HMAC verification FAILED — \
                  file may have been tampered with. \
-                 Delete it to force re-generation.".into(),
+                 Delete it to force re-generation."
+                    .into(),
             ));
         }
         Ok(ct_b64.to_string())
@@ -1302,14 +1355,14 @@ impl RemotePyHsmProvider {
     /// Build an `HsmClient` configured for the remote transport.
     fn build_hsm_client(&self) -> Result<vledger_hsm::HsmClient, SecretsError> {
         let cfg = vledger_hsm::RemotePyHsmConfig {
-            endpoint:    self.resolve_env("PYHSM_ENDPOINT",     &self.endpoint),
-            ca_cert:     self.resolve_env("PYHSM_CA_CERT",      &self.ca_cert),
+            endpoint: self.resolve_env("PYHSM_ENDPOINT", &self.endpoint),
+            ca_cert: self.resolve_env("PYHSM_CA_CERT", &self.ca_cert),
             client_cert: self.resolve_env_opt("PYHSM_CLIENT_CERT", self.client_cert.as_deref()),
-            client_key:  self.resolve_env_opt("PYHSM_CLIENT_KEY",  self.client_key.as_deref()),
-            timeout_ms:  std::env::var("PYHSM_TIMEOUT_MS")
-                             .ok()
-                             .and_then(|v| v.parse().ok())
-                             .unwrap_or(self.timeout_ms),
+            client_key: self.resolve_env_opt("PYHSM_CLIENT_KEY", self.client_key.as_deref()),
+            timeout_ms: std::env::var("PYHSM_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(self.timeout_ms),
             max_retries: self.max_retries,
         };
         Ok(vledger_hsm::HsmClient::remote(cfg, &self.caller_id))
@@ -1320,16 +1373,20 @@ impl RemotePyHsmProvider {
     }
 
     fn resolve_env_opt(&self, var: &str, fallback: Option<&str>) -> Option<String> {
-        std::env::var(var).ok().or_else(|| fallback.map(|s| s.to_string()))
+        std::env::var(var)
+            .ok()
+            .or_else(|| fallback.map(|s| s.to_string()))
     }
 
     /// Encrypt `plaintext` via the remote PyHSM and return Base64 ciphertext.
     async fn hsm_encrypt(
         &self,
-        client:    &vledger_hsm::HsmClient,
+        client: &vledger_hsm::HsmClient,
         plaintext: &[u8],
     ) -> Result<String, SecretsError> {
-        let ct = client.encrypt(&self.key_id, plaintext).await
+        let ct = client
+            .encrypt(&self.key_id, plaintext)
+            .await
             .map_err(|e| SecretsError::PyHsm(format!("remote PyHSM encrypt: {e}")))?;
         use base64::{engine::general_purpose::STANDARD, Engine};
         Ok(STANDARD.encode(&ct))
@@ -1342,9 +1399,12 @@ impl RemotePyHsmProvider {
         ct_b64: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SecretsError> {
         use base64::{engine::general_purpose::STANDARD, Engine};
-        let ct = STANDARD.decode(ct_b64.trim())
+        let ct = STANDARD
+            .decode(ct_b64.trim())
             .map_err(|e| SecretsError::PyHsm(format!("base64 decode cached blob: {e}")))?;
-        let pt = client.decrypt(&self.key_id, &ct).await
+        let pt = client
+            .decrypt(&self.key_id, &ct)
+            .await
             .map_err(|e| SecretsError::PyHsm(format!("remote PyHSM decrypt: {e}")))?;
         Ok(pt)
     }
@@ -1355,7 +1415,10 @@ impl RemotePyHsmProvider {
         client: &vledger_hsm::HsmClient,
     ) -> Result<(), SecretsError> {
         use vledger_hsm::KeyPolicy;
-        match client.generate_key(&self.key_id, Some(KeyPolicy::encrypt_decrypt())).await {
+        match client
+            .generate_key(&self.key_id, Some(KeyPolicy::encrypt_decrypt()))
+            .await
+        {
             Ok(()) => Ok(()),
             Err(vledger_hsm::HsmError::Remote(ref msg)) if msg.contains("already exists") => Ok(()),
             Err(e) => Err(SecretsError::PyHsm(format!("ensure wrapping key: {e}"))),
@@ -1367,7 +1430,7 @@ impl RemotePyHsmProvider {
 impl MasterKeyProvider for RemotePyHsmProvider {
     async fn load_master_key(&self) -> Result<Zeroizing<[u8; 32]>, SecretsError> {
         let client = self.build_hsm_client()?;
-        let cache  = self.cache_path();
+        let cache = self.cache_path();
 
         if cache.exists() {
             let ct_b64 = self.read_cache_verified(&cache)?;

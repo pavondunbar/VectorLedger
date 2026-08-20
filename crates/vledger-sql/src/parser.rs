@@ -66,13 +66,16 @@ pub const MAX_NESTING_DEPTH: usize = 20;
 /// not contribute to the depth counter.
 fn check_query_limits(sql: &str) -> Result<(), SqlError> {
     let bytes = sql.as_bytes();
-    let len   = bytes.len();
+    let len = bytes.len();
 
     if len > MAX_SQL_BYTES {
-        return Err(SqlError::QueryTooLong { len, limit: MAX_SQL_BYTES });
+        return Err(SqlError::QueryTooLong {
+            len,
+            limit: MAX_SQL_BYTES,
+        });
     }
 
-    let mut depth:   usize = 0;
+    let mut depth: usize = 0;
     let mut max_depth: usize = 0;
     let mut i = 0usize;
 
@@ -120,7 +123,9 @@ fn check_query_limits(sql: &str) -> Result<(), SqlError> {
                     i += 1;
                 }
                 // consume the newline itself if present
-                if i < len { i += 1; }
+                if i < len {
+                    i += 1;
+                }
             }
 
             // ── Block comment  /* … */ ────────────────────────────────────
@@ -160,7 +165,9 @@ fn check_query_limits(sql: &str) -> Result<(), SqlError> {
                 i += 1;
             }
 
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -178,8 +185,7 @@ fn check_query_limits(sql: &str) -> Result<(), SqlError> {
 /// module-level documentation for details.
 pub fn parse(sql: &str) -> Result<Vec<Statement>, SqlError> {
     check_query_limits(sql)?;
-    SqlParser::parse_sql(&GenericDialect {}, sql)
-        .map_err(|e| SqlError::Parse(e.to_string()))
+    SqlParser::parse_sql(&GenericDialect {}, sql).map_err(|e| SqlError::Parse(e.to_string()))
 }
 
 /// Parse exactly one SQL statement.  Returns an error if there are zero or
@@ -251,7 +257,7 @@ mod tests {
         // length guard.  We use a comment so the extra bytes don't confuse
         // the parser.
         let padding = " ".repeat(MAX_SQL_BYTES - "SELECT * FROM ledger".len());
-        let sql     = format!("SELECT * FROM ledger{padding}");
+        let sql = format!("SELECT * FROM ledger{padding}");
         assert_eq!(sql.len(), MAX_SQL_BYTES);
         // Length guard passes; parser may succeed or return a parse error —
         // either way it must NOT return QueryTooLong.
@@ -268,7 +274,7 @@ mod tests {
         let sql = "x".repeat(MAX_SQL_BYTES + 1);
         match parse_one(&sql) {
             Err(SqlError::QueryTooLong { len, limit }) => {
-                assert_eq!(len,   MAX_SQL_BYTES + 1);
+                assert_eq!(len, MAX_SQL_BYTES + 1);
                 assert_eq!(limit, MAX_SQL_BYTES);
             }
             other => panic!("expected QueryTooLong, got {other:?}"),
@@ -278,7 +284,10 @@ mod tests {
     #[test]
     fn query_far_over_limit_is_rejected() {
         let sql = "x".repeat(MAX_SQL_BYTES * 10);
-        assert!(matches!(parse_one(&sql), Err(SqlError::QueryTooLong { .. })));
+        assert!(matches!(
+            parse_one(&sql),
+            Err(SqlError::QueryTooLong { .. })
+        ));
     }
 
     // ── Guard: nesting depth ──────────────────────────────────────────────
@@ -286,7 +295,11 @@ mod tests {
     #[test]
     fn nesting_at_limit_is_accepted() {
         // MAX_NESTING_DEPTH open parens, immediately closed — valid but deep.
-        let parens = format!("{}{}", "(".repeat(MAX_NESTING_DEPTH), ")".repeat(MAX_NESTING_DEPTH));
+        let parens = format!(
+            "{}{}",
+            "(".repeat(MAX_NESTING_DEPTH),
+            ")".repeat(MAX_NESTING_DEPTH)
+        );
         // check_query_limits must pass (parser may error — that's fine).
         let result = check_query_limits(&parens);
         assert!(
@@ -298,10 +311,10 @@ mod tests {
     #[test]
     fn nesting_one_over_limit_is_rejected() {
         let depth = MAX_NESTING_DEPTH + 1;
-        let sql   = format!("{}{}", "(".repeat(depth), ")".repeat(depth));
+        let sql = format!("{}{}", "(".repeat(depth), ")".repeat(depth));
         match check_query_limits(&sql) {
             Err(SqlError::NestingTooDeep { depth: d, limit }) => {
-                assert_eq!(d,     depth);
+                assert_eq!(d, depth);
                 assert_eq!(limit, MAX_NESTING_DEPTH);
             }
             other => panic!("expected NestingTooDeep, got {other:?}"),
@@ -318,9 +331,9 @@ mod tests {
         }
         match parse_one(&sql) {
             Err(SqlError::NestingTooDeep { .. }) => {} // correct
-            Err(SqlError::QueryTooLong  { .. }) => {} // also fine — depth guard or length guard
+            Err(SqlError::QueryTooLong { .. }) => {}   // also fine — depth guard or length guard
             Err(e) => panic!("unexpected error variant: {e}"),
-            Ok(_)  => panic!("50-level nesting must be rejected"),
+            Ok(_) => panic!("50-level nesting must be rejected"),
         }
     }
 
@@ -330,10 +343,13 @@ mod tests {
         // Build a query where every ( appears inside a string value.
         // Each VALUES clause contributes one string containing '(', but
         // the real nesting depth of the query is 1 (the VALUES parens).
-        let n     = MAX_NESTING_DEPTH + 5;
+        let n = MAX_NESTING_DEPTH + 5;
         // One real paren pair for VALUES(...), then n string literals each
         // containing a ( — none of which should count toward depth.
-        let values: String = (0..n).map(|_| "'('".to_string()).collect::<Vec<_>>().join(", ");
+        let values: String = (0..n)
+            .map(|_| "'('".to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!("SELECT {values} FROM ledger WHERE domain = '((((('");
         // Real structural depth is 0 (no parens outside strings). Must pass.
         let result = check_query_limits(&sql);
@@ -372,7 +388,10 @@ mod tests {
         // Saturating subtraction means extra `)` never panic.
         let sql = ")))))))))))))))))))))";
         let result = check_query_limits(sql);
-        assert!(result.is_ok(), "unbalanced close parens must not panic: {result:?}");
+        assert!(
+            result.is_ok(),
+            "unbalanced close parens must not panic: {result:?}"
+        );
     }
 
     #[test]

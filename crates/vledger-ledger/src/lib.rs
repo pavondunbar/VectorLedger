@@ -19,28 +19,28 @@
 
 pub mod account;
 pub mod amount;
+#[cfg(test)]
+mod concurrent_tests;
+#[cfg(test)]
+mod crash_tests;
 pub mod currency;
 pub mod entry;
 pub mod error;
-pub mod lockfile;
-pub mod store;
-#[cfg(test)]
-mod crash_tests;
-#[cfg(test)]
-mod concurrent_tests;
 #[cfg(test)]
 mod fault_injection_tests;
 #[cfg(test)]
 mod invariant_tests;
+pub mod lockfile;
 #[cfg(test)]
 mod proptest_invariants;
+pub mod store;
 #[cfg(test)]
 mod stress_tests;
 
 pub use account::{Account, AccountId, AccountType};
 pub use amount::Amount;
 pub use currency::Currency;
-pub use entry::{JournalEntry, JournalEntryBuilder, JournalLine, EntryStatus};
+pub use entry::{EntryStatus, JournalEntry, JournalEntryBuilder, JournalLine};
 pub use error::LedgerError;
 pub use lockfile::{DataDirLock, LockError};
 pub use store::{LedgerStore, ReversalEvent};

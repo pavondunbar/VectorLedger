@@ -42,8 +42,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use chrono::Utc;
 use tracing::{info, warn};
@@ -57,7 +57,6 @@ use crate::account::{Account, AccountId, AccountStatus, AccountType};
 use crate::entry::{DrCr, EntryStatus, JournalEntry, JournalLine};
 use crate::error::LedgerError;
 use crate::lockfile::DataDirLock;
-
 
 // ── Table IDs ────────────────────────────────────────────────────────────────
 // Each logical table maps to a dedicated page file in PageStore.
@@ -86,7 +85,6 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, LedgerError
         .map_err(|e: bincode::error::DecodeError| LedgerError::Serialization(e.to_string()))
 }
 
-
 // ── ReversalEvent ─────────────────────────────────────────────────────────────
 
 /// An immutable, append-only record that binds an original entry to its
@@ -104,7 +102,6 @@ pub struct ReversalEvent {
     /// UTC timestamp when the reversal was posted.
     pub reversed_at: chrono::DateTime<Utc>,
 }
-
 
 // ── LedgerStore ──────────────────────────────────────────────────────────────
 
@@ -190,11 +187,12 @@ impl LedgerStore {
 
         // Acquire an exclusive advisory lock on the data directory to prevent
         // two processes from opening the same store simultaneously.
-        let lock = DataDirLock::acquire(data_dir)
-            .map_err(|e| LedgerError::Io(std::io::Error::new(
+        let lock = DataDirLock::acquire(data_dir).map_err(|e| {
+            LedgerError::Io(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 format!("cannot lock data directory: {e}"),
-            )))?;
+            ))
+        })?;
 
         let mut store = Self {
             tx_manager,
@@ -218,7 +216,7 @@ impl LedgerStore {
 
         info!(
             accounts = store.accounts.len(),
-            entries  = store.entries.len(),
+            entries = store.entries.len(),
             sequence = store.next_sequence.load(Ordering::SeqCst),
             "LedgerStore opened"
         );
@@ -235,8 +233,7 @@ impl LedgerStore {
     #[cfg(any(test, feature = "self-test"))]
     pub fn new_in_memory() -> Result<Self, LedgerError> {
         let tmp = std::env::temp_dir().join(format!("vledger-mem-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp)
-            .map_err(|e| LedgerError::Io(e))?;
+        std::fs::create_dir_all(&tmp).map_err(|e| LedgerError::Io(e))?;
         Self::open(&tmp)
     }
 
@@ -290,7 +287,6 @@ impl LedgerStore {
         }
     }
 
-
     // ── WAL replay ────────────────────────────────────────────────────────
 
     /// Replay committed WAL records into in-memory indexes.
@@ -302,8 +298,8 @@ impl LedgerStore {
     /// a signing key), `recover_verified` is used so that any tampered commit
     /// is caught as a hard error before state is applied.
     fn replay_from_wal(&mut self, wal_dir: &Path) -> Result<(), LedgerError> {
-        use vledger_wal::recovery::{decode_data_payload, recover, recover_verified};
         use vledger_wal::record::MutationKind;
+        use vledger_wal::recovery::{decode_data_payload, recover, recover_verified};
 
         // Use verified recovery when a signing key is configured so that
         // Ed25519 signatures on CommitPayloads are checked on startup.
@@ -314,8 +310,8 @@ impl LedgerStore {
             recover(wal_dir)?
         };
         info!(
-            committed         = result.committed.len(),
-            discarded         = result.discarded_tx_count,
+            committed = result.committed.len(),
+            discarded = result.discarded_tx_count,
             verify_signatures = self.tx_manager.signing_pubkey().is_some(),
             "Replaying WAL into LedgerStore"
         );
@@ -324,26 +320,22 @@ impl LedgerStore {
             for record in &tx.data_records {
                 let payload = decode_data_payload(record)?;
                 match payload.mutation {
-                    MutationKind::Insert | MutationKind::Update => {
-                        match payload.table_id {
-                            TABLE_ACCOUNTS => {
-                                let account: Account = decode(&payload.row_data)?;
-                                self.apply_account(account);
-                            }
-                            TABLE_ENTRIES => {
-                                let entry: JournalEntry = decode(&payload.row_data)?;
-                                self.apply_entry(entry);
-                            }
-                            TABLE_REVERSAL_EVENTS => {
-                                let event: ReversalEvent = decode(&payload.row_data)?;
-                                self.reversal_event_index.insert(
-                                    event.original_entry_id,
-                                    event.reversal_entry_id,
-                                );
-                            }
-                            _ => {}
+                    MutationKind::Insert | MutationKind::Update => match payload.table_id {
+                        TABLE_ACCOUNTS => {
+                            let account: Account = decode(&payload.row_data)?;
+                            self.apply_account(account);
                         }
-                    }
+                        TABLE_ENTRIES => {
+                            let entry: JournalEntry = decode(&payload.row_data)?;
+                            self.apply_entry(entry);
+                        }
+                        TABLE_REVERSAL_EVENTS => {
+                            let event: ReversalEvent = decode(&payload.row_data)?;
+                            self.reversal_event_index
+                                .insert(event.original_entry_id, event.reversal_entry_id);
+                        }
+                        _ => {}
+                    },
                     MutationKind::Delete => {
                         // Logical deletes on accounts (close_account).
                         // We handle these by re-reading the updated account row.
@@ -368,7 +360,8 @@ impl LedgerStore {
     fn apply_entry(&mut self, entry: JournalEntry) {
         // Advance sequence counter past replayed entries
         if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
-            self.next_sequence.store(entry.sequence + 1, Ordering::SeqCst);
+            self.next_sequence
+                .store(entry.sequence + 1, Ordering::SeqCst);
         }
         // Advance chain tip
         self.last_chain_hash = entry.chain_hash;
@@ -378,10 +371,7 @@ impl LedgerStore {
         }
         // Build entry index and update running balance cache.
         // Only Posted and Reversal entries affect balances — skip others.
-        let affects_balance = matches!(
-            entry.status,
-            EntryStatus::Posted | EntryStatus::Reversal
-        );
+        let affects_balance = matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
         let idx = self.entries.len();
         for line in &entry.lines {
             self.account_entry_index
@@ -408,10 +398,7 @@ impl LedgerStore {
     /// cache will be correctly populated once `apply_account` runs.
     fn update_balance_cache(&mut self, account_id: AccountId, amount: i128, dr_cr: DrCr) {
         let is_debit_normal = match self.accounts.get(&account_id) {
-            Some(acct) => matches!(
-                acct.account_type,
-                AccountType::Asset | AccountType::Expense
-            ),
+            Some(acct) => matches!(acct.account_type, AccountType::Asset | AccountType::Expense),
             // Account not yet in memory — skip; cache will be correct after
             // the account record is applied and the entry re-evaluated via
             // the full balance() recompute on first access.
@@ -420,19 +407,18 @@ impl LedgerStore {
 
         let delta: i128 = if is_debit_normal {
             match dr_cr {
-                DrCr::Debit  =>  amount,
+                DrCr::Debit => amount,
                 DrCr::Credit => -amount,
             }
         } else {
             match dr_cr {
-                DrCr::Credit =>  amount,
-                DrCr::Debit  => -amount,
+                DrCr::Credit => amount,
+                DrCr::Debit => -amount,
             }
         };
 
         *self.balance_cache.entry(account_id).or_insert(0) += delta;
     }
-
 
     // ── Durable write helper ──────────────────────────────────────────────
 
@@ -448,23 +434,27 @@ impl LedgerStore {
         // Copy cursor out to avoid holding a &mut to self while calling write_to_page
         let cursor = match table_id {
             TABLE_ACCOUNTS => self.next_account_page,
-            _              => self.next_entry_page,
+            _ => self.next_entry_page,
         };
 
-        let (page_id, slot_id, next_cursor) =
-            self.write_to_page(table_id, row_data, cursor)?;
+        let (page_id, slot_id, next_cursor) = self.write_to_page(table_id, row_data, cursor)?;
 
         // Write cursor back
         match table_id {
             TABLE_ACCOUNTS => self.next_account_page = next_cursor,
-            _              => self.next_entry_page   = next_cursor,
+            _ => self.next_entry_page = next_cursor,
         };
 
         // WAL transaction
         let tx_id = self.tx_manager.begin(None)?;
         self.tx_manager.add_mutation(
-            tx_id, table_id, page_id, slot_id,
-            mutation, row_data.to_vec(), prev_hash,
+            tx_id,
+            table_id,
+            page_id,
+            slot_id,
+            mutation,
+            row_data.to_vec(),
+            prev_hash,
         )?;
         self.tx_manager.commit(tx_id)?;
 
@@ -478,34 +468,42 @@ impl LedgerStore {
     /// `ReversalEvent` atomically — either both are durable or neither is.
     fn persist_row_pair(
         &mut self,
-        table_a:   u32,
-        data_a:    &[u8],
-        prev_a:    Option<vledger_crypto::Hash>,
-        table_b:   u32,
-        data_b:    &[u8],
+        table_a: u32,
+        data_a: &[u8],
+        prev_a: Option<vledger_crypto::Hash>,
+        table_b: u32,
+        data_b: &[u8],
     ) -> Result<(), LedgerError> {
         // Write both pages first.
         let cursor_a = self.next_entry_page;
-        let (page_id_a, slot_id_a, next_a) =
-            self.write_to_page(table_a, data_a, cursor_a)?;
+        let (page_id_a, slot_id_a, next_a) = self.write_to_page(table_a, data_a, cursor_a)?;
         self.next_entry_page = next_a;
 
         // Reversal events use the entry cursor as well (same page namespace
         // is fine — table_id distinguishes them logically).
         let cursor_b = self.next_entry_page;
-        let (page_id_b, slot_id_b, next_b) =
-            self.write_to_page(table_b, data_b, cursor_b)?;
+        let (page_id_b, slot_id_b, next_b) = self.write_to_page(table_b, data_b, cursor_b)?;
         self.next_entry_page = next_b;
 
         // Single WAL transaction — both mutations committed together.
         let tx_id = self.tx_manager.begin(Some("reversal".to_string()))?;
         self.tx_manager.add_mutation(
-            tx_id, table_a, page_id_a, slot_id_a,
-            MutationKind::Insert, data_a.to_vec(), prev_a,
+            tx_id,
+            table_a,
+            page_id_a,
+            slot_id_a,
+            MutationKind::Insert,
+            data_a.to_vec(),
+            prev_a,
         )?;
         self.tx_manager.add_mutation(
-            tx_id, table_b, page_id_b, slot_id_b,
-            MutationKind::Insert, data_b.to_vec(), None,
+            tx_id,
+            table_b,
+            page_id_b,
+            slot_id_b,
+            MutationKind::Insert,
+            data_b.to_vec(),
+            None,
         )?;
         self.tx_manager.commit(tx_id)?;
 
@@ -522,19 +520,18 @@ impl LedgerStore {
     ) -> Result<(u64, u16, u64), LedgerError> {
         let mut page = Page::new(cursor, table_id);
 
-        let slot_id = page.write_slot(row_data).map_err(|e| {
-            LedgerError::Serialization(format!("page write_slot: {e}"))
-        })?;
+        let slot_id = page
+            .write_slot(row_data)
+            .map_err(|e| LedgerError::Serialization(format!("page write_slot: {e}")))?;
 
         let page_id = page.header.page_id;
         page.seal();
-        self.page_store.write_page(&page).map_err(|e| {
-            LedgerError::Serialization(format!("page_store write: {e}"))
-        })?;
+        self.page_store
+            .write_page(&page)
+            .map_err(|e| LedgerError::Serialization(format!("page_store write: {e}")))?;
 
         Ok((page_id, slot_id, cursor + 1))
     }
-
 
     // ── Account management ────────────────────────────────────────────────
 
@@ -555,7 +552,9 @@ impl LedgerStore {
 
     /// Close an account. Append-only: persists a new version with status=Closed.
     pub fn close_account(&mut self, id: &AccountId) -> Result<(), LedgerError> {
-        let acct = self.accounts.get_mut(id)
+        let acct = self
+            .accounts
+            .get_mut(id)
             .ok_or_else(|| LedgerError::AccountNotFound(id.to_string()))?;
         acct.status = AccountStatus::Closed;
         let bytes = encode(acct)?;
@@ -588,9 +587,10 @@ impl LedgerStore {
         if let Some(ref key) = entry.idempotency_key {
             if self.idempotency_keys.contains(key) {
                 warn!(key, "Idempotency key already posted");
-                let idx = self.entries.iter().position(|e| {
-                    e.idempotency_key.as_deref() == Some(key)
-                });
+                let idx = self
+                    .entries
+                    .iter()
+                    .position(|e| e.idempotency_key.as_deref() == Some(key));
                 if let Some(i) = idx {
                     return Ok(&self.entries[i]);
                 }
@@ -600,7 +600,9 @@ impl LedgerStore {
         // 3. Per-line account-level validation (existence, status, currency, four-eyes).
         //    Exposure limits and balance checks are done in aggregate below.
         for line in &entry.lines {
-            let acct = self.accounts.get(&line.account_id)
+            let acct = self
+                .accounts
+                .get(&line.account_id)
                 .ok_or_else(|| LedgerError::AccountNotFound(line.account_id.to_string()))?;
             if !acct.is_active() {
                 return Err(LedgerError::AccountClosed(line.account_id.to_string()));
@@ -640,7 +642,7 @@ impl LedgerStore {
             let mut net_debit_delta: HM<AccountId, i128> = HM::new();
             for line in &entry.lines {
                 let delta: i128 = match line.dr_cr {
-                    DrCr::Debit  =>  line.amount.as_i128(),
+                    DrCr::Debit => line.amount.as_i128(),
                     DrCr::Credit => -line.amount.as_i128(),
                 };
                 *net_debit_delta.entry(line.account_id).or_insert(0) += delta;
@@ -651,8 +653,7 @@ impl LedgerStore {
             let mut total_debit: HM<AccountId, i128> = HM::new();
             for line in &entry.lines {
                 if matches!(line.dr_cr, DrCr::Debit) {
-                    *total_debit.entry(line.account_id).or_insert(0)
-                        += line.amount.as_i128();
+                    *total_debit.entry(line.account_id).or_insert(0) += line.amount.as_i128();
                 }
             }
 
@@ -682,10 +683,8 @@ impl LedgerStore {
                 // that have the constraint enabled.  A negative `delta` means
                 // this entry is a net credit against the account, which
                 // reduces the balance.
-                let is_debit_normal = matches!(
-                    acct.account_type,
-                    AccountType::Asset | AccountType::Expense
-                );
+                let is_debit_normal =
+                    matches!(acct.account_type, AccountType::Asset | AccountType::Expense);
                 if acct.require_non_negative_balance && is_debit_normal && delta < 0 {
                     let current = self.balance(account_id);
                     // delta is negative (net credit), so: projected = current + delta
@@ -693,10 +692,10 @@ impl LedgerStore {
                     if projected < 0 {
                         return Err(LedgerError::InsufficientFunds {
                             account_id: account_id.to_string(),
-                            balance:    current,
+                            balance: current,
                             // Report the magnitude of the net credit that caused
                             // the shortfall so the error message is useful.
-                            debit:      (-delta),
+                            debit: (-delta),
                         });
                     }
                 }
@@ -727,10 +726,7 @@ impl LedgerStore {
             self.idempotency_keys.insert(key.clone());
         }
         let idx = self.entries.len();
-        let affects_balance = matches!(
-            entry.status,
-            EntryStatus::Posted | EntryStatus::Reversal
-        );
+        let affects_balance = matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
         for line in &entry.lines {
             self.account_entry_index
                 .entry(line.account_id)
@@ -745,7 +741,6 @@ impl LedgerStore {
         info!(sequence = seq, "Journal entry posted");
         Ok(&self.entries[idx])
     }
-
 
     /// Reverse a posted entry by appending a mirror entry and a `ReversalEvent`.
     ///
@@ -770,7 +765,10 @@ impl LedgerStore {
         description: impl Into<String>,
         domain: impl Into<String>,
     ) -> Result<&JournalEntry, LedgerError> {
-        let original_idx = self.entries.iter().position(|e| e.id == entry_id)
+        let original_idx = self
+            .entries
+            .iter()
+            .position(|e| e.id == entry_id)
             .ok_or_else(|| LedgerError::EntryNotFound(entry_id.to_string()))?;
 
         // Only Posted entries may be reversed.
@@ -789,43 +787,44 @@ impl LedgerStore {
 
         // Build reversal lines by flipping Dr/Cr.
         let reversal_lines: Vec<JournalLine> = self.entries[original_idx]
-            .lines.iter().map(|line| {
-            JournalLine {
+            .lines
+            .iter()
+            .map(|line| JournalLine {
                 id: Uuid::new_v4(),
                 account_id: line.account_id,
                 currency_code: line.currency_code.clone(),
                 amount: line.amount,
                 dr_cr: match line.dr_cr {
-                    DrCr::Debit  => DrCr::Credit,
+                    DrCr::Debit => DrCr::Credit,
                     DrCr::Credit => DrCr::Debit,
                 },
                 memo: Some(format!("Reversal of line {}", line.id)),
-            }
-        }).collect();
+            })
+            .collect();
 
-        let domain_str  = domain.into();
-        let desc_str    = description.into();
+        let domain_str = domain.into();
+        let desc_str = description.into();
         let mut reversal = JournalEntry {
-            id:                  Uuid::new_v4(),
-            sequence:            0,
-            status:              EntryStatus::Reversal,
-            description:         desc_str,
-            lines:               reversal_lines,
-            effective_at:        Utc::now(),
-            posted_at:           Utc::now(),
-            external_ref:        None,
-            idempotency_key:     None,
-            reverses_entry_id:   Some(entry_id),
+            id: Uuid::new_v4(),
+            sequence: 0,
+            status: EntryStatus::Reversal,
+            description: desc_str,
+            lines: reversal_lines,
+            effective_at: Utc::now(),
+            posted_at: Utc::now(),
+            external_ref: None,
+            idempotency_key: None,
+            reverses_entry_id: Some(entry_id),
             reversed_by_entry_id: None,
-            domain:              domain_str,
-            content_hash:        ZERO_HASH,
-            prev_hash:           ZERO_HASH,
-            chain_hash:          ZERO_HASH,
-            approved_by:         None,
+            domain: domain_str,
+            content_hash: ZERO_HASH,
+            prev_hash: ZERO_HASH,
+            chain_hash: ZERO_HASH,
+            approved_by: None,
         };
 
         let seq = self.next_sequence.fetch_add(1, Ordering::SeqCst);
-        reversal.sequence  = seq;
+        reversal.sequence = seq;
         reversal.posted_at = Utc::now();
         reversal.finalize_hashes(&self.last_chain_hash);
 
@@ -833,18 +832,21 @@ impl LedgerStore {
         let event = ReversalEvent {
             original_entry_id: entry_id,
             reversal_entry_id: reversal_id,
-            reversed_at:       reversal.posted_at,
+            reversed_at: reversal.posted_at,
         };
 
         // Serialize both records before touching durable state.
         let reversal_bytes = encode(&reversal)?;
-        let event_bytes    = encode(&event)?;
-        let prev_hash      = Some(reversal.prev_hash);
+        let event_bytes = encode(&event)?;
+        let prev_hash = Some(reversal.prev_hash);
 
         // Atomic: both records committed in a single WAL transaction.
         self.persist_row_pair(
-            TABLE_ENTRIES,         &reversal_bytes, prev_hash,
-            TABLE_REVERSAL_EVENTS, &event_bytes,
+            TABLE_ENTRIES,
+            &reversal_bytes,
+            prev_hash,
+            TABLE_REVERSAL_EVENTS,
+            &event_bytes,
         )?;
 
         // Update in-memory state — only after durable commit.
@@ -886,7 +888,6 @@ impl LedgerStore {
         self.reversal_event_index.get(entry_id).copied()
     }
 
-
     // ── Queries ───────────────────────────────────────────────────────────
 
     /// Compute the current balance for an account.
@@ -919,22 +920,30 @@ impl LedgerStore {
     }
 
     /// Total number of posted entries.
-    pub fn entry_count(&self) -> usize { self.entries.len() }
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
 
     /// Current BLAKE3 hash chain tip.
-    pub fn chain_tip(&self) -> &Hash { &self.last_chain_hash }
+    pub fn chain_tip(&self) -> &Hash {
+        &self.last_chain_hash
+    }
 
     /// Verify the entire hash chain from first to last entry.
     pub fn verify_chain_integrity(&self) -> Result<(), LedgerError> {
         let mut prev_hash = ZERO_HASH;
         for entry in &self.entries {
             if !entry.verify_hashes() {
-                return Err(LedgerError::Serialization(
-                    format!("Hash chain broken at sequence {}", entry.sequence)));
+                return Err(LedgerError::Serialization(format!(
+                    "Hash chain broken at sequence {}",
+                    entry.sequence
+                )));
             }
             if entry.prev_hash != prev_hash {
-                return Err(LedgerError::Serialization(
-                    format!("Chain linkage broken at sequence {}", entry.sequence)));
+                return Err(LedgerError::Serialization(format!(
+                    "Chain linkage broken at sequence {}",
+                    entry.sequence
+                )));
             }
             prev_hash = entry.chain_hash;
         }
@@ -951,12 +960,14 @@ impl LedgerStore {
     pub fn verify_chain_range(
         &self,
         from_seq: Option<u64>,
-        to_seq:   Option<u64>,
+        to_seq: Option<u64>,
     ) -> Result<(usize, vledger_crypto::Hash), LedgerError> {
-        let entries: Vec<&JournalEntry> = self.entries.iter()
+        let entries: Vec<&JournalEntry> = self
+            .entries
+            .iter()
             .filter(|e| {
-                from_seq.map_or(true, |f| e.sequence >= f) &&
-                to_seq.map_or(true,   |t| e.sequence <= t)
+                from_seq.map_or(true, |f| e.sequence >= f)
+                    && to_seq.map_or(true, |t| e.sequence <= t)
             })
             .collect();
 
@@ -969,16 +980,20 @@ impl LedgerStore {
         // prev_hash which we accept as the range's starting point.
         let mut prev_hash = entries[0].prev_hash;
         let mut count = 0usize;
-        let mut tip   = ZERO_HASH;
+        let mut tip = ZERO_HASH;
 
         for entry in &entries {
             if !entry.verify_hashes() {
-                return Err(LedgerError::Serialization(
-                    format!("Hash chain broken at sequence {}", entry.sequence)));
+                return Err(LedgerError::Serialization(format!(
+                    "Hash chain broken at sequence {}",
+                    entry.sequence
+                )));
             }
             if entry.prev_hash != prev_hash {
-                return Err(LedgerError::Serialization(
-                    format!("Chain linkage broken at sequence {}", entry.sequence)));
+                return Err(LedgerError::Serialization(format!(
+                    "Chain linkage broken at sequence {}",
+                    entry.sequence
+                )));
             }
             prev_hash = entry.chain_hash;
             tip = entry.chain_hash;
@@ -1042,7 +1057,8 @@ impl LedgerStore {
     pub fn checkpoint(&mut self) -> Result<u64, LedgerError> {
         // Compute the Merkle root over all durable entry pages.
         // Returns ZERO_HASH when no pages exist yet (empty ledger).
-        let root = self.page_store
+        let root = self
+            .page_store
             .table_merkle_root(TABLE_ENTRIES)
             .map_err(|e| LedgerError::Serialization(e.to_string()))?;
 
@@ -1109,7 +1125,6 @@ impl LedgerStore {
     }
 }
 
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -1128,10 +1143,24 @@ mod tests {
     }
 
     fn add_accounts(store: &mut LedgerStore) -> (AccountId, AccountId) {
-        let cash = store.create_account(Account::new(
-            "1001", "Cash USD", AccountType::Asset, "USD", "test")).unwrap();
-        let revenue = store.create_account(Account::new(
-            "4001", "Revenue", AccountType::Income, "USD", "test")).unwrap();
+        let cash = store
+            .create_account(Account::new(
+                "1001",
+                "Cash USD",
+                AccountType::Asset,
+                "USD",
+                "test",
+            ))
+            .unwrap();
+        let revenue = store
+            .create_account(Account::new(
+                "4001",
+                "Revenue",
+                AccountType::Income,
+                "USD",
+                "test",
+            ))
+            .unwrap();
         (cash, revenue)
     }
 
@@ -1141,7 +1170,9 @@ mod tests {
         let (cash, revenue) = add_accounts(&mut store);
         let amt = Amount::new(10000).unwrap();
         let entry = JournalEntryBuilder::new("Sale", "test")
-            .debit(cash, amt, "USD").credit(revenue, amt, "USD").build();
+            .debit(cash, amt, "USD")
+            .credit(revenue, amt, "USD")
+            .build();
         store.post_entry(entry).unwrap();
         assert_eq!(store.balance(&cash), 10000);
         assert_eq!(store.balance(&revenue), 10000);
@@ -1154,7 +1185,9 @@ mod tests {
         for i in 1..=5 {
             let amt = Amount::new(i * 100).unwrap();
             let e = JournalEntryBuilder::new(format!("Entry {i}"), "test")
-                .debit(cash, amt, "USD").credit(revenue, amt, "USD").build();
+                .debit(cash, amt, "USD")
+                .credit(revenue, amt, "USD")
+                .build();
             store.post_entry(e).unwrap();
         }
         store.verify_chain_integrity().unwrap();
@@ -1169,13 +1202,29 @@ mod tests {
 
         let (cash_id, revenue_id) = {
             let mut store = LedgerStore::open(data_path).unwrap();
-            let cash = store.create_account(Account::new(
-                "1001", "Cash", AccountType::Asset, "USD", "test")).unwrap();
-            let rev = store.create_account(Account::new(
-                "4001", "Revenue", AccountType::Income, "USD", "test")).unwrap();
+            let cash = store
+                .create_account(Account::new(
+                    "1001",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let rev = store
+                .create_account(Account::new(
+                    "4001",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
             let amt = Amount::new(5000).unwrap();
             let e = JournalEntryBuilder::new("Initial sale", "test")
-                .debit(cash, amt, "USD").credit(rev, amt, "USD").build();
+                .debit(cash, amt, "USD")
+                .credit(rev, amt, "USD")
+                .build();
             store.post_entry(e).unwrap();
             (cash, rev)
         }; // store dropped here — WAL flushed
@@ -1194,7 +1243,9 @@ mod tests {
         let (cash, revenue) = add_accounts(&mut store);
         let amt = Amount::new(10000).unwrap();
         let e = JournalEntryBuilder::new("Original", "test")
-            .debit(cash, amt, "USD").credit(revenue, amt, "USD").build();
+            .debit(cash, amt, "USD")
+            .credit(revenue, amt, "USD")
+            .build();
         let posted = store.post_entry(e).unwrap();
         let eid = posted.id;
         store.reverse_entry(eid, "Reversal", "test").unwrap();
@@ -1208,28 +1259,38 @@ mod tests {
         let (cash, revenue) = add_accounts(&mut store);
         let amt = Amount::new(10000).unwrap();
         let e = JournalEntryBuilder::new("Original", "test")
-            .debit(cash, amt, "USD").credit(revenue, amt, "USD").build();
+            .debit(cash, amt, "USD")
+            .credit(revenue, amt, "USD")
+            .build();
         let posted = store.post_entry(e).unwrap();
         let eid = posted.id;
 
         // Capture the original entry's bytes BEFORE reversal.
         let original_chain_hash_before = store.all_entries()[0].chain_hash;
-        let original_status_before     = store.all_entries()[0].status;
+        let original_status_before = store.all_entries()[0].status;
 
         store.reverse_entry(eid, "Reversal", "test").unwrap();
 
         // Original entry must be completely unchanged.
         let original_after = store.all_entries().iter().find(|e| e.id == eid).unwrap();
-        assert_eq!(original_after.chain_hash, original_chain_hash_before,
-            "original entry chain_hash must not change after reversal");
-        assert_eq!(original_after.status, original_status_before,
-            "original entry status must not be mutated — use is_reversed() instead");
+        assert_eq!(
+            original_after.chain_hash, original_chain_hash_before,
+            "original entry chain_hash must not change after reversal"
+        );
+        assert_eq!(
+            original_after.status, original_status_before,
+            "original entry status must not be mutated — use is_reversed() instead"
+        );
 
         // Reversed status is derived from the event index, not a mutable field.
-        assert!(store.is_reversed(&eid),
-            "is_reversed() must return true after reversal");
-        assert!(store.reversed_by(&eid).is_some(),
-            "reversed_by() must return the reversal entry id");
+        assert!(
+            store.is_reversed(&eid),
+            "is_reversed() must return true after reversal"
+        );
+        assert!(
+            store.reversed_by(&eid).is_some(),
+            "reversed_by() must return the reversal entry id"
+        );
     }
 
     #[test]
@@ -1238,7 +1299,9 @@ mod tests {
         let (cash, revenue) = add_accounts(&mut store);
         let amt = Amount::new(500).unwrap();
         let e = JournalEntryBuilder::new("Sale", "test")
-            .debit(cash, amt, "USD").credit(revenue, amt, "USD").build();
+            .debit(cash, amt, "USD")
+            .credit(revenue, amt, "USD")
+            .build();
         let posted = store.post_entry(e).unwrap();
         let eid = posted.id;
         store.reverse_entry(eid, "Rev 1", "test").unwrap();
@@ -1255,15 +1318,31 @@ mod tests {
 
         let (original_id, reversal_id) = {
             let mut store = LedgerStore::open(data_path).unwrap();
-            let cash = store.create_account(Account::new(
-                "CASH", "Cash", AccountType::Asset, "USD", "test")).unwrap();
-            let rev  = store.create_account(Account::new(
-                "REV",  "Revenue", AccountType::Income, "USD", "test")).unwrap();
-            let amt  = Amount::new(9900).unwrap();
-            let e    = JournalEntryBuilder::new("Sale", "test")
-                .debit(cash, amt, "USD").credit(rev, amt, "USD").build();
-            let posted  = store.post_entry(e).unwrap();
-            let eid     = posted.id;
+            let cash = store
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let rev = store
+                .create_account(Account::new(
+                    "REV",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let amt = Amount::new(9900).unwrap();
+            let e = JournalEntryBuilder::new("Sale", "test")
+                .debit(cash, amt, "USD")
+                .credit(rev, amt, "USD")
+                .build();
+            let posted = store.post_entry(e).unwrap();
+            let eid = posted.id;
             let rev_entry = store.reverse_entry(eid, "Void sale", "test").unwrap();
             let rid = rev_entry.id;
             (eid, rid)
@@ -1271,24 +1350,39 @@ mod tests {
 
         // Reopen — reversal_event_index must be rebuilt from WAL.
         let store2 = LedgerStore::open(data_path).unwrap();
-        assert!(store2.is_reversed(&original_id),
-            "is_reversed must survive WAL replay");
-        assert_eq!(store2.reversed_by(&original_id), Some(reversal_id),
-            "reversed_by must return correct reversal id after replay");
+        assert!(
+            store2.is_reversed(&original_id),
+            "is_reversed must survive WAL replay"
+        );
+        assert_eq!(
+            store2.reversed_by(&original_id),
+            Some(reversal_id),
+            "reversed_by must return correct reversal id after replay"
+        );
         // Balance should be zero.
         let entries = store2.all_entries();
-        let cash_id = entries.iter()
+        let cash_id = entries
+            .iter()
             .find(|e| e.reverses_entry_id == Some(original_id))
             .map(|_| {
                 // Find cash account via the original debit line
-                entries.iter()
+                entries
+                    .iter()
                     .find(|e| e.id == original_id)
-                    .and_then(|e| e.lines.iter().find(|l| l.dr_cr == crate::entry::DrCr::Debit))
+                    .and_then(|e| {
+                        e.lines
+                            .iter()
+                            .find(|l| l.dr_cr == crate::entry::DrCr::Debit)
+                    })
                     .map(|l| l.account_id)
             })
             .flatten();
         if let Some(cid) = cash_id {
-            assert_eq!(store2.balance(&cid), 0, "balance must be zero after reversal replay");
+            assert_eq!(
+                store2.balance(&cid),
+                0,
+                "balance must be zero after reversal replay"
+            );
         }
         store2.verify_chain_integrity().unwrap();
     }
@@ -1309,13 +1403,22 @@ mod tests {
         // Fund cash with $100
         let fund = Amount::new(10000).unwrap();
         let e = JournalEntryBuilder::new("Fund", "test")
-            .debit(cash, fund, "USD").credit(revenue, fund, "USD").build();
+            .debit(cash, fund, "USD")
+            .credit(revenue, fund, "USD")
+            .build();
         store.post_entry(e).unwrap();
         assert_eq!(store.balance(&cash), 10000);
 
         // Add a second revenue account to make the balancing entry work
-        let revenue2 = store.create_account(crate::account::Account::new(
-            "4002", "Revenue2", crate::account::AccountType::Income, "USD", "test")).unwrap();
+        let revenue2 = store
+            .create_account(crate::account::Account::new(
+                "4002",
+                "Revenue2",
+                crate::account::AccountType::Income,
+                "USD",
+                "test",
+            ))
+            .unwrap();
 
         // Try to post an entry with two $60 credits against cash (total $120 out)
         // Each individual credit would pass the old per-line check ($100 - $60 >= 0)
@@ -1330,7 +1433,8 @@ mod tests {
         let result = store.post_entry(bad_entry);
         assert!(
             matches!(result, Err(LedgerError::InsufficientFunds { .. })),
-            "aggregate overdraw must be rejected, got: {:?}", result
+            "aggregate overdraw must be rejected, got: {:?}",
+            result
         );
         // Balance must be unchanged after the rejection.
         assert_eq!(store.balance(&cash), 10000);
@@ -1344,13 +1448,20 @@ mod tests {
 
         let fund = Amount::new(5000).unwrap();
         let e = JournalEntryBuilder::new("Fund", "test")
-            .debit(cash, fund, "USD").credit(revenue, fund, "USD").build();
+            .debit(cash, fund, "USD")
+            .credit(revenue, fund, "USD")
+            .build();
         store.post_entry(e).unwrap();
 
         let too_much = Amount::new(9000).unwrap();
         let bad = JournalEntryBuilder::new("Overdraw", "test")
-            .credit(cash, too_much, "USD").debit(revenue, too_much, "USD").build();
-        assert!(matches!(store.post_entry(bad), Err(LedgerError::InsufficientFunds { .. })));
+            .credit(cash, too_much, "USD")
+            .debit(revenue, too_much, "USD")
+            .build();
+        assert!(matches!(
+            store.post_entry(bad),
+            Err(LedgerError::InsufficientFunds { .. })
+        ));
     }
 
     /// Aggregate exposure-limit: sum of all debit lines to an account in one
@@ -1361,23 +1472,38 @@ mod tests {
 
         // Create an account with a $50 (5000) exposure limit
         let mut acct = crate::account::Account::new(
-            "RISK", "Risky Account", crate::account::AccountType::Asset, "USD", "test");
+            "RISK",
+            "Risky Account",
+            crate::account::AccountType::Asset,
+            "USD",
+            "test",
+        );
         acct.exposure_limit = Some(5000);
         let risk_id = store.create_account(acct).unwrap();
 
-        let counterpart = store.create_account(crate::account::Account::new(
-            "CTR", "Counterpart", crate::account::AccountType::Liability, "USD", "test")).unwrap();
+        let counterpart = store
+            .create_account(crate::account::Account::new(
+                "CTR",
+                "Counterpart",
+                crate::account::AccountType::Liability,
+                "USD",
+                "test",
+            ))
+            .unwrap();
 
         // Individual debits of $30 each are below the $50 limit.
         // Combined $60 must exceed the $50 limit.
         let thirty = Amount::new(3000).unwrap();
         let bad = JournalEntryBuilder::new("Aggregate exposure exceeded", "test")
-            .debit(risk_id,   thirty, "USD")
-            .debit(risk_id,   thirty, "USD")
+            .debit(risk_id, thirty, "USD")
+            .debit(risk_id, thirty, "USD")
             .credit(counterpart, Amount::new(6000).unwrap(), "USD")
             .build();
         assert!(
-            matches!(store.post_entry(bad), Err(LedgerError::ExposureLimitExceeded { .. })),
+            matches!(
+                store.post_entry(bad),
+                Err(LedgerError::ExposureLimitExceeded { .. })
+            ),
             "aggregate exposure limit must be enforced"
         );
     }
@@ -1388,12 +1514,16 @@ mod tests {
         let (cash, revenue) = add_accounts(&mut store);
         let amt = Amount::new(100).unwrap();
         let e1 = JournalEntryBuilder::new("Payment", "test")
-            .debit(cash, amt, "USD").credit(revenue, amt, "USD")
-            .idempotency_key("pay-001").build();
+            .debit(cash, amt, "USD")
+            .credit(revenue, amt, "USD")
+            .idempotency_key("pay-001")
+            .build();
         store.post_entry(e1).unwrap();
         let e2 = JournalEntryBuilder::new("Payment dup", "test")
-            .debit(cash, amt, "USD").credit(revenue, amt, "USD")
-            .idempotency_key("pay-001").build();
+            .debit(cash, amt, "USD")
+            .credit(revenue, amt, "USD")
+            .idempotency_key("pay-001")
+            .build();
         store.post_entry(e2).unwrap(); // idempotent — no error
         assert_eq!(store.entry_count(), 1);
         assert_eq!(store.balance(&cash), 100);

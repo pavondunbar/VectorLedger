@@ -35,7 +35,7 @@ use std::path::Path;
 
 use tracing::{info, warn};
 
-use crate::encrypt::{encrypt_record, derive_segment_key, ENCRYPTED_MAGIC};
+use crate::encrypt::{derive_segment_key, encrypt_record, ENCRYPTED_MAGIC};
 use crate::error::WalError;
 use crate::reader::SegmentReader;
 use crate::segment::{list_segments, segment_filename};
@@ -60,10 +60,10 @@ pub struct KeyRotationResult {
 /// `skip_active`    — when `true` (recommended), the highest-numbered segment
 ///                    (currently being written) is left untouched.
 pub fn rotate_wal_key(
-    wal_dir:         &Path,
-    old_master_key:  Option<&[u8; 32]>,
-    new_master_key:  &[u8; 32],
-    skip_active:     bool,
+    wal_dir: &Path,
+    old_master_key: Option<&[u8; 32]>,
+    new_master_key: &[u8; 32],
+    skip_active: bool,
 ) -> Result<KeyRotationResult, WalError> {
     let mut segments = list_segments(wal_dir)?;
     if segments.is_empty() {
@@ -78,7 +78,7 @@ pub fn rotate_wal_key(
     let active_index = if skip_active { segments.pop() } else { None };
     let skipped = if active_index.is_some() { 1 } else { 0 };
 
-    let mut rotated   = 0;
+    let mut rotated = 0;
     let mut encrypted = 0;
 
     for seg_idx in segments {
@@ -101,7 +101,10 @@ pub fn rotate_wal_key(
     }
 
     if let Some(active) = active_index {
-        info!(segment = active, "Skipped active WAL segment during key rotation");
+        info!(
+            segment = active,
+            "Skipped active WAL segment during key rotation"
+        );
     }
 
     Ok(KeyRotationResult {
@@ -116,25 +119,27 @@ pub fn rotate_wal_key(
 /// Returns `Ok(true)` if the segment was previously plaintext (first-time
 /// encryption), `Ok(false)` if it was already encrypted (key rotation).
 fn reencrypt_segment(
-    seg_path:       &Path,
-    seg_idx:        u64,
+    seg_path: &Path,
+    seg_idx: u64,
     old_master_key: Option<&[u8; 32]>,
     new_master_key: &[u8; 32],
 ) -> Result<bool, WalError> {
     let new_seg_key = derive_segment_key(new_master_key, seg_idx)?;
 
     // Read all records from the current segment.
-    let mut reader   = SegmentReader::open(seg_path, seg_idx, old_master_key.copied())?;
+    let mut reader = SegmentReader::open(seg_path, seg_idx, old_master_key.copied())?;
     let mut records: Vec<(Vec<u8>, bool)> = Vec::new(); // (plaintext_bytes, was_encrypted)
     let mut any_encrypted = false;
 
     loop {
         match reader.next_record() {
-            None    => break,
-            Some(Err(WalError::ChecksumMismatch { .. }
-                     | WalError::TruncatedRecord { .. }
-                     | WalError::BadMagic
-                     | WalError::Decryption)) => break, // stop at torn write
+            None => break,
+            Some(Err(
+                WalError::ChecksumMismatch { .. }
+                | WalError::TruncatedRecord { .. }
+                | WalError::BadMagic
+                | WalError::Decryption,
+            )) => break, // stop at torn write
             Some(Err(e)) => return Err(e),
             Some(Ok(record)) => {
                 // Re-serialize the record to plaintext bytes
@@ -142,12 +147,12 @@ fn reencrypt_segment(
                 use bincode::serde::encode_to_vec;
                 let header_bytes = encode_to_vec(
                     &record.header,
-                    bincode::config::standard().with_fixed_int_encoding()
-                ).map_err(|e| WalError::Serialization(e.to_string()))?;
+                    bincode::config::standard().with_fixed_int_encoding(),
+                )
+                .map_err(|e| WalError::Serialization(e.to_string()))?;
 
-                let mut plaintext = Vec::with_capacity(
-                    header_bytes.len() + record.payload.len() + 4
-                );
+                let mut plaintext =
+                    Vec::with_capacity(header_bytes.len() + record.payload.len() + 4);
                 plaintext.extend_from_slice(&header_bytes);
                 plaintext.extend_from_slice(&record.payload);
                 plaintext.extend_from_slice(&record.crc32.to_le_bytes());
@@ -162,8 +167,7 @@ fn reencrypt_segment(
         // encrypted before. This tells us which direction the rotation went.
         let first = fs::read(seg_path).unwrap_or_default();
         first.len() >= 4
-            && u32::from_le_bytes(first[0..4].try_into().unwrap_or([0;4]))
-               != ENCRYPTED_MAGIC
+            && u32::from_le_bytes(first[0..4].try_into().unwrap_or([0; 4])) != ENCRYPTED_MAGIC
     };
 
     if records.is_empty() {
@@ -199,20 +203,25 @@ fn reencrypt_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-    use crate::{WalWriter, RecordType};
     use crate::record::BeginPayload;
+    use crate::{RecordType, WalWriter};
+    use tempfile::TempDir;
 
     fn write_test_records(wal_dir: &Path, master_key: Option<[u8; 32]>) {
         let mut writer = match master_key {
             Some(k) => WalWriter::open_encrypted(wal_dir, k).unwrap(),
-            None    => WalWriter::open(wal_dir).unwrap(),
+            None => WalWriter::open(wal_dir).unwrap(),
         };
         for i in 0u64..5 {
-            writer.append_record(
-                i, RecordType::Begin,
-                &BeginPayload { description: Some(format!("tx-{i}")) }
-            ).unwrap();
+            writer
+                .append_record(
+                    i,
+                    RecordType::Begin,
+                    &BeginPayload {
+                        description: Some(format!("tx-{i}")),
+                    },
+                )
+                .unwrap();
         }
     }
 
@@ -223,7 +232,7 @@ mod tests {
         write_test_records(dir.path(), None);
 
         let new_key = [0xBBu8; 32];
-        let result  = rotate_wal_key(dir.path(), None, &new_key, false).unwrap();
+        let result = rotate_wal_key(dir.path(), None, &new_key, false).unwrap();
         assert!(result.segments_encrypted > 0 || result.segments_rotated > 0);
 
         // Recovery must succeed with the new key.
@@ -233,7 +242,7 @@ mod tests {
 
     #[test]
     fn encrypted_key_rotation_roundtrip() {
-        let dir    = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let old_key = [0xAAu8; 32];
         let new_key = [0xBBu8; 32];
 
@@ -246,15 +255,18 @@ mod tests {
         // New key must work.
         let reader_new = crate::WalReader::open_with_key(dir.path(), Some(new_key)).unwrap();
         let mut count = 0;
-        for r in reader_new { let _ = r; count += 1; }
+        for r in reader_new {
+            let _ = r;
+            count += 1;
+        }
         assert!(count > 0, "records must be readable with new key");
     }
 
     #[test]
     fn empty_wal_rotation_is_noop() {
-        let dir     = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let new_key = [0xCCu8; 32];
-        let result  = rotate_wal_key(dir.path(), None, &new_key, false).unwrap();
+        let result = rotate_wal_key(dir.path(), None, &new_key, false).unwrap();
         assert_eq!(result.segments_rotated, 0);
         assert_eq!(result.segments_encrypted, 0);
     }

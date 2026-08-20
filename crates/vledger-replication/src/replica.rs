@@ -17,8 +17,8 @@ use tracing::{debug, error, info};
 use crate::config::ReplicationConfig;
 use crate::error::ReplicationError;
 use crate::protocol::{
-    self, AckMessage, AckPayload, AuthChallenge, AuthResponse, AuthResult,
-    HeartbeatAckPayload, ReplicationMessage, Lsn, compute_mac, encode_handshake,
+    self, compute_mac, encode_handshake, AckMessage, AckPayload, AuthChallenge, AuthResponse,
+    AuthResult, HeartbeatAckPayload, Lsn, ReplicationMessage,
 };
 use crate::secret;
 use crate::tls as repl_tls;
@@ -26,8 +26,8 @@ use crate::tls as repl_tls;
 // ── WalReceiver ───────────────────────────────────────────────────────────────
 
 pub struct WalReceiver {
-    config:  ReplicationConfig,
-    secret:  [u8; 32],
+    config: ReplicationConfig,
+    secret: [u8; 32],
     wal_dir: PathBuf,
 }
 
@@ -35,17 +35,22 @@ impl WalReceiver {
     /// Create a new `WalReceiver`.  The replication secret must already exist
     /// on the replica (`secret::load_secret` — not generated here).
     pub fn new(
-        config:   ReplicationConfig,
-        wal_dir:  PathBuf,
+        config: ReplicationConfig,
+        wal_dir: PathBuf,
         data_dir: &std::path::Path,
     ) -> Result<Self, ReplicationError> {
-        let secret_path = config.secret_path
+        let secret_path = config
+            .secret_path
             .as_deref()
             .map(PathBuf::from)
             .unwrap_or_else(|| secret::default_secret_path(data_dir));
 
         let secret = secret::load_secret(&secret_path)?;
-        Ok(Self { config, secret, wal_dir })
+        Ok(Self {
+            config,
+            secret,
+            wal_dir,
+        })
     }
 
     /// Connect to the primary and stream WAL records.
@@ -107,8 +112,8 @@ impl WalReceiver {
             let mut line = String::new();
             match reader.read_line(&mut line).await {
                 Err(e) => return Err(e.into()),
-                Ok(0)  => return Err(ReplicationError::StreamEnded),
-                Ok(_)  => {}
+                Ok(0) => return Err(ReplicationError::StreamEnded),
+                Ok(_) => {}
             }
 
             let msg = protocol::decode_replication(&line)
@@ -124,21 +129,22 @@ impl WalReceiver {
                     let expected_hash = hex::encode(blake3::hash(&record_bytes).as_bytes());
                     if expected_hash != rec.record_hash_hex {
                         let ack = AckMessage::Error(crate::protocol::ReplicaError {
-                            lsn:     Some(rec.lsn),
+                            lsn: Some(rec.lsn),
                             message: "hash mismatch on received WAL record".into(),
                         });
                         if let Ok(wire) = protocol::encode_ack(&ack) {
                             let _ = w.write_all(&wire).await;
                         }
-                        return Err(ReplicationError::InvalidRecord(
-                            format!("hash mismatch at lsn {}", rec.lsn)
-                        ));
+                        return Err(ReplicationError::InvalidRecord(format!(
+                            "hash mismatch at lsn {}",
+                            rec.lsn
+                        )));
                     }
 
                     applier.apply(&record_bytes, rec.segment).await?;
                     last_lsn = rec.lsn;
 
-                    let ack  = AckMessage::Ack(AckPayload { lsn: rec.lsn });
+                    let ack = AckMessage::Ack(AckPayload { lsn: rec.lsn });
                     let wire = protocol::encode_ack(&ack)
                         .map_err(|e| ReplicationError::Serialisation(e.to_string()))?;
                     w.write_all(&wire).await?;
@@ -148,7 +154,7 @@ impl WalReceiver {
 
                 ReplicationMessage::Heartbeat(hb) => {
                     debug!(last_lsn = hb.last_lsn, "Replica received heartbeat");
-                    let ack  = AckMessage::HeartbeatAck(HeartbeatAckPayload { last_lsn });
+                    let ack = AckMessage::HeartbeatAck(HeartbeatAckPayload { last_lsn });
                     let wire = protocol::encode_ack(&ack)
                         .map_err(|e| ReplicationError::Serialisation(e.to_string()))?;
                     let _ = w.write_all(&wire).await;
@@ -176,13 +182,17 @@ impl WalReceiver {
         let mut line = String::new();
         let n = tokio::time::timeout(timeout, reader.read_line(&mut line))
             .await
-            .map_err(|_| ReplicationError::AuthFailed(
-                format!("timeout ({} ms) waiting for handshake challenge from primary",
-                        self.config.ack_timeout_ms)
-            ))?
+            .map_err(|_| {
+                ReplicationError::AuthFailed(format!(
+                    "timeout ({} ms) waiting for handshake challenge from primary",
+                    self.config.ack_timeout_ms
+                ))
+            })?
             .map_err(|e| ReplicationError::AuthFailed(format!("read challenge: {e}")))?;
         if n == 0 {
-            return Err(ReplicationError::AuthFailed("primary closed during handshake".into()));
+            return Err(ReplicationError::AuthFailed(
+                "primary closed during handshake".into(),
+            ));
         }
 
         let challenge: AuthChallenge = serde_json::from_str(line.trim())
@@ -192,10 +202,14 @@ impl WalReceiver {
             .map_err(|e| ReplicationError::AuthFailed(format!("invalid nonce hex: {e}")))?;
 
         let mac = compute_mac(&self.secret, &nonce);
-        let response = AuthResponse { mac: hex::encode(mac) };
+        let response = AuthResponse {
+            mac: hex::encode(mac),
+        };
         let wire = encode_handshake(&response)
             .map_err(|e| ReplicationError::Serialisation(e.to_string()))?;
-        writer.write_all(&wire).await
+        writer
+            .write_all(&wire)
+            .await
             .map_err(|e| ReplicationError::AuthFailed(format!("write response: {e}")))?;
         let _ = writer.flush().await;
 
@@ -203,13 +217,17 @@ impl WalReceiver {
         let mut line = String::new();
         let n = tokio::time::timeout(timeout, reader.read_line(&mut line))
             .await
-            .map_err(|_| ReplicationError::AuthFailed(
-                format!("timeout ({} ms) waiting for auth result from primary",
-                        self.config.ack_timeout_ms)
-            ))?
+            .map_err(|_| {
+                ReplicationError::AuthFailed(format!(
+                    "timeout ({} ms) waiting for auth result from primary",
+                    self.config.ack_timeout_ms
+                ))
+            })?
             .map_err(|e| ReplicationError::AuthFailed(format!("read auth result: {e}")))?;
         if n == 0 {
-            return Err(ReplicationError::AuthFailed("primary closed after MAC".into()));
+            return Err(ReplicationError::AuthFailed(
+                "primary closed after MAC".into(),
+            ));
         }
 
         let result: AuthResult = serde_json::from_str(line.trim())
@@ -217,7 +235,7 @@ impl WalReceiver {
 
         if !result.ok {
             return Err(ReplicationError::AuthFailed(
-                result.error.unwrap_or_else(|| "rejected by primary".into())
+                result.error.unwrap_or_else(|| "rejected by primary".into()),
             ));
         }
 
@@ -232,7 +250,9 @@ pub struct ReplicaApplier {
 }
 
 impl ReplicaApplier {
-    pub fn new(wal_dir: PathBuf) -> Self { Self { wal_dir } }
+    pub fn new(wal_dir: PathBuf) -> Self {
+        Self { wal_dir }
+    }
 
     pub async fn apply(&self, record_bytes: &[u8], segment: u64) -> Result<(), ReplicationError> {
         let seg_path = self.wal_dir.join(format!("{segment:020}.wal"));
@@ -240,7 +260,9 @@ impl ReplicaApplier {
 
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
-            .create(true).append(true).open(&seg_path)?;
+            .create(true)
+            .append(true)
+            .open(&seg_path)?;
         file.write_all(record_bytes)?;
         file.flush()?;
         file.sync_all()?;

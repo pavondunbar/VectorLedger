@@ -23,9 +23,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use vledger_ledger::{
-    Account, AccountType, Amount, JournalEntryBuilder, LedgerStore,
-};
+use vledger_ledger::{Account, AccountType, Amount, JournalEntryBuilder, LedgerStore};
 
 // ── Report types ──────────────────────────────────────────────────────────────
 
@@ -37,12 +35,14 @@ pub enum PhaseResult {
 }
 
 impl PhaseResult {
-    fn is_pass(&self) -> bool { matches!(self, PhaseResult::Pass) }
+    fn is_pass(&self) -> bool {
+        matches!(self, PhaseResult::Pass)
+    }
     fn label(&self) -> &str {
         match self {
-            PhaseResult::Pass      => "PASS",
-            PhaseResult::Fail(_)   => "FAIL",
-            PhaseResult::Skip(_)   => "SKIP",
+            PhaseResult::Pass => "PASS",
+            PhaseResult::Fail(_) => "FAIL",
+            PhaseResult::Skip(_) => "SKIP",
         }
     }
     fn detail(&self) -> Option<&str> {
@@ -54,9 +54,9 @@ impl PhaseResult {
 }
 
 struct PhaseReport {
-    name:   &'static str,
+    name: &'static str,
     result: PhaseResult,
-    notes:  Vec<String>,
+    notes: Vec<String>,
     elapsed_ms: u64,
 }
 
@@ -82,8 +82,7 @@ pub async fn run(entries: u64, keep_data: bool) -> Result<()> {
         std::fs::create_dir_all(&path)?;
         (path, None)
     } else {
-        let tmp = tempfile::TempDir::new()
-            .context("Failed to create temporary test directory")?;
+        let tmp = tempfile::TempDir::new().context("Failed to create temporary test directory")?;
         let path = tmp.path().to_path_buf();
         (path, Some(tmp))
     };
@@ -105,11 +104,15 @@ pub async fn run(entries: u64, keep_data: bool) -> Result<()> {
     // ── Phase A: Baseline ─────────────────────────────────────────────────
     let phase_a = phase_baseline(&test_dir, entries, &seed_hex).await;
     let baseline_ok = phase_a.result.is_pass();
-    let chain_tip_before = phase_a.notes.iter()
+    let chain_tip_before = phase_a
+        .notes
+        .iter()
         .find(|n| n.starts_with("chain_tip:"))
         .cloned()
         .unwrap_or_default();
-    let entry_count_before: u64 = phase_a.notes.iter()
+    let entry_count_before: u64 = phase_a
+        .notes
+        .iter()
         .find(|n| n.starts_with("entry_count:"))
         .and_then(|n| n.split(':').nth(1))
         .and_then(|s| s.trim().parse().ok())
@@ -176,7 +179,9 @@ pub async fn run(entries: u64, keep_data: bool) -> Result<()> {
     }
 
     // Return error if any phase failed.
-    let any_fail = phases.iter().any(|p| matches!(p.result, PhaseResult::Fail(_)));
+    let any_fail = phases
+        .iter()
+        .any(|p| matches!(p.result, PhaseResult::Fail(_)));
     if any_fail {
         anyhow::bail!("Self-test FAILED — see report above");
     }
@@ -192,8 +197,8 @@ async fn phase_baseline(test_dir: &Path, entries: u64, seed_hex: &str) -> PhaseR
 
     let result = (|| -> Result<()> {
         // Initialise a fresh ledger in the test directory.
-        let wal_dir     = test_dir.join("wal");
-        let pages_dir   = test_dir.join("pages");
+        let wal_dir = test_dir.join("wal");
+        let pages_dir = test_dir.join("pages");
         let catalog_dir = test_dir.join("catalog");
         std::fs::create_dir_all(&wal_dir)?;
         std::fs::create_dir_all(&pages_dir)?;
@@ -204,8 +209,7 @@ async fn phase_baseline(test_dir: &Path, entries: u64, seed_hex: &str) -> PhaseR
         // catalog/.admin_initial_credentials as usual.
         let _ = vledger_server::UserStore::open(&catalog_dir);
 
-        let mut store = LedgerStore::open(test_dir)
-            .context("Failed to open test ledger")?;
+        let mut store = LedgerStore::open(test_dir).context("Failed to open test ledger")?;
 
         // Create accounts using the seed for determinism.
         let accounts = create_test_accounts(&mut store, seed_hex)?;
@@ -214,11 +218,12 @@ async fn phase_baseline(test_dir: &Path, entries: u64, seed_hex: &str) -> PhaseR
         insert_deterministic_entries(&mut store, &accounts, entries, seed_hex)?;
 
         // Verify chain immediately.
-        store.verify_chain_integrity()
+        store
+            .verify_chain_integrity()
             .context("Hash chain invalid immediately after insertion")?;
 
         let count = store.entry_count() as u64;
-        let tip   = hex::encode(store.chain_tip());
+        let tip = hex::encode(store.chain_tip());
 
         if count != entries {
             anyhow::bail!("Expected {entries} entries, got {count}");
@@ -245,8 +250,8 @@ async fn phase_baseline(test_dir: &Path, entries: u64, seed_hex: &str) -> PhaseR
     PhaseReport {
         name: "A  Baseline",
         result: match result {
-            Ok(())  => PhaseResult::Pass,
-            Err(e)  => PhaseResult::Fail(e.to_string()),
+            Ok(()) => PhaseResult::Pass,
+            Err(e) => PhaseResult::Fail(e.to_string()),
         },
         notes,
         elapsed_ms: t.elapsed().as_millis() as u64,
@@ -264,8 +269,7 @@ async fn phase_wal_corruption(test_dir: &Path) -> PhaseReport {
         let segments = wal_segments(&wal_dir)?;
 
         // Target the last segment — most likely to contain committed records.
-        let target = segments.last()
-            .context("No WAL segments found")?;
+        let target = segments.last().context("No WAL segments found")?;
 
         let size = std::fs::metadata(target)?.len();
         if size < 8 {
@@ -275,7 +279,10 @@ async fn phase_wal_corruption(test_dir: &Path) -> PhaseReport {
         // Flip a byte in the middle of the segment.
         let offset = size / 2;
         flip_byte(target, offset)?;
-        notes.push(format!("corrupted: {} at offset {offset}", target.display()));
+        notes.push(format!(
+            "corrupted: {} at offset {offset}",
+            target.display()
+        ));
 
         // Attempt to open the ledger — it must fail or detect the corruption.
         match LedgerStore::open(test_dir) {
@@ -292,7 +299,8 @@ async fn phase_wal_corruption(test_dir: &Path) -> PhaseReport {
                 flip_byte(target, offset)?;
                 notes.push("restored: WAL byte flipped back".into());
                 // As long as chain is valid, partial recovery is acceptable.
-                store.verify_chain_integrity()
+                store
+                    .verify_chain_integrity()
                     .context("Chain invalid after partial recovery")?;
                 notes.push(format!("partial recovery: {count} entries, chain valid"));
                 Ok(())
@@ -303,8 +311,8 @@ async fn phase_wal_corruption(test_dir: &Path) -> PhaseReport {
     PhaseReport {
         name: "B  WAL Integrity",
         result: match result {
-            Ok(())  => PhaseResult::Pass,
-            Err(e)  => PhaseResult::Fail(e.to_string()),
+            Ok(()) => PhaseResult::Pass,
+            Err(e) => PhaseResult::Fail(e.to_string()),
         },
         notes,
         elapsed_ms: t.elapsed().as_millis() as u64,
@@ -314,32 +322,33 @@ async fn phase_wal_corruption(test_dir: &Path) -> PhaseReport {
 // ── Phase C: Recovery ─────────────────────────────────────────────────────────
 
 async fn phase_recovery(
-    test_dir:            &Path,
-    expected_count:      u64,
-    expected_chain_tip:  &str,
+    test_dir: &Path,
+    expected_count: u64,
+    expected_chain_tip: &str,
 ) -> PhaseReport {
     let t = Instant::now();
     let mut notes = Vec::new();
 
     let result = (|| -> Result<()> {
-        let store = LedgerStore::open(test_dir)
-            .context("Failed to reopen ledger after WAL restore")?;
+        let store =
+            LedgerStore::open(test_dir).context("Failed to reopen ledger after WAL restore")?;
 
         let count = store.entry_count() as u64;
-        let tip   = hex::encode(store.chain_tip());
+        let tip = hex::encode(store.chain_tip());
 
         notes.push(format!("entries_recovered: {count} / {expected_count}"));
         notes.push(format!("chain_tip_after:  {tip}"));
-        notes.push(format!("chain_tip_before: {}",
-            expected_chain_tip.trim_start_matches("chain_tip: ")));
+        notes.push(format!(
+            "chain_tip_before: {}",
+            expected_chain_tip.trim_start_matches("chain_tip: ")
+        ));
 
         if count != expected_count {
-            anyhow::bail!(
-                "Recovery mismatch: expected {expected_count} entries, got {count}"
-            );
+            anyhow::bail!("Recovery mismatch: expected {expected_count} entries, got {count}");
         }
 
-        store.verify_chain_integrity()
+        store
+            .verify_chain_integrity()
             .context("Hash chain invalid after recovery")?;
 
         notes.push("chain_integrity: OK".into());
@@ -349,8 +358,8 @@ async fn phase_recovery(
     PhaseReport {
         name: "C  Crash Recovery",
         result: match result {
-            Ok(())  => PhaseResult::Pass,
-            Err(e)  => PhaseResult::Fail(e.to_string()),
+            Ok(()) => PhaseResult::Pass,
+            Err(e) => PhaseResult::Fail(e.to_string()),
         },
         notes,
         elapsed_ms: t.elapsed().as_millis() as u64,
@@ -364,8 +373,8 @@ async fn phase_logical_tamper(test_dir: &Path, total_entries: u64) -> PhaseRepor
     let mut notes = Vec::new();
 
     let result = (|| -> Result<()> {
-        let mut store = LedgerStore::open(test_dir)
-            .context("Failed to open ledger for tamper test")?;
+        let mut store =
+            LedgerStore::open(test_dir).context("Failed to open ledger for tamper test")?;
 
         // Pick a target in the middle of the ledger.
         let target_seq = (total_entries / 2).max(1);
@@ -380,10 +389,8 @@ async fn phase_logical_tamper(test_dir: &Path, total_entries: u64) -> PhaseRepor
         notes.push(format!("original_hash: {}", &original_hash[..16]));
 
         // Tamper: silently mutate the description without updating hashes.
-        let tampered = store.tamper_entry_for_demo(
-            target_seq,
-            "*** TAMPERED BY ATTACKER ***".into(),
-        );
+        let tampered =
+            store.tamper_entry_for_demo(target_seq, "*** TAMPERED BY ATTACKER ***".into());
 
         if !tampered {
             anyhow::bail!("Could not find entry {target_seq} to tamper");
@@ -404,9 +411,13 @@ async fn phase_logical_tamper(test_dir: &Path, total_entries: u64) -> PhaseRepor
                 notes.push(format!("tampering_detected: {err_str}"));
                 // Confirm the detection mentions our target sequence.
                 if err_str.contains(&target_seq.to_string()) {
-                    notes.push(format!("detection_precise: YES — sequence {target_seq} identified"));
+                    notes.push(format!(
+                        "detection_precise: YES — sequence {target_seq} identified"
+                    ));
                 } else {
-                    notes.push("detection_precise: chain broken (earlier linked entry caught)".into());
+                    notes.push(
+                        "detection_precise: chain broken (earlier linked entry caught)".into(),
+                    );
                 }
                 Ok(())
             }
@@ -416,8 +427,8 @@ async fn phase_logical_tamper(test_dir: &Path, total_entries: u64) -> PhaseRepor
     PhaseReport {
         name: "D  Logical Integrity",
         result: match result {
-            Ok(())  => PhaseResult::Pass,
-            Err(e)  => PhaseResult::Fail(e.to_string()),
+            Ok(()) => PhaseResult::Pass,
+            Err(e) => PhaseResult::Fail(e.to_string()),
         },
         notes,
         elapsed_ms: t.elapsed().as_millis() as u64,
@@ -433,8 +444,8 @@ async fn phase_entry_verification(test_dir: &Path, total_entries: u64) -> PhaseR
     let result = (|| -> Result<()> {
         // Reopen a fresh store — previous store was tampered in Phase D.
         // Since the tamper was in-memory only, a fresh open restores clean state.
-        let store = LedgerStore::open(test_dir)
-            .context("Failed to open ledger for entry verification")?;
+        let store =
+            LedgerStore::open(test_dir).context("Failed to open ledger for entry verification")?;
 
         let check_seqs = [
             1u64,
@@ -458,7 +469,9 @@ async fn phase_entry_verification(test_dir: &Path, total_entries: u64) -> PhaseR
                         if ok { "VALID" } else { "CORRUPTED" },
                         hex::encode(&entry.content_hash[..8])
                     ));
-                    if !ok { all_valid = false; }
+                    if !ok {
+                        all_valid = false;
+                    }
                 }
             }
         }
@@ -473,8 +486,8 @@ async fn phase_entry_verification(test_dir: &Path, total_entries: u64) -> PhaseR
     PhaseReport {
         name: "E  Entry Verification",
         result: match result {
-            Ok(())  => PhaseResult::Pass,
-            Err(e)  => PhaseResult::Fail(e.to_string()),
+            Ok(()) => PhaseResult::Pass,
+            Err(e) => PhaseResult::Fail(e.to_string()),
         },
         notes,
         elapsed_ms: t.elapsed().as_millis() as u64,
@@ -488,7 +501,9 @@ struct TestAccounts {
 }
 
 impl TestAccounts {
-    fn len(&self) -> usize { self.pairs.len() * 2 }
+    fn len(&self) -> usize {
+        self.pairs.len() * 2
+    }
 
     fn pair_for_seq(&self, seq: u64) -> (vledger_ledger::AccountId, vledger_ledger::AccountId) {
         let idx = (seq as usize) % self.pairs.len();
@@ -500,8 +515,8 @@ fn create_test_accounts(store: &mut LedgerStore, seed: &str) -> Result<TestAccou
     // Create 10 asset accounts and 10 income accounts → 10 debit/credit pairs.
     let mut pairs = Vec::new();
     for i in 0..10usize {
-        let asset_code   = format!("ASSET-{seed:.4}-{i:02}");
-        let income_code  = format!("INCM-{seed:.4}-{i:02}");
+        let asset_code = format!("ASSET-{seed:.4}-{i:02}");
+        let income_code = format!("INCM-{seed:.4}-{i:02}");
 
         let asset_id = store.create_account(Account::new(
             &asset_code,
@@ -525,24 +540,28 @@ fn create_test_accounts(store: &mut LedgerStore, seed: &str) -> Result<TestAccou
 }
 
 fn insert_deterministic_entries(
-    store:    &mut LedgerStore,
+    store: &mut LedgerStore,
     accounts: &TestAccounts,
-    count:    u64,
-    seed:     &str,
+    count: u64,
+    seed: &str,
 ) -> Result<()> {
     // Use a simple LCG for deterministic but varied amounts.
     // LCG constants from Knuth.
     let mut lcg: u64 = u64::from_le_bytes(
-        seed.as_bytes().iter().copied()
+        seed.as_bytes()
+            .iter()
+            .copied()
             .chain(std::iter::repeat(0u8))
             .take(8)
             .collect::<Vec<_>>()
             .try_into()
-            .unwrap_or([0x13, 0x57, 0x9b, 0xdf, 0x02, 0x46, 0x8a, 0xce])
+            .unwrap_or([0x13, 0x57, 0x9b, 0xdf, 0x02, 0x46, 0x8a, 0xce]),
     );
 
     for seq in 1..=count {
-        lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        lcg = lcg
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
 
         let amount_minor = (lcg % 999_900) + 100; // $0.01 – $9,999.00
         let (debit_id, credit_id) = accounts.pair_for_seq(seq);
@@ -552,23 +571,22 @@ fn insert_deterministic_entries(
 
         // Embed the dollar amount in the description so it's visible when
         // querying the ledger directly (e.g. SELECT * FROM ledger WHERE sequence = N).
-        let dollars  = amount_minor / 100;
-        let cents    = amount_minor % 100;
+        let dollars = amount_minor / 100;
+        let cents = amount_minor % 100;
         let pair_idx = (seq as usize) % 10;
-        let description = format!(
-            "self-test seq={seq} ${dollars}.{cents:02} pair={pair_idx}"
-        );
+        let description = format!("self-test seq={seq} ${dollars}.{cents:02} pair={pair_idx}");
 
         let entry = JournalEntryBuilder::new(&description, "self-test")
             .debit(debit_id, amount, "USD")
             .credit(credit_id, amount, "USD")
             .build();
 
-        store.post_entry(entry)
-            .map_err(|e| anyhow::anyhow!(
+        store.post_entry(entry).map_err(|e| {
+            anyhow::anyhow!(
                 "Failed to post entry {seq} (amount={amount_minor} minor units, \
                  debit={debit_id}, credit={credit_id}): {e}"
-            ))?;
+            )
+        })?;
 
         // Progress indicator every 10% for large datasets.
         if count >= 10_000 && seq % (count / 10) == 0 {
@@ -599,7 +617,10 @@ fn wal_segments(wal_dir: &Path) -> Result<Vec<PathBuf>> {
 
 fn flip_byte(path: &Path, offset: u64) -> Result<()> {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
     f.seek(SeekFrom::Start(offset))?;
     let mut b = [0u8; 1];
     f.read_exact(&mut b)?;
@@ -635,11 +656,11 @@ fn print_header(entries: u64, seed_hex: &str, test_dir: &Path) {
 }
 
 fn print_report(
-    phases:    &[PhaseReport],
+    phases: &[PhaseReport],
     keep_data: bool,
-    test_dir:  &Path,
-    entries:   u64,
-    seed_hex:  &str,
+    test_dir: &Path,
+    entries: u64,
+    seed_hex: &str,
 ) {
     let all_pass = phases.iter().all(|p| p.result.is_pass());
     let total_ms: u64 = phases.iter().map(|p| p.elapsed_ms).sum();
@@ -671,7 +692,10 @@ fn print_report(
     println!("  ─────────────────────────────────────────────────────");
     println!("  Entries verified : {entries}");
     println!("  Seed             : {seed_hex}");
-    println!("  Total elapsed    : {total_ms} ms  ({:.1} s)", total_ms as f64 / 1000.0);
+    println!(
+        "  Total elapsed    : {total_ms} ms  ({:.1} s)",
+        total_ms as f64 / 1000.0
+    );
     println!();
 
     if all_pass {
@@ -696,7 +720,10 @@ fn print_report(
         println!("  {}", test_dir.display());
         println!();
         println!("  Admin credentials:");
-        println!("  cat {}/catalog/.admin_initial_credentials", test_dir.display());
+        println!(
+            "  cat {}/catalog/.admin_initial_credentials",
+            test_dir.display()
+        );
         println!();
         println!("  Start a server against the test database:");
         println!("  ./target/release/vledger start \\");
@@ -707,7 +734,10 @@ fn print_report(
         println!("  ./target/release/vledger sql --query \"SELECT COUNT(*) FROM ledger\"");
         println!("  ./target/release/vledger sql --query \"SELECT VERIFY_CHAIN()\"");
         println!("  ./target/release/vledger sql --query \"SELECT VERIFY_ENTRY(1)\"");
-        println!("  ./target/release/vledger sql --query \"SELECT VERIFY_ENTRY({})\"", entries / 2);
+        println!(
+            "  ./target/release/vledger sql --query \"SELECT VERIFY_ENTRY({})\"",
+            entries / 2
+        );
         println!("  ./target/release/vledger sql --query \"SELECT VERIFY_ENTRY({entries})\"");
         println!("  ./target/release/vledger sql --query \"SELECT * FROM ledger LIMIT 10\"");
         println!();

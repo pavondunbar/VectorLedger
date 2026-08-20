@@ -38,7 +38,10 @@ impl StartupMessage {
         let mut params = HashMap::new();
 
         if protocol_version == SSL_REQUEST_CODE || protocol_version == CANCEL_REQUEST_CODE {
-            return Some(Self { protocol_version, params });
+            return Some(Self {
+                protocol_version,
+                params,
+            });
         }
 
         // Parameters are NUL-terminated key\0value\0 pairs followed by a final \0
@@ -51,7 +54,10 @@ impl StartupMessage {
             let val = read_cstr(buf, &mut pos)?;
             params.insert(key, val);
         }
-        Some(Self { protocol_version, params })
+        Some(Self {
+            protocol_version,
+            params,
+        })
     }
 }
 
@@ -71,15 +77,9 @@ pub enum FrontendMessage {
     /// Simple query: `Q` + query string.
     Query(String),
     /// Parse (extended query): `P` + statement name + query + param type count.
-    Parse {
-        name:  String,
-        query: String,
-    },
+    Parse { name: String, query: String },
     /// Bind (extended query): `B`.
-    Bind {
-        portal:    String,
-        statement: String,
-    },
+    Bind { portal: String, statement: String },
     /// Describe: `D`.
     Describe { kind: u8, name: String },
     /// Execute: `E` + portal name + max rows.
@@ -109,13 +109,13 @@ impl FrontendMessage {
             }
             b'P' => {
                 let mut pos = 0usize;
-                let name  = read_cstr_pos(payload, &mut pos);
+                let name = read_cstr_pos(payload, &mut pos);
                 let query = read_cstr_pos(payload, &mut pos);
                 Self::Parse { name, query }
             }
             b'B' => {
                 let mut pos = 0usize;
-                let portal    = read_cstr_pos(payload, &mut pos);
+                let portal = read_cstr_pos(payload, &mut pos);
                 let statement = read_cstr_pos(payload, &mut pos);
                 Self::Bind { portal, statement }
             }
@@ -155,7 +155,6 @@ fn read_cstr_pos(buf: &[u8], pos: &mut usize) -> String {
         }
     }
 }
-
 
 // ── Backend (server → client) message builders ───────────────────────────────
 
@@ -216,29 +215,29 @@ pub fn ready_for_query(tx_status: u8) -> Vec<u8> {
 /// A column description for `RowDescription`.
 #[derive(Debug, Clone)]
 pub struct FieldDesc {
-    pub name:         String,
-    pub type_oid:     u32,
-    pub type_size:    i16,
-    pub type_mod:     i32,
-    pub format_code:  i16, // 0 = text, 1 = binary
+    pub name: String,
+    pub type_oid: u32,
+    pub type_size: i16,
+    pub type_mod: i32,
+    pub format_code: i16, // 0 = text, 1 = binary
 }
 
 impl FieldDesc {
     pub fn text(name: impl Into<String>) -> Self {
         Self {
-            name:        name.into(),
-            type_oid:    25,   // text OID
-            type_size:   -1,
-            type_mod:    -1,
+            name: name.into(),
+            type_oid: 25, // text OID
+            type_size: -1,
+            type_mod: -1,
             format_code: 0,
         }
     }
     pub fn bigint(name: impl Into<String>) -> Self {
         Self {
-            name:        name.into(),
-            type_oid:    20,   // int8 OID
-            type_size:   8,
-            type_mod:    -1,
+            name: name.into(),
+            type_oid: 20, // int8 OID
+            type_size: 8,
+            type_mod: -1,
             format_code: 0,
         }
     }

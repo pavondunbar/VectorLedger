@@ -67,16 +67,20 @@ fn peek_bytes<R: Read>(reader: &mut R, n: usize) -> Result<Vec<u8>, WalError> {
 
 /// Iterator that yields validated [`WalRecord`]s from a single segment file.
 pub struct SegmentReader {
-    inner:         BufReader<std::fs::File>,
-    byte_offset:   u64,
+    inner: BufReader<std::fs::File>,
+    byte_offset: u64,
     last_sequence: u64,
-    done:          bool,
+    done: bool,
     segment_index: u64,
-    master_key:    Option<[u8; 32]>,
+    master_key: Option<[u8; 32]>,
 }
 
 impl SegmentReader {
-    pub fn open(path: &Path, segment_index: u64, master_key: Option<[u8; 32]>) -> Result<Self, WalError> {
+    pub fn open(
+        path: &Path,
+        segment_index: u64,
+        master_key: Option<[u8; 32]>,
+    ) -> Result<Self, WalError> {
         let file = std::fs::File::open(path)?;
         Ok(Self {
             inner: BufReader::new(file),
@@ -91,7 +95,9 @@ impl SegmentReader {
     /// Read the next record.  Returns `None` when the file is exhausted or a
     /// torn write is encountered.
     pub fn next_record(&mut self) -> Option<Result<WalRecord, WalError>> {
-        if self.done { return None; }
+        if self.done {
+            return None;
+        }
 
         // Read the first 4 bytes to determine if this is an encrypted blob
         // or a plaintext record.
@@ -107,22 +113,26 @@ impl SegmentReader {
             }
         };
 
-        let magic = u32::from_le_bytes(magic_bytes.clone().try_into().unwrap_or([0;4]));
+        let magic = u32::from_le_bytes(magic_bytes.clone().try_into().unwrap_or([0; 4]));
 
         if magic == ENCRYPTED_MAGIC {
             // ── Encrypted path ────────────────────────────────────────────
             // Format: MAGIC(4) | nonce(12) | ct_len(4) | ciphertext(ct_len)
             let rest_header = match read_exact_vec(&mut self.inner, 12 + 4) {
                 Ok(b) => b,
-                Err(e) => { self.done = true; return Some(Err(e)); }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
             };
-            let ct_len = u32::from_le_bytes(
-                rest_header[12..16].try_into().unwrap()
-            ) as usize;
+            let ct_len = u32::from_le_bytes(rest_header[12..16].try_into().unwrap()) as usize;
 
             let ciphertext = match read_exact_vec(&mut self.inner, ct_len) {
                 Ok(b) => b,
-                Err(e) => { self.done = true; return Some(Err(e)); }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
             };
 
             // Reassemble the full encrypted blob
@@ -146,7 +156,10 @@ impl SegmentReader {
 
             let seg_key = match derive_segment_key(master_key, self.segment_index) {
                 Ok(k) => k,
-                Err(e) => { self.done = true; return Some(Err(e)); }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
             };
 
             let plaintext = match decrypt_record(&seg_key, &blob, self.segment_index) {
@@ -165,7 +178,6 @@ impl SegmentReader {
             let blob_size = blob.len();
             self.byte_offset += blob_size as u64;
             return self.parse_plaintext_record(&plaintext);
-
         } else {
             // ── Plaintext path (magic == WAL_MAGIC or zero padding) ───────
             if magic != WAL_MAGIC {
@@ -174,13 +186,14 @@ impl SegmentReader {
             }
 
             // Read the remaining header bytes
-            let remaining_header = match read_exact_vec(
-                &mut self.inner,
-                RecordHeader::SERIALIZED_SIZE - 4,
-            ) {
-                Ok(b) => b,
-                Err(e) => { self.done = true; return Some(Err(e)); }
-            };
+            let remaining_header =
+                match read_exact_vec(&mut self.inner, RecordHeader::SERIALIZED_SIZE - 4) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.done = true;
+                        return Some(Err(e));
+                    }
+                };
 
             let mut header_bytes = Vec::with_capacity(RecordHeader::SERIALIZED_SIZE);
             header_bytes.extend_from_slice(&magic_bytes);
@@ -188,7 +201,10 @@ impl SegmentReader {
 
             let header = match decode_header(&header_bytes) {
                 Ok(h) => h,
-                Err(e) => { self.done = true; return Some(Err(e)); }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
             };
 
             if header.version != WAL_VERSION {
@@ -198,12 +214,18 @@ impl SegmentReader {
 
             let payload = match read_exact_vec(&mut self.inner, header.payload_len as usize) {
                 Ok(b) => b,
-                Err(e) => { self.done = true; return Some(Err(e)); }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
             };
 
             let crc_bytes = match read_exact_vec(&mut self.inner, 4) {
                 Ok(b) => b,
-                Err(e) => { self.done = true; return Some(Err(e)); }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
             };
             let stored_crc = u32::from_le_bytes(crc_bytes.try_into().unwrap());
 
@@ -237,7 +259,11 @@ impl SegmentReader {
                 "WAL plaintext record read"
             );
 
-            return Some(Ok(WalRecord { header, payload, crc32: stored_crc }));
+            return Some(Ok(WalRecord {
+                header,
+                payload,
+                crc32: stored_crc,
+            }));
         }
     }
 
@@ -253,15 +279,16 @@ impl SegmentReader {
         }
 
         let header_bytes = &plaintext[..RecordHeader::SERIALIZED_SIZE];
-        let crc_start    = plaintext.len() - 4;
-        let payload      = plaintext[RecordHeader::SERIALIZED_SIZE..crc_start].to_vec();
-        let stored_crc   = u32::from_le_bytes(
-            plaintext[crc_start..].try_into().unwrap()
-        );
+        let crc_start = plaintext.len() - 4;
+        let payload = plaintext[RecordHeader::SERIALIZED_SIZE..crc_start].to_vec();
+        let stored_crc = u32::from_le_bytes(plaintext[crc_start..].try_into().unwrap());
 
         let header = match decode_header(header_bytes) {
             Ok(h) => h,
-            Err(e) => { self.done = true; return Some(Err(e)); }
+            Err(e) => {
+                self.done = true;
+                return Some(Err(e));
+            }
         };
 
         if header.magic != WAL_MAGIC {
@@ -295,22 +322,26 @@ impl SegmentReader {
         self.last_sequence = header.sequence;
         debug!(
             sequence = header.sequence,
-            tx_id    = header.tx_id,
-            offset   = self.byte_offset,
+            tx_id = header.tx_id,
+            offset = self.byte_offset,
             "WAL encrypted record read and decrypted"
         );
 
-        Some(Ok(WalRecord { header, payload, crc32: stored_crc }))
+        Some(Ok(WalRecord {
+            header,
+            payload,
+            crc32: stored_crc,
+        }))
     }
 }
 
 /// High-level WAL reader that iterates across all segments in order.
 pub struct WalReader {
-    wal_dir:         std::path::PathBuf,
+    wal_dir: std::path::PathBuf,
     segment_indices: Vec<u64>,
     current_seg_pos: usize,
-    current_reader:  Option<SegmentReader>,
-    master_key:      Option<[u8; 32]>,
+    current_reader: Option<SegmentReader>,
+    master_key: Option<[u8; 32]>,
 }
 
 impl WalReader {
@@ -322,10 +353,10 @@ impl WalReader {
     pub fn open_with_key(wal_dir: &Path, master_key: Option<[u8; 32]>) -> Result<Self, WalError> {
         let indices = list_segments(wal_dir)?;
         Ok(Self {
-            wal_dir:         wal_dir.to_path_buf(),
+            wal_dir: wal_dir.to_path_buf(),
             segment_indices: indices,
             current_seg_pos: 0,
-            current_reader:  None,
+            current_reader: None,
             master_key,
         })
     }
@@ -335,7 +366,7 @@ impl WalReader {
         if self.current_seg_pos >= self.segment_indices.len() {
             return Ok(false);
         }
-        let idx  = self.segment_indices[self.current_seg_pos];
+        let idx = self.segment_indices[self.current_seg_pos];
         let path = self.wal_dir.join(segment_filename(idx));
         self.current_reader = Some(SegmentReader::open(&path, idx, self.master_key)?);
         self.current_seg_pos += 1;
@@ -350,16 +381,16 @@ impl Iterator for WalReader {
         loop {
             if self.current_reader.is_none() {
                 match self.advance_segment() {
-                    Ok(true)  => {}
+                    Ok(true) => {}
                     Ok(false) => return None,
-                    Err(e)    => return Some(Err(e)),
+                    Err(e) => return Some(Err(e)),
                 }
             }
 
             if let Some(ref mut reader) = self.current_reader {
                 match reader.next_record() {
                     Some(r) => return Some(r),
-                    None    => {
+                    None => {
                         self.current_reader = None;
                         continue;
                     }
@@ -381,10 +412,12 @@ pub fn scan_last_sequence(wal_dir: &Path, master_key: Option<&[u8; 32]>) -> Resu
                     last_seq = record.header.sequence;
                 }
             }
-            Err(WalError::ChecksumMismatch { .. }
+            Err(
+                WalError::ChecksumMismatch { .. }
                 | WalError::TruncatedRecord { .. }
                 | WalError::BadMagic
-                | WalError::Decryption) => break,
+                | WalError::Decryption,
+            ) => break,
             Err(e) => return Err(e),
         }
     }

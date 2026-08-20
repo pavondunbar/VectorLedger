@@ -14,9 +14,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 use vledger_crypto::hash::hash_bytes;
-use vledger_wal::record::{
-    BeginPayload, CommitPayload, DataPayload, MutationKind,
-};
+use vledger_wal::record::{BeginPayload, CommitPayload, DataPayload, MutationKind};
 use vledger_wal::{RecordType, WalWriter};
 
 use crate::error::TxError;
@@ -51,7 +49,7 @@ impl TransactionManager {
     /// Open with an Ed25519 signing key.  Every CommitPayload will include
     /// a signature over `tx_hash || record_count.to_le_bytes()`.
     pub fn open_with_signing(
-        wal_dir:    &Path,
+        wal_dir: &Path,
         signing_key: Option<vledger_crypto::sign::DbSigningKey>,
     ) -> Result<Self, TxError> {
         let wal = WalWriter::open(wal_dir)?;
@@ -73,7 +71,7 @@ impl TransactionManager {
         info!(
             last_committed_tx_id,
             next_tx_id,
-            recovered_txns  = recovery.committed.len(),
+            recovered_txns = recovery.committed.len(),
             signing_enabled = signing_key.is_some(),
             "TransactionManager initialized"
         );
@@ -94,8 +92,11 @@ impl TransactionManager {
         let snapshot_tx_id = self.last_committed_tx_id + 1;
 
         // Write BEGIN record to WAL
-        let begin_payload = BeginPayload { description: description.clone() };
-        self.wal.append_record(tx_id, RecordType::Begin, &begin_payload)?;
+        let begin_payload = BeginPayload {
+            description: description.clone(),
+        };
+        self.wal
+            .append_record(tx_id, RecordType::Begin, &begin_payload)?;
 
         let tx = Transaction::new(tx_id, snapshot_tx_id, description);
         self.active.insert(tx_id, tx);
@@ -126,7 +127,10 @@ impl TransactionManager {
             prev_hash,
         };
 
-        let tx = self.active.get_mut(&tx_id).ok_or(TxError::NotFound(tx_id))?;
+        let tx = self
+            .active
+            .get_mut(&tx_id)
+            .ok_or(TxError::NotFound(tx_id))?;
         tx.add_mutation(mutation)?;
         Ok(())
     }
@@ -137,7 +141,10 @@ impl TransactionManager {
         if self.committed_idempotency_keys.contains(&key) {
             return Err(TxError::IdempotencyKeyConflict(key));
         }
-        let tx = self.active.get_mut(&tx_id).ok_or(TxError::NotFound(tx_id))?;
+        let tx = self
+            .active
+            .get_mut(&tx_id)
+            .ok_or(TxError::NotFound(tx_id))?;
         tx.set_idempotency_key(key)?;
         Ok(())
     }
@@ -160,13 +167,17 @@ impl TransactionManager {
         // Idempotency check
         if let Some(ref key) = tx.idempotency_key.clone() {
             if self.committed_idempotency_keys.contains(key) {
-                warn!(tx_id, key, "Idempotency key already committed — returning success without re-applying");
+                warn!(
+                    tx_id,
+                    key,
+                    "Idempotency key already committed — returning success without re-applying"
+                );
                 let _tx = self.active.remove(&tx_id).unwrap();
                 return Ok(());
             }
         }
 
-        let tx_hash        = tx.tx_hash();
+        let tx_hash = tx.tx_hash();
         let mutation_count = tx.mutation_count() as u32;
         let idempotency_key = tx.idempotency_key.clone();
 
@@ -181,7 +192,7 @@ impl TransactionManager {
             let mut msg = Vec::with_capacity(36);
             msg.extend_from_slice(&tx_hash);
             msg.extend_from_slice(&mutation_count.to_le_bytes());
-            let sig    = sk.sign(&msg);
+            let sig = sk.sign(&msg);
             let pubkey = sk.public_key().to_bytes();
             (sig.to_vec(), pubkey.to_vec())
         } else {
@@ -189,9 +200,8 @@ impl TransactionManager {
         };
 
         // ── Step 3: Write Data records to WAL ────────────────────────────
-        let mutations: Vec<PendingMutation> = {
-            self.active.get(&tx_id).unwrap().mutations.clone()
-        };
+        let mutations: Vec<PendingMutation> =
+            { self.active.get(&tx_id).unwrap().mutations.clone() };
 
         for m in &mutations {
             let payload = DataPayload {
@@ -213,7 +223,8 @@ impl TransactionManager {
             signature,
             signer_pubkey,
         };
-        self.wal.append_record(tx_id, RecordType::Commit, &commit_payload)?;
+        self.wal
+            .append_record(tx_id, RecordType::Commit, &commit_payload)?;
 
         // ── Step 5: Mark committed ────────────────────────────────────────
         if let Some(mut tx) = self.active.remove(&tx_id) {
@@ -235,7 +246,10 @@ impl TransactionManager {
     /// Roll back a transaction.  Writes a Rollback record to the WAL so that
     /// recovery knows to discard this transaction's Data records.
     pub fn rollback(&mut self, tx_id: u64) -> Result<(), TxError> {
-        let tx = self.active.get_mut(&tx_id).ok_or(TxError::NotFound(tx_id))?;
+        let tx = self
+            .active
+            .get_mut(&tx_id)
+            .ok_or(TxError::NotFound(tx_id))?;
         tx.mark_rolled_back()?;
 
         self.wal.append(tx_id, RecordType::Rollback, vec![])?;
@@ -256,21 +270,18 @@ impl TransactionManager {
     /// work (e.g. content hash computation).
     ///
     /// Panics if `tx_id` is not an active transaction.
-    pub fn precompute_commit_signature(
-        &self,
-        tx_id: u64,
-    ) -> Option<(Vec<u8>, Vec<u8>)> {
+    pub fn precompute_commit_signature(&self, tx_id: u64) -> Option<(Vec<u8>, Vec<u8>)> {
         let tx = self.active.get(&tx_id)?;
         let sk = self.signing_key.as_ref()?;
 
-        let tx_hash        = tx.tx_hash();
+        let tx_hash = tx.tx_hash();
         let mutation_count = tx.mutation_count() as u32;
 
         let mut msg = Vec::with_capacity(36);
         msg.extend_from_slice(&tx_hash);
         msg.extend_from_slice(&mutation_count.to_le_bytes());
 
-        let sig    = sk.sign(&msg);
+        let sig = sk.sign(&msg);
         let pubkey = sk.public_key().to_bytes();
         Some((sig.to_vec(), pubkey.to_vec()))
     }
@@ -304,20 +315,18 @@ impl TransactionManager {
     ///    - `last_committed_sequence` — the WAL sequence at fsync time.
     ///    - `root_signature` — Ed25519 over `root || seq.to_le_bytes()` (when signed).
     ///    - `signer_pubkey`  — public key of the signer.
-    pub fn checkpoint_signed(
-        &mut self,
-        page_merkle_root: [u8; 32],
-    ) -> Result<u64, TxError> {
-        let seq = self.wal.checkpoint_with_merkle_root(
-            page_merkle_root,
-            self.signing_key.as_ref(),
-        )?;
+    pub fn checkpoint_signed(&mut self, page_merkle_root: [u8; 32]) -> Result<u64, TxError> {
+        let seq = self
+            .wal
+            .checkpoint_with_merkle_root(page_merkle_root, self.signing_key.as_ref())?;
         Ok(seq)
     }
 
     /// Returns the Ed25519 public key bytes of the signing key, if present.
     pub fn signing_pubkey(&self) -> Option<[u8; 32]> {
-        self.signing_key.as_ref().map(|sk| sk.public_key().to_bytes())
+        self.signing_key
+            .as_ref()
+            .map(|sk| sk.public_key().to_bytes())
     }
 
     /// Sign `message` with the signing key.
@@ -326,7 +335,7 @@ impl TransactionManager {
     /// enabled, `None` otherwise.
     pub fn sign_bytes(&self, message: &[u8]) -> Option<([u8; 64], [u8; 32])> {
         self.signing_key.as_ref().map(|sk| {
-            let sig    = sk.sign(message);
+            let sig = sk.sign(message);
             let pubkey = sk.public_key().to_bytes();
             (sig, pubkey)
         })

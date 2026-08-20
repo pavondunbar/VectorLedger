@@ -18,23 +18,21 @@ use crate::error::ReplicationError;
 /// Returns `Err(SecretError)` if the file is missing, unreadable, or not
 /// valid hex of exactly 32 bytes.
 pub fn load_secret(path: &Path) -> Result<[u8; 32], ReplicationError> {
-    let hex = std::fs::read_to_string(path)
-        .map_err(|e| ReplicationError::SecretError(
-            format!("cannot read {}: {e}", path.display())
-        ))?;
+    let hex = std::fs::read_to_string(path).map_err(|e| {
+        ReplicationError::SecretError(format!("cannot read {}: {e}", path.display()))
+    })?;
 
-    let bytes = hex::decode(hex.trim())
-        .map_err(|e| ReplicationError::SecretError(
-            format!("invalid hex in {}: {e}", path.display())
-        ))?;
+    let bytes = hex::decode(hex.trim()).map_err(|e| {
+        ReplicationError::SecretError(format!("invalid hex in {}: {e}", path.display()))
+    })?;
 
     let len = bytes.len();
-    bytes.try_into().map_err(|_| ReplicationError::SecretError(
-        format!(
+    bytes.try_into().map_err(|_| {
+        ReplicationError::SecretError(format!(
             "{} must contain exactly 32 bytes (64 hex chars), got {len} bytes",
             path.display(),
-        )
-    ))
+        ))
+    })
 }
 
 /// Generate a fresh 32-byte secret, write it to `path` with mode 0o600,
@@ -46,10 +44,9 @@ pub fn generate_and_save(path: &Path) -> Result<[u8; 32], ReplicationError> {
     let mut secret = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut secret);
 
-    std::fs::write(path, hex::encode(secret))
-        .map_err(|e| ReplicationError::SecretError(
-            format!("cannot write {}: {e}", path.display())
-        ))?;
+    std::fs::write(path, hex::encode(secret)).map_err(|e| {
+        ReplicationError::SecretError(format!("cannot write {}: {e}", path.display()))
+    })?;
 
     set_mode_600(path)?;
     tracing::info!(
@@ -79,12 +76,13 @@ fn set_mode_600(path: &Path) -> Result<(), ReplicationError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| ReplicationError::SecretError(
-                format!("chmod 600 {}: {e}", path.display())
-            ))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            ReplicationError::SecretError(format!("chmod 600 {}: {e}", path.display()))
+        })?;
     }
     #[cfg(not(unix))]
-    { let _ = path; }
+    {
+        let _ = path;
+    }
     Ok(())
 }

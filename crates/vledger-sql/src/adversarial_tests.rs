@@ -29,10 +29,22 @@ mod tests {
 
     fn add_accounts(store: &mut LedgerStore) -> (uuid::Uuid, uuid::Uuid) {
         let cash = store
-            .create_account(Account::new("CASH", "Cash", AccountType::Asset, "USD", "test"))
+            .create_account(Account::new(
+                "CASH",
+                "Cash",
+                AccountType::Asset,
+                "USD",
+                "test",
+            ))
             .unwrap();
         let rev = store
-            .create_account(Account::new("REV", "Revenue", AccountType::Income, "USD", "test"))
+            .create_account(Account::new(
+                "REV",
+                "Revenue",
+                AccountType::Income,
+                "USD",
+                "test",
+            ))
             .unwrap();
         (cash, rev)
     }
@@ -72,7 +84,10 @@ mod tests {
     #[test]
     fn parser_drop_table_rejected_by_planner() {
         let stmt = parse_one("DROP TABLE ledger").unwrap();
-        assert!(LogicalPlanBuilder::plan(stmt).is_err(), "DROP TABLE must be rejected");
+        assert!(
+            LogicalPlanBuilder::plan(stmt).is_err(),
+            "DROP TABLE must be rejected"
+        );
     }
 
     #[test]
@@ -138,9 +153,9 @@ mod tests {
         }
         match parse_one(&sql) {
             Err(crate::error::SqlError::NestingTooDeep { .. }) => {} // correct
-            Err(crate::error::SqlError::QueryTooLong  { .. }) => {} // also acceptable
-            Err(e)  => panic!("unexpected error: {e}"),
-            Ok(_)   => panic!("50-level nesting must be rejected"),
+            Err(crate::error::SqlError::QueryTooLong { .. }) => {}   // also acceptable
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("50-level nesting must be rejected"),
         }
     }
 
@@ -175,7 +190,10 @@ mod tests {
     #[test]
     fn parser_select_balance_with_no_arg_rejected() {
         let stmt = parse_one("SELECT BALANCE()").unwrap();
-        assert!(LogicalPlanBuilder::plan(stmt).is_err(), "BALANCE() with no arg must be rejected");
+        assert!(
+            LogicalPlanBuilder::plan(stmt).is_err(),
+            "BALANCE() with no arg must be rejected"
+        );
     }
 
     #[test]
@@ -195,7 +213,10 @@ mod tests {
              VALUES ('test', 'CASH', 'REV', 'notanumber', 'USD', 'test')",
         )
         .unwrap();
-        assert!(LogicalPlanBuilder::plan(stmt).is_err(), "non-integer amount must fail at planner");
+        assert!(
+            LogicalPlanBuilder::plan(stmt).is_err(),
+            "non-integer amount must fail at planner"
+        );
     }
 
     #[test]
@@ -276,7 +297,10 @@ mod tests {
         .unwrap();
         // Negative amounts must be rejected at the planner level
         let plan_result = LogicalPlanBuilder::plan(stmt);
-        assert!(plan_result.is_err(), "negative amount must be rejected by planner (got: {plan_result:?})");
+        assert!(
+            plan_result.is_err(),
+            "negative amount must be rejected by planner (got: {plan_result:?})"
+        );
     }
 
     #[test]
@@ -301,8 +325,15 @@ mod tests {
 
         Executor::new(&mut store).execute(plan1).unwrap();
         let result = Executor::new(&mut store).execute(plan2);
-        assert!(result.is_ok(), "idempotent duplicate must succeed, got: {result:?}");
-        assert_eq!(store.entry_count(), 1, "must have exactly 1 entry after idempotent post");
+        assert!(
+            result.is_ok(),
+            "idempotent duplicate must succeed, got: {result:?}"
+        );
+        assert_eq!(
+            store.entry_count(),
+            1,
+            "must have exactly 1 entry after idempotent post"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -313,8 +344,14 @@ mod tests {
     fn merkle_proof_tampered_leaf_rejected() {
         use vledger_crypto::merkle::{merkle_proof, merkle_root};
 
-        let leaves: Vec<[u8; 32]> = (0u8..8).map(|i| { let mut h = [0u8; 32]; h[0] = i; h }).collect();
-        let root  = merkle_root(&leaves);
+        let leaves: Vec<[u8; 32]> = (0u8..8)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[0] = i;
+                h
+            })
+            .collect();
+        let root = merkle_root(&leaves);
         let proof = merkle_proof(&leaves, 3).unwrap();
 
         // Tamper with the leaf
@@ -324,8 +361,8 @@ mod tests {
         // Rebuild proof for tampered leaf to attempt verification
         let tampered_proof = vledger_crypto::merkle::MerkleProof {
             leaf_index: proof.leaf_index,
-            leaf_hash:  vledger_crypto::hash::hash_leaf(&bad_leaf),
-            path:       proof.path,
+            leaf_hash: vledger_crypto::hash::hash_leaf(&bad_leaf),
+            path: proof.path,
             root,
         };
         assert!(
@@ -337,8 +374,14 @@ mod tests {
     #[test]
     fn merkle_proof_valid_leaf_verifies() {
         use vledger_crypto::merkle::{merkle_proof, merkle_root};
-        let leaves: Vec<[u8; 32]> = (0u8..8).map(|i| { let mut h = [0u8; 32]; h[0] = i; h }).collect();
-        let root  = merkle_root(&leaves);
+        let leaves: Vec<[u8; 32]> = (0u8..8)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[0] = i;
+                h
+            })
+            .collect();
+        let root = merkle_root(&leaves);
         let proof = merkle_proof(&leaves, 3).unwrap();
         assert_eq!(proof.root, root);
         assert!(proof.verify().is_ok(), "valid proof must verify");
@@ -349,14 +392,18 @@ mod tests {
         use vledger_crypto::merkle::merkle_root;
         let empty: &[[u8; 32]] = &[];
         let root = merkle_root(empty);
-        assert_eq!(root, vledger_crypto::ZERO_HASH, "empty Merkle tree must produce ZERO_HASH");
+        assert_eq!(
+            root,
+            vledger_crypto::ZERO_HASH,
+            "empty Merkle tree must produce ZERO_HASH"
+        );
     }
 
     #[test]
     fn merkle_proof_single_leaf_verifies() {
         use vledger_crypto::merkle::{merkle_proof, merkle_root};
         let leaf: [u8; 32] = [0xABu8; 32];
-        let root  = merkle_root(&[leaf]);
+        let root = merkle_root(&[leaf]);
         let proof = merkle_proof(&[leaf], 0).unwrap();
         assert_eq!(proof.root, root);
         assert!(proof.verify().is_ok());
@@ -365,8 +412,14 @@ mod tests {
     #[test]
     fn merkle_tampered_root_rejected() {
         use vledger_crypto::merkle::{merkle_proof, merkle_root};
-        let leaves: Vec<[u8; 32]> = (0u8..4).map(|i| { let mut h = [0u8; 32]; h[0] = i; h }).collect();
-        let root  = merkle_root(&leaves);
+        let leaves: Vec<[u8; 32]> = (0u8..4)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[0] = i;
+                h
+            })
+            .collect();
+        let root = merkle_root(&leaves);
         let proof = merkle_proof(&leaves, 1).unwrap();
 
         // Create a proof with tampered root
@@ -374,18 +427,27 @@ mod tests {
         bad_root[0] ^= 0x01;
         let tampered_proof = vledger_crypto::merkle::MerkleProof {
             leaf_index: proof.leaf_index,
-            leaf_hash:  proof.leaf_hash,
-            path:       proof.path,
-            root:       bad_root, // tampered root
+            leaf_hash: proof.leaf_hash,
+            path: proof.path,
+            root: bad_root, // tampered root
         };
-        assert!(tampered_proof.verify().is_err(), "tampered root must fail verification");
+        assert!(
+            tampered_proof.verify().is_err(),
+            "tampered root must fail verification"
+        );
     }
 
     #[test]
     fn merkle_wrong_index_proof_fails() {
         use vledger_crypto::merkle::{merkle_proof, merkle_root};
-        let leaves: Vec<[u8; 32]> = (0u8..8).map(|i| { let mut h = [0u8; 32]; h[0] = i; h }).collect();
-        let root  = merkle_root(&leaves);
+        let leaves: Vec<[u8; 32]> = (0u8..8)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[0] = i;
+                h
+            })
+            .collect();
+        let root = merkle_root(&leaves);
 
         // Get proof for leaf[3] — this path is specifically for index 3
         let proof_for_3 = merkle_proof(&leaves, 3).unwrap();
@@ -395,12 +457,15 @@ mod tests {
         let leaf_hash_of_4 = vledger_crypto::hash::hash_leaf(&leaves[4]);
         let wrong_proof = vledger_crypto::merkle::MerkleProof {
             leaf_index: 4,
-            leaf_hash:  leaf_hash_of_4,     // correct hash for index 4
-            path:       proof_for_3.path,   // but path designed for index 3
+            leaf_hash: leaf_hash_of_4, // correct hash for index 4
+            path: proof_for_3.path,    // but path designed for index 3
             root,
         };
         // The path for index 3 combined with the leaf_hash of index 4 produces the wrong root
-        assert!(wrong_proof.verify().is_err(), "proof with mismatched path/index must fail");
+        assert!(
+            wrong_proof.verify().is_err(),
+            "proof with mismatched path/index must fail"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -413,17 +478,36 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let data_dir = dir.path();
-        let wal_dir  = data_dir.join("wal");
+        let wal_dir = data_dir.join("wal");
         std::fs::create_dir_all(&wal_dir).unwrap();
         std::fs::create_dir_all(data_dir.join("pages")).unwrap();
 
         // Write one committed entry
         {
             let mut store = LedgerStore::open(data_dir).unwrap();
-            let cash = store.create_account(Account::new("CASH", "Cash", AccountType::Asset, "USD", "test")).unwrap();
-            let rev  = store.create_account(Account::new("REV", "Rev", AccountType::Income, "USD", "test")).unwrap();
-            let amt  = Amount::new(1000).unwrap();
-            let e    = JournalEntryBuilder::new("test", "test").debit(cash, amt, "USD").credit(rev, amt, "USD").build();
+            let cash = store
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let rev = store
+                .create_account(Account::new(
+                    "REV",
+                    "Rev",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let amt = Amount::new(1000).unwrap();
+            let e = JournalEntryBuilder::new("test", "test")
+                .debit(cash, amt, "USD")
+                .credit(rev, amt, "USD")
+                .build();
             store.post_entry(e).unwrap();
         }
 
@@ -465,8 +549,24 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("pages")).unwrap();
 
         let mut store = LedgerStore::open(dir.path()).unwrap();
-        let cash = store.create_account(Account::new("CASH", "Cash", AccountType::Asset, "USD", "test")).unwrap();
-        let rev  = store.create_account(Account::new("REV", "Rev", AccountType::Income, "USD", "test")).unwrap();
+        let cash = store
+            .create_account(Account::new(
+                "CASH",
+                "Cash",
+                AccountType::Asset,
+                "USD",
+                "test",
+            ))
+            .unwrap();
+        let rev = store
+            .create_account(Account::new(
+                "REV",
+                "Rev",
+                AccountType::Income,
+                "USD",
+                "test",
+            ))
+            .unwrap();
 
         // Post an entry to exercise Begin + Data + Commit record types
         let e = JournalEntryBuilder::new("wal-types-test", "test")

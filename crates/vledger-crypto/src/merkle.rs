@@ -96,10 +96,7 @@ impl MerkleProof {
 /// Build a Merkle proof for the item at `leaf_index`.
 ///
 /// Returns `None` if `leaf_index` is out of bounds.
-pub fn merkle_proof(
-    items: &[impl AsRef<[u8]>],
-    leaf_index: usize,
-) -> Option<MerkleProof> {
+pub fn merkle_proof(items: &[impl AsRef<[u8]>], leaf_index: usize) -> Option<MerkleProof> {
     if items.is_empty() || leaf_index >= items.len() {
         return None;
     }
@@ -168,7 +165,9 @@ mod tests {
         let items: Vec<&[u8]> = vec![b"a", b"b", b"c", b"d", b"e"];
         for i in 0..items.len() {
             let proof = merkle_proof(&items, i).unwrap();
-            proof.verify().expect(&format!("proof failed for index {i}"));
+            proof
+                .verify()
+                .expect(&format!("proof failed for index {i}"));
         }
     }
 

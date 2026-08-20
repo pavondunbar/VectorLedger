@@ -29,18 +29,19 @@
 //! QueryResult  (rows + optional MerkleProof)
 //! ```
 
+#[cfg(test)]
+mod adversarial_tests;
 pub mod error;
 pub mod executor;
 pub mod optimizer;
 pub mod parser;
 pub mod planner;
 pub mod result;
-#[cfg(test)]
-mod adversarial_tests;
 
 pub use error::SqlError;
 pub use executor::{Executor, ReadExecutor};
 pub use optimizer::explain as explain_plan;
-pub use planner::{AggFn, AggregateSpec, JoinSpec, JoinType, LogicalPlan, LogicalPlanBuilder,
-                  WindowFn, WindowSpec};
+pub use planner::{
+    AggFn, AggregateSpec, JoinSpec, JoinType, LogicalPlan, LogicalPlanBuilder, WindowFn, WindowSpec,
+};
 pub use result::{QueryResult, Row, Value};

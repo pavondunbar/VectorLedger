@@ -10,101 +10,89 @@ use uuid::Uuid;
 pub enum AuditEventKind {
     /// A SQL query was executed.
     QueryExecuted {
-        sql:           String,
-        caller_id:     String,
+        sql: String,
+        caller_id: String,
         rows_affected: usize,
-        duration_ms:   u64,
+        duration_ms: u64,
     },
     /// A journal entry was committed to the ledger.
     EntryPosted {
-        entry_id:       Uuid,
+        entry_id: Uuid,
         entry_sequence: u64,
-        domain:         String,
-        amount_sum:     i64,
-        caller_id:      String,
+        domain: String,
+        amount_sum: i64,
+        caller_id: String,
     },
     /// An account was created.
     AccountCreated {
-        account_id:   Uuid,
-        account_code: String,
-        domain:       String,
-        caller_id:    String,
-    },
-    /// An account was closed.
-    AccountClosed {
         account_id: Uuid,
-        caller_id:  String,
-    },
-    /// An HSM key was rotated.
-    KeyRotated {
-        key_id:    String,
+        account_code: String,
+        domain: String,
         caller_id: String,
     },
+    /// An account was closed.
+    AccountClosed { account_id: Uuid, caller_id: String },
+    /// An HSM key was rotated.
+    KeyRotated { key_id: String, caller_id: String },
     /// A WAL record was shipped to or received from a replica.
     ReplicationEvent {
-        lsn:       u64,
+        lsn: u64,
         direction: String, // "shipped" | "received"
-        peer:      String,
+        peer: String,
     },
     /// A login attempt was made.
     AuthEvent {
         caller_id: String,
-        success:   bool,
+        success: bool,
         peer_addr: String,
     },
     /// A journal entry was submitted for four-eyes approval.
     FourEyesSubmitted {
         approval_id: Uuid,
-        entry_id:    Uuid,
-        submitter:   String,
-        domain:      String,
+        entry_id: Uuid,
+        submitter: String,
+        domain: String,
     },
     /// A four-eyes approval was granted.
-    FourEyesApproved {
-        approval_id: Uuid,
-        approver:    String,
-    },
+    FourEyesApproved { approval_id: Uuid, approver: String },
     /// A four-eyes approval was rejected.
     FourEyesRejected {
         approval_id: Uuid,
-        approver:    String,
-        reason:      String,
+        approver: String,
+        reason: String,
     },
     /// A backup snapshot was created.
     BackupCreated {
-        path:      String,
+        path: String,
         size_bytes: u64,
         caller_id: String,
     },
     /// Key rotation process was initiated.
     KeyRotationStarted {
-        key_ids:   Vec<String>,
+        key_ids: Vec<String>,
         caller_id: String,
     },
     /// The server process started successfully.
-    ServerStarted {
-        bind_addr: String,
-        version:   String,
-    },
+    ServerStarted { bind_addr: String, version: String },
 }
 
 impl AuditEventKind {
     /// A short human-readable name for this event type (used in CSV export).
     pub fn name(&self) -> &'static str {
         match self {
-            Self::QueryExecuted { .. }      => "query_executed",
-            Self::EntryPosted { .. }        => "entry_posted",
-            Self::AccountCreated { .. }     => "account_created",
-            Self::AccountClosed { .. }      => "account_closed",
-            Self::KeyRotated { .. }         => "key_rotated",
-            Self::ReplicationEvent { .. }   => "replication_event",
-            Self::AuthEvent { .. }          => "auth_event",
-            Self::FourEyesSubmitted { .. }  => "four_eyes_submitted",
-            Self::FourEyesApproved { .. }   => "four_eyes_approved",
-            Self::FourEyesRejected { .. }   => "four_eyes_rejected",
-            Self::BackupCreated { .. }      => "backup_created",
+            Self::QueryExecuted { .. } => "query_executed",
+            Self::EntryPosted { .. } => "entry_posted",
+            Self::AccountCreated { .. } => "account_created",
+            Self::AccountClosed { .. } => "account_closed",
+            Self::KeyRotated { .. } => "key_rotated",
+            Self::ReplicationEvent { .. } => "replication_event",
+            Self::AuthEvent { .. } => "auth_event",
+            Self::FourEyesSubmitted { .. } => "four_eyes_submitted",
+            Self::FourEyesApproved { .. } => "four_eyes_approved",
+            Self::FourEyesRejected { .. } => "four_eyes_rejected",
+            Self::BackupCreated { .. } => "backup_created",
             Self::KeyRotationStarted { .. } => "key_rotation_started",
-            Self::ServerStarted { .. }      => "server_started",
+            Self::ServerStarted { .. } => "server_started",
         }
     }
 }
@@ -113,17 +101,17 @@ impl AuditEventKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     /// Monotonic sequence number within this log file (1-based).
-    pub sequence:     u64,
+    pub sequence: u64,
     /// UTC timestamp when this event occurred.
-    pub ts:           DateTime<Utc>,
+    pub ts: DateTime<Utc>,
     /// The event payload — stored as a nested object to avoid field-name collisions.
-    pub event:        AuditEventKind,
+    pub event: AuditEventKind,
     /// BLAKE3 hash of the canonical bytes of this event (before chain hash).
     pub content_hash: String,
     /// BLAKE3 chain hash: H(sequence || prev_hash || content_hash).
-    pub chain_hash:   String,
+    pub chain_hash: String,
     /// Chain hash of the previous event (zero-filled hex for the first event).
-    pub prev_hash:    String,
+    pub prev_hash: String,
 }
 
 impl AuditEvent {
@@ -151,7 +139,7 @@ impl AuditEvent {
     pub fn finalise(&mut self, prev_chain_hash: &str) {
         let content_hex = hex::encode(blake3::hash(&self.canonical_bytes()).as_bytes());
         self.content_hash = content_hex.clone();
-        self.prev_hash    = prev_chain_hash.to_string();
+        self.prev_hash = prev_chain_hash.to_string();
 
         let mut hasher = blake3::Hasher::new();
         hasher.update(&self.sequence.to_le_bytes());

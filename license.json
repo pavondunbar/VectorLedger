@@ -1,0 +1,16 @@
+{
+  "email": "you@vectorguardlabs.com",
+  "expires_at": "2027-12-31",
+  "features": [
+    "pgwire",
+    "replication",
+    "hsm",
+    "compliance_report",
+    "audit_export_unlimited",
+    "multi_node"
+  ],
+  "issued_at": "2026-08-13",
+  "licensee": "VectorGuard Labs",
+  "signature": "b26fd0eaa5052d38abc753ac4820dd7a1b365eb560117a05111967e487eee568123613753d4cf759f1de731050d340f47a8f335f044a4e064227147d1b20e10a",
+  "tier": "enterprise"
+}

@@ -7,9 +7,8 @@
 //! - `LogicalPlan::Window`     — OVER (PARTITION BY … ORDER BY …)
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, Query, SelectItem,
-    SetExpr, Statement, TableFactor, Value as SqlValue, Values,
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
+    Query, SelectItem, SetExpr, Statement, TableFactor, Value as SqlValue, Values,
     WindowSpec as AstWindowSpec,
 };
 
@@ -17,9 +16,9 @@ use crate::error::SqlError;
 
 // ── Target table names ────────────────────────────────────────────────────────
 
-const TABLE_LEDGER:       &str = "ledger";
+const TABLE_LEDGER: &str = "ledger";
 const TABLE_LEDGER_LINES: &str = "ledger_lines";
-const TABLE_ACCOUNTS:     &str = "accounts";
+const TABLE_ACCOUNTS: &str = "accounts";
 
 // ── Logical Plan ─────────────────────────────────────────────────────────────
 
@@ -46,7 +45,10 @@ pub enum LogicalPlan {
     /// SELECT VERIFY_CHAIN()
     /// SELECT VERIFY_CHAIN(from_seq)
     /// SELECT VERIFY_CHAIN(from_seq, to_seq)
-    VerifyChain { from_seq: Option<u64>, to_seq: Option<u64> },
+    VerifyChain {
+        from_seq: Option<u64>,
+        to_seq: Option<u64>,
+    },
 
     /// SELECT VERIFY_ENTRY(sequence_number) — verify a single entry's hashes.
     VerifyEntry { sequence: u64 },
@@ -56,7 +58,10 @@ pub enum LogicalPlan {
     /// Silently mutates an entry's description in memory without updating its
     /// hash, so VERIFY_CHAIN() will detect the tampering.
     #[cfg(test)]
-    TamperEntry { sequence: u64, new_description: String },
+    TamperEntry {
+        sequence: u64,
+        new_description: String,
+    },
 
     /// SELECT 1, SELECT 'hello', SELECT true — constant expression with no FROM.
     /// Used by ORMs, connection poolers, and health checks.
@@ -69,7 +74,6 @@ pub enum LogicalPlan {
     CreateAccount(AccountSpec),
 
     // ── Phase 3 ───────────────────────────────────────────────────────────
-
     /// SELECT … FROM ledger JOIN accounts ON …
     Join(JoinSpec),
 
@@ -92,13 +96,13 @@ pub enum JoinType {
 /// Specification for a join plan.
 #[derive(Debug, Clone)]
 pub struct JoinSpec {
-    pub left:         Box<LogicalPlan>,
-    pub right:        Box<LogicalPlan>,
-    pub join_type:    JoinType,
+    pub left: Box<LogicalPlan>,
+    pub right: Box<LogicalPlan>,
+    pub join_type: JoinType,
     /// `"ledger.account_id = accounts.id"` style condition (string form for now).
     pub on_condition: String,
     /// Columns to project from the joined output.
-    pub projections:  Vec<String>,
+    pub projections: Vec<String>,
 }
 
 // ── Aggregate ─────────────────────────────────────────────────────────────────
@@ -116,11 +120,11 @@ pub enum AggFn {
 impl std::fmt::Display for AggFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AggFn::Sum   => write!(f, "SUM"),
+            AggFn::Sum => write!(f, "SUM"),
             AggFn::Count => write!(f, "COUNT"),
-            AggFn::Avg   => write!(f, "AVG"),
-            AggFn::Min   => write!(f, "MIN"),
-            AggFn::Max   => write!(f, "MAX"),
+            AggFn::Avg => write!(f, "AVG"),
+            AggFn::Min => write!(f, "MIN"),
+            AggFn::Max => write!(f, "MAX"),
         }
     }
 }
@@ -128,18 +132,18 @@ impl std::fmt::Display for AggFn {
 /// A single aggregation expression (`SUM(amount) AS total`).
 #[derive(Debug, Clone)]
 pub struct AggExpr {
-    pub func:    AggFn,
+    pub func: AggFn,
     /// Column name to aggregate over (`*` for COUNT(*)).
-    pub column:  String,
+    pub column: String,
     /// Output alias.
-    pub alias:   String,
+    pub alias: String,
 }
 
 /// Specification for an aggregate plan.
 #[derive(Debug, Clone)]
 pub struct AggregateSpec {
-    pub input:      Box<LogicalPlan>,
-    pub group_by:   Vec<String>,
+    pub input: Box<LogicalPlan>,
+    pub group_by: Vec<String>,
     pub aggregates: Vec<AggExpr>,
 }
 
@@ -160,13 +164,13 @@ pub enum WindowFn {
 impl std::fmt::Display for WindowFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            WindowFn::RowNumber   => "ROW_NUMBER",
-            WindowFn::Rank        => "RANK",
-            WindowFn::DenseRank   => "DENSE_RANK",
-            WindowFn::RunningSum  => "SUM",
-            WindowFn::RunningAvg  => "AVG",
-            WindowFn::Lag         => "LAG",
-            WindowFn::Lead        => "LEAD",
+            WindowFn::RowNumber => "ROW_NUMBER",
+            WindowFn::Rank => "RANK",
+            WindowFn::DenseRank => "DENSE_RANK",
+            WindowFn::RunningSum => "SUM",
+            WindowFn::RunningAvg => "AVG",
+            WindowFn::Lag => "LAG",
+            WindowFn::Lead => "LEAD",
         };
         write!(f, "{s}")
     }
@@ -175,13 +179,13 @@ impl std::fmt::Display for WindowFn {
 /// Specification for a window function plan.
 #[derive(Debug, Clone)]
 pub struct WindowSpec {
-    pub input:        Box<LogicalPlan>,
-    pub window_fn:    WindowFn,
+    pub input: Box<LogicalPlan>,
+    pub window_fn: WindowFn,
     /// Column to apply the function over (e.g. `amount` for running SUM).
-    pub column:       String,
-    pub alias:        String,
+    pub column: String,
+    pub alias: String,
     pub partition_by: Vec<String>,
-    pub order_by:     Vec<String>,
+    pub order_by: Vec<String>,
 }
 
 /// Specification for creating a new account.
@@ -226,8 +230,8 @@ impl LogicalPlanBuilder {
     /// Convert a parsed `Statement` into a `LogicalPlan`, then optimise it.
     pub fn plan(stmt: Statement) -> Result<LogicalPlan, SqlError> {
         let raw = match stmt {
-            Statement::Query(q)        => Self::plan_query(*q),
-            Statement::Insert(ins)     => Self::plan_insert(ins),
+            Statement::Query(q) => Self::plan_query(*q),
+            Statement::Insert(ins) => Self::plan_insert(ins),
             Statement::CreateTable(ct) => Self::plan_create_table(ct),
             other => Err(SqlError::Unsupported(format!("{other}"))),
         }?;
@@ -258,9 +262,11 @@ impl LogicalPlanBuilder {
                         }
                         "VERIFY_ENTRY" => {
                             let (seq, _) = extract_optional_u64_range(&f.args)?;
-                            let sequence = seq.ok_or_else(|| SqlError::MissingField(
-                                "VERIFY_ENTRY() requires a sequence number argument".into()
-                            ))?;
+                            let sequence = seq.ok_or_else(|| {
+                                SqlError::MissingField(
+                                    "VERIFY_ENTRY() requires a sequence number argument".into(),
+                                )
+                            })?;
                             return Ok(LogicalPlan::VerifyEntry { sequence });
                         }
                         #[cfg(test)]
@@ -275,7 +281,10 @@ impl LogicalPlanBuilder {
                                 ))?;
                             let new_description = extract_nth_string_arg(&f.args, 1)
                                 .unwrap_or_else(|_| "TAMPERED".to_string());
-                            return Ok(LogicalPlan::TamperEntry { sequence, new_description });
+                            return Ok(LogicalPlan::TamperEntry {
+                                sequence,
+                                new_description,
+                            });
                         }
                         _ => {}
                     }
@@ -301,7 +310,8 @@ impl LogicalPlanBuilder {
                         ("?column?".to_string(), s)
                     }
                     SelectItem::ExprWithAlias {
-                        expr: Expr::Value(v), alias
+                        expr: Expr::Value(v),
+                        alias,
                     } => {
                         let s = match v {
                             SqlValue::Number(n, _) => n.clone(),
@@ -330,7 +340,11 @@ impl LogicalPlanBuilder {
         // ── Detect window functions in projection ─────────────────────────
         for item in &body.projection {
             if let SelectItem::UnnamedExpr(Expr::Function(f))
-             | SelectItem::ExprWithAlias { expr: Expr::Function(f), .. } = item {
+            | SelectItem::ExprWithAlias {
+                expr: Expr::Function(f),
+                ..
+            } = item
+            {
                 if let Some(ws) = extract_window_spec(f) {
                     let (wfn, col) = parse_window_fn(f)?;
                     let alias = match item {
@@ -339,14 +353,18 @@ impl LogicalPlanBuilder {
                     };
                     let scan = base_scan(&primary_table, &body.selection, &q.limit)?;
                     return Ok(LogicalPlan::Window(WindowSpec {
-                        input:        Box::new(scan),
-                        window_fn:    wfn,
-                        column:       col,
+                        input: Box::new(scan),
+                        window_fn: wfn,
+                        column: col,
                         alias,
-                        partition_by: ws.partition_by.iter()
+                        partition_by: ws
+                            .partition_by
+                            .iter()
                             .map(|e| expr_to_col_name(e))
                             .collect(),
-                        order_by:     ws.order_by.iter()
+                        order_by: ws
+                            .order_by
+                            .iter()
                             .map(|o| expr_to_col_name(&o.expr))
                             .collect(),
                     }));
@@ -377,26 +395,28 @@ impl LogicalPlanBuilder {
             let right_table = extract_table_name(&join_clause.relation)?;
             let on_cond = format!("{:?}", join_clause.join_operator);
 
-            let left  = base_scan(&primary_table, &body.selection, &q.limit)?;
-            let right = base_scan(&right_table,   &None,           &None)?;
+            let left = base_scan(&primary_table, &body.selection, &q.limit)?;
+            let right = base_scan(&right_table, &None, &None)?;
 
             let join_type = match &join_clause.join_operator {
                 sqlparser::ast::JoinOperator::LeftOuter(_) => JoinType::LeftOuter,
                 _ => JoinType::Inner,
             };
 
-            let projections: Vec<String> = body.projection.iter().map(|p| {
-                match p {
+            let projections: Vec<String> = body
+                .projection
+                .iter()
+                .map(|p| match p {
                     SelectItem::Wildcard(_) => "*".into(),
                     SelectItem::UnnamedExpr(e) => expr_to_col_name(e),
                     SelectItem::ExprWithAlias { alias, .. } => alias.value.clone(),
                     _ => "*".into(),
-                }
-            }).collect();
+                })
+                .collect();
 
             return Ok(LogicalPlan::Join(JoinSpec {
-                left:         Box::new(left),
-                right:        Box::new(right),
+                left: Box::new(left),
+                right: Box::new(right),
                 join_type,
                 on_condition: on_cond,
                 projections,
@@ -408,11 +428,17 @@ impl LogicalPlanBuilder {
             Some(parse_where_to_entry_filter(&primary_table, selection)?)
         } else if let Some(limit_expr) = q.limit {
             if let Expr::Value(SqlValue::Number(n, _)) = limit_expr {
-                let n: usize = n.parse().map_err(|_| SqlError::TypeError("LIMIT must be integer".into()))?;
+                let n: usize = n
+                    .parse()
+                    .map_err(|_| SqlError::TypeError("LIMIT must be integer".into()))?;
                 return match primary_table.as_str() {
-                    TABLE_LEDGER       => Ok(LogicalPlan::ScanEntries { filter: Some(EntryFilter::Limit(n)) }),
-                    TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter: Some(EntryFilter::Limit(n)) }),
-                    TABLE_ACCOUNTS     => Ok(LogicalPlan::ScanAccounts { filter: None }),
+                    TABLE_LEDGER => Ok(LogicalPlan::ScanEntries {
+                        filter: Some(EntryFilter::Limit(n)),
+                    }),
+                    TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines {
+                        filter: Some(EntryFilter::Limit(n)),
+                    }),
+                    TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter: None }),
                     t => Err(SqlError::UnknownTable(t.into())),
                 };
             }
@@ -422,9 +448,9 @@ impl LogicalPlanBuilder {
         };
 
         match primary_table.as_str() {
-            TABLE_LEDGER       => Ok(LogicalPlan::ScanEntries { filter }),
+            TABLE_LEDGER => Ok(LogicalPlan::ScanEntries { filter }),
             TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter }),
-            TABLE_ACCOUNTS     => Ok(LogicalPlan::ScanAccounts { filter }),
+            TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter }),
             t => Err(SqlError::UnknownTable(t.into())),
         }
     }
@@ -435,16 +461,29 @@ impl LogicalPlanBuilder {
         let table = ins.table_name.to_string().to_lowercase();
         match table.as_str() {
             TABLE_LEDGER => {
-                let cols: Vec<String> = ins.columns.iter().map(|c| c.value.to_lowercase()).collect();
-                let rows = match *ins.source.ok_or_else(|| SqlError::MissingField("VALUES".into()))?.body {
+                let cols: Vec<String> =
+                    ins.columns.iter().map(|c| c.value.to_lowercase()).collect();
+                let rows = match *ins
+                    .source
+                    .ok_or_else(|| SqlError::MissingField("VALUES".into()))?
+                    .body
+                {
                     SetExpr::Values(Values { rows, .. }) => rows,
-                    _ => return Err(SqlError::Unsupported("INSERT with non-VALUES source".into())),
+                    _ => {
+                        return Err(SqlError::Unsupported(
+                            "INSERT with non-VALUES source".into(),
+                        ))
+                    }
                 };
-                let vals = rows.into_iter().next()
+                let vals = rows
+                    .into_iter()
+                    .next()
                     .ok_or_else(|| SqlError::MissingField("at least one VALUES row".into()))?;
 
                 let get = |name: &str| -> Result<String, SqlError> {
-                    let idx = cols.iter().position(|c| c == name)
+                    let idx = cols
+                        .iter()
+                        .position(|c| c == name)
                         .ok_or_else(|| SqlError::MissingField(name.to_string()))?;
                     expr_to_string(&vals[idx])
                 };
@@ -456,37 +495,50 @@ impl LogicalPlanBuilder {
                 })?;
 
                 Ok(LogicalPlan::PostEntry(EntrySpec {
-                    description:     get("description")?,
-                    debit_account:   get("debit_account")?,
-                    credit_account:  get("credit_account")?,
+                    description: get("description")?,
+                    debit_account: get("debit_account")?,
+                    credit_account: get("credit_account")?,
                     amount,
-                    currency:        get("currency")?,
-                    external_ref:    get("external_ref").ok(),
+                    currency: get("currency")?,
+                    external_ref: get("external_ref").ok(),
                     idempotency_key: get("idempotency_key").ok(),
-                    domain:          get("domain").unwrap_or_else(|_| "default".into()),
+                    domain: get("domain").unwrap_or_else(|_| "default".into()),
                 }))
             }
             TABLE_ACCOUNTS => {
-                let cols: Vec<String> = ins.columns.iter().map(|c| c.value.to_lowercase()).collect();
-                let rows = match *ins.source.ok_or_else(|| SqlError::MissingField("VALUES".into()))?.body {
+                let cols: Vec<String> =
+                    ins.columns.iter().map(|c| c.value.to_lowercase()).collect();
+                let rows = match *ins
+                    .source
+                    .ok_or_else(|| SqlError::MissingField("VALUES".into()))?
+                    .body
+                {
                     SetExpr::Values(Values { rows, .. }) => rows,
-                    _ => return Err(SqlError::Unsupported("INSERT with non-VALUES source".into())),
+                    _ => {
+                        return Err(SqlError::Unsupported(
+                            "INSERT with non-VALUES source".into(),
+                        ))
+                    }
                 };
-                let vals = rows.into_iter().next()
+                let vals = rows
+                    .into_iter()
+                    .next()
                     .ok_or_else(|| SqlError::MissingField("at least one VALUES row".into()))?;
 
                 let get = |name: &str| -> Result<String, SqlError> {
-                    let idx = cols.iter().position(|c| c == name)
+                    let idx = cols
+                        .iter()
+                        .position(|c| c == name)
                         .ok_or_else(|| SqlError::MissingField(name.to_string()))?;
                     expr_to_string(&vals[idx])
                 };
 
                 Ok(LogicalPlan::CreateAccount(AccountSpec {
-                    code:         get("code")?,
-                    name:         get("name")?,
+                    code: get("code")?,
+                    name: get("name")?,
                     account_type: get("account_type")?,
-                    currency:     get("currency")?,
-                    domain:       get("domain").unwrap_or_else(|_| "default".into()),
+                    currency: get("currency")?,
+                    domain: get("domain").unwrap_or_else(|_| "default".into()),
                 }))
             }
             t => Err(SqlError::UnknownTable(t.into())),
@@ -498,8 +550,9 @@ impl LogicalPlanBuilder {
     fn plan_create_table(ct: sqlparser::ast::CreateTable) -> Result<LogicalPlan, SqlError> {
         let table = ct.name.to_string().to_lowercase();
         if table != TABLE_ACCOUNTS {
-            return Err(SqlError::Unsupported(
-                format!("CREATE TABLE is only supported for 'accounts', got '{table}'")));
+            return Err(SqlError::Unsupported(format!(
+                "CREATE TABLE is only supported for 'accounts', got '{table}'"
+            )));
         }
         // Values are passed as query options in Phase 2.
         // We look for a VALUES clause encoded via sqlparser options.
@@ -523,11 +576,13 @@ fn extract_table_name(tf: &TableFactor) -> Result<String, SqlError> {
 fn expr_to_string(expr: &Expr) -> Result<String, SqlError> {
     match expr {
         Expr::Value(SqlValue::SingleQuotedString(s)) => Ok(s.clone()),
-        Expr::Value(SqlValue::Number(n, _))          => Ok(n.clone()),
-        Expr::Value(SqlValue::Boolean(b))            => Ok(b.to_string()),
-        Expr::Value(SqlValue::Null)                  => Ok(String::new()),
-        Expr::Identifier(i)                          => Ok(i.value.clone()),
-        other => Err(SqlError::TypeError(format!("unsupported expression: {other}"))),
+        Expr::Value(SqlValue::Number(n, _)) => Ok(n.clone()),
+        Expr::Value(SqlValue::Boolean(b)) => Ok(b.to_string()),
+        Expr::Value(SqlValue::Null) => Ok(String::new()),
+        Expr::Identifier(i) => Ok(i.value.clone()),
+        other => Err(SqlError::TypeError(format!(
+            "unsupported expression: {other}"
+        ))),
     }
 }
 
@@ -537,16 +592,18 @@ fn extract_function_string_arg(
 ) -> Result<String, SqlError> {
     use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
     match args {
-        FunctionArguments::List(list) => {
-            list.args.first()
-                .and_then(|a| match a {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(e),
-                    _ => None,
-                })
-                .and_then(|e| expr_to_string(e).ok())
-                .ok_or_else(|| SqlError::MissingField(format!("{fname}() requires a string argument")))
-        }
-        _ => Err(SqlError::MissingField(format!("{fname}() requires arguments"))),
+        FunctionArguments::List(list) => list
+            .args
+            .first()
+            .and_then(|a| match a {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(e),
+                _ => None,
+            })
+            .and_then(|e| expr_to_string(e).ok())
+            .ok_or_else(|| SqlError::MissingField(format!("{fname}() requires a string argument"))),
+        _ => Err(SqlError::MissingField(format!(
+            "{fname}() requires arguments"
+        ))),
     }
 }
 
@@ -562,7 +619,7 @@ fn extract_optional_u64_range(
     use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
     let list = match args {
         FunctionArguments::List(l) => l,
-        FunctionArguments::None   => return Ok((None, None)),
+        FunctionArguments::None => return Ok((None, None)),
         _ => return Ok((None, None)),
     };
     let parse_arg = |i: usize| -> Result<Option<u64>, SqlError> {
@@ -570,9 +627,9 @@ fn extract_optional_u64_range(
             None => Ok(None),
             Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(e))) => {
                 let s = expr_to_string(e)?;
-                let n = s.parse::<u64>().map_err(|_|
+                let n = s.parse::<u64>().map_err(|_| {
                     SqlError::TypeError(format!("argument {} must be an integer", i + 1))
-                )?;
+                })?;
                 Ok(Some(n))
             }
             _ => Ok(None),
@@ -588,39 +645,64 @@ fn extract_nth_string_arg(
 ) -> Result<String, SqlError> {
     use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
     match args {
-        FunctionArguments::List(list) => {
-            list.args.get(n)
-                .and_then(|a| match a {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(e),
-                    _ => None,
-                })
-                .and_then(|e| expr_to_string(e).ok())
-                .ok_or_else(|| SqlError::MissingField(format!("argument {} is required", n)))
-        }
-        _ => Err(SqlError::MissingField(format!("argument {} is required", n))),
+        FunctionArguments::List(list) => list
+            .args
+            .get(n)
+            .and_then(|a| match a {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(e),
+                _ => None,
+            })
+            .and_then(|e| expr_to_string(e).ok())
+            .ok_or_else(|| SqlError::MissingField(format!("argument {} is required", n))),
+        _ => Err(SqlError::MissingField(format!(
+            "argument {} is required",
+            n
+        ))),
     }
 }
 
 fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, SqlError> {
-    if let Expr::BinaryOp { left, op: BinaryOperator::Eq, right } = expr {
+    if let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = expr
+    {
         let col = match *left {
             Expr::Identifier(i) => i.value.to_lowercase(),
-            Expr::CompoundIdentifier(parts) => parts.last().map(|i| i.value.to_lowercase()).unwrap_or_default(),
-            _ => return Err(SqlError::Unsupported("complex WHERE clauses not yet supported".into())),
+            Expr::CompoundIdentifier(parts) => parts
+                .last()
+                .map(|i| i.value.to_lowercase())
+                .unwrap_or_default(),
+            _ => {
+                return Err(SqlError::Unsupported(
+                    "complex WHERE clauses not yet supported".into(),
+                ))
+            }
         };
         let val = expr_to_string(&right)?;
         match (table, col.as_str()) {
-            (TABLE_LEDGER | TABLE_LEDGER_LINES, "sequence")     => Ok(EntryFilter::BySequence(val.parse().map_err(|_| SqlError::TypeError("sequence must be integer".into()))?)),
-            (TABLE_LEDGER | TABLE_LEDGER_LINES, "external_ref") => Ok(EntryFilter::ByExternalRef(val)),
-            (TABLE_LEDGER | TABLE_LEDGER_LINES, "domain")       => Ok(EntryFilter::ByDomain(val)),
-            (TABLE_LEDGER | TABLE_LEDGER_LINES, "status")       => Ok(EntryFilter::ByStatus(val)),
-            (TABLE_ACCOUNTS, "code")         => Ok(EntryFilter::ByDomain(format!("__account_code:{val}"))),
-            (TABLE_ACCOUNTS, "domain")       => Ok(EntryFilter::ByDomain(val)),
-            (TABLE_ACCOUNTS, "currency")     => Ok(EntryFilter::ByDomain(format!("__account_currency:{val}"))),
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "sequence") => {
+                Ok(EntryFilter::BySequence(val.parse().map_err(|_| {
+                    SqlError::TypeError("sequence must be integer".into())
+                })?))
+            }
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "external_ref") => {
+                Ok(EntryFilter::ByExternalRef(val))
+            }
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "domain") => Ok(EntryFilter::ByDomain(val)),
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "status") => Ok(EntryFilter::ByStatus(val)),
+            (TABLE_ACCOUNTS, "code") => Ok(EntryFilter::ByDomain(format!("__account_code:{val}"))),
+            (TABLE_ACCOUNTS, "domain") => Ok(EntryFilter::ByDomain(val)),
+            (TABLE_ACCOUNTS, "currency") => {
+                Ok(EntryFilter::ByDomain(format!("__account_currency:{val}")))
+            }
             _ => Err(SqlError::ColumnNotFound(col)),
         }
     } else {
-        Err(SqlError::Unsupported("only simple column = 'value' WHERE clauses are supported".into()))
+        Err(SqlError::Unsupported(
+            "only simple column = 'value' WHERE clauses are supported".into(),
+        ))
     }
 }
 
@@ -635,15 +717,17 @@ fn base_scan(
     let filter = if let Some(sel) = selection {
         Some(parse_where_to_entry_filter(table, sel.clone())?)
     } else if let Some(Expr::Value(SqlValue::Number(n, _))) = limit {
-        let n: usize = n.parse().map_err(|_| SqlError::TypeError("LIMIT must be integer".into()))?;
+        let n: usize = n
+            .parse()
+            .map_err(|_| SqlError::TypeError("LIMIT must be integer".into()))?;
         Some(EntryFilter::Limit(n))
     } else {
         None
     };
     match table {
-        TABLE_LEDGER       => Ok(LogicalPlan::ScanEntries { filter }),
+        TABLE_LEDGER => Ok(LogicalPlan::ScanEntries { filter }),
         TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter }),
-        TABLE_ACCOUNTS     => Ok(LogicalPlan::ScanAccounts { filter }),
+        TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter }),
         t => Err(SqlError::UnknownTable(t.into())),
     }
 }
@@ -660,36 +744,35 @@ fn collect_aggregate_exprs(items: &[SelectItem]) -> Vec<AggExpr> {
         if let Expr::Function(f) = expr {
             let fname = f.name.to_string().to_uppercase();
             let agg = match fname.as_str() {
-                "SUM"   => AggFn::Sum,
+                "SUM" => AggFn::Sum,
                 "COUNT" => AggFn::Count,
-                "AVG"   => AggFn::Avg,
-                "MIN"   => AggFn::Min,
-                "MAX"   => AggFn::Max,
-                _       => continue,
+                "AVG" => AggFn::Avg,
+                "MIN" => AggFn::Min,
+                "MAX" => AggFn::Max,
+                _ => continue,
             };
             // Skip functions that have a OVER clause — those are windows.
             if matches!(f.over, Some(_)) {
                 continue;
             }
             let col = match &f.args {
-                FunctionArguments::List(list) => {
-                    list.args.first()
-                        .and_then(|a| match a {
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
-                                Some(expr_to_col_name(e))
-                            }
-                            FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
-                                Some("*".into())
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| "*".into())
-                }
+                FunctionArguments::List(list) => list
+                    .args
+                    .first()
+                    .and_then(|a| match a {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(expr_to_col_name(e)),
+                        FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => Some("*".into()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "*".into()),
                 _ => "*".into(),
             };
-            let alias = alias_override
-                .unwrap_or_else(|| format!("{agg}({col})").to_lowercase());
-            result.push(AggExpr { func: agg, column: col, alias });
+            let alias = alias_override.unwrap_or_else(|| format!("{agg}({col})").to_lowercase());
+            result.push(AggExpr {
+                func: agg,
+                column: col,
+                alias,
+            });
         }
     }
     result
@@ -708,23 +791,23 @@ fn parse_window_fn(f: &Function) -> Result<(WindowFn, String), SqlError> {
     let fname = f.name.to_string().to_uppercase();
     let wfn = match fname.as_str() {
         "ROW_NUMBER" => WindowFn::RowNumber,
-        "RANK"       => WindowFn::Rank,
+        "RANK" => WindowFn::Rank,
         "DENSE_RANK" => WindowFn::DenseRank,
-        "SUM"        => WindowFn::RunningSum,
-        "AVG"        => WindowFn::RunningAvg,
-        "LAG"        => WindowFn::Lag,
-        "LEAD"       => WindowFn::Lead,
+        "SUM" => WindowFn::RunningSum,
+        "AVG" => WindowFn::RunningAvg,
+        "LAG" => WindowFn::Lag,
+        "LEAD" => WindowFn::Lead,
         other => return Err(SqlError::Unsupported(format!("window function '{other}'"))),
     };
     let col = match &f.args {
-        FunctionArguments::List(list) => {
-            list.args.first()
-                .and_then(|a| match a {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(expr_to_col_name(e)),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "amount".into())
-        }
+        FunctionArguments::List(list) => list
+            .args
+            .first()
+            .and_then(|a| match a {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(expr_to_col_name(e)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "amount".into()),
         _ => "amount".into(),
     };
     Ok((wfn, col))
@@ -733,8 +816,8 @@ fn parse_window_fn(f: &Function) -> Result<(WindowFn, String), SqlError> {
 /// Convert an expression node to a bare column name string.
 fn expr_to_col_name(expr: &Expr) -> String {
     match expr {
-        Expr::Identifier(i)           => i.value.clone(),
+        Expr::Identifier(i) => i.value.clone(),
         Expr::CompoundIdentifier(pts) => pts.last().map(|i| i.value.clone()).unwrap_or_default(),
-        other                         => format!("{other}"),
+        other => format!("{other}"),
     }
 }

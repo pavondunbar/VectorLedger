@@ -29,19 +29,19 @@ const VECTORGUARD_LICENSE_PUBKEY_HEX: &str =
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LicenseFile {
     /// Name of the licensee organisation.
-    pub licensee:   String,
+    pub licensee: String,
     /// Contact email for the license.
-    pub email:      String,
+    pub email: String,
     /// License tier: free, starter, growth, enterprise.
-    pub tier:       String,
+    pub tier: String,
     /// ISO 8601 date when the license was issued (YYYY-MM-DD).
-    pub issued_at:  String,
+    pub issued_at: String,
     /// ISO 8601 date when the license expires (YYYY-MM-DD).
     pub expires_at: String,
     /// List of feature strings enabled by this license.
-    pub features:   Vec<String>,
+    pub features: Vec<String>,
     /// Hex-encoded Ed25519 signature over `canonical_payload()`.
-    pub signature:  String,
+    pub signature: String,
 }
 
 impl LicenseFile {
@@ -49,7 +49,8 @@ impl LicenseFile {
     /// no whitespace variation.  Covers every field except `signature`.
     pub fn canonical_payload(&self) -> Vec<u8> {
         // Build a deterministic JSON object with sorted keys.
-        let features_json: Vec<serde_json::Value> = self.features
+        let features_json: Vec<serde_json::Value> = self
+            .features
             .iter()
             .map(|f| serde_json::Value::String(f.clone()))
             .collect();
@@ -68,12 +69,18 @@ impl LicenseFile {
         // object literals (keys are inserted in source order, not sorted).
         // Use explicit BTreeMap for guaranteed sort order.
         let mut map = std::collections::BTreeMap::new();
-        map.insert("email",      serde_json::Value::String(self.email.clone()));
-        map.insert("expires_at", serde_json::Value::String(self.expires_at.clone()));
-        map.insert("features",   serde_json::Value::Array(features_json));
-        map.insert("issued_at",  serde_json::Value::String(self.issued_at.clone()));
-        map.insert("licensee",   serde_json::Value::String(self.licensee.clone()));
-        map.insert("tier",       serde_json::Value::String(self.tier.clone()));
+        map.insert("email", serde_json::Value::String(self.email.clone()));
+        map.insert(
+            "expires_at",
+            serde_json::Value::String(self.expires_at.clone()),
+        );
+        map.insert("features", serde_json::Value::Array(features_json));
+        map.insert(
+            "issued_at",
+            serde_json::Value::String(self.issued_at.clone()),
+        );
+        map.insert("licensee", serde_json::Value::String(self.licensee.clone()));
+        map.insert("tier", serde_json::Value::String(self.tier.clone()));
 
         let _ = payload; // suppress unused warning
         serde_json::to_vec(&map).unwrap_or_default()
@@ -85,14 +92,14 @@ impl LicenseFile {
 /// The active license loaded at startup.
 #[derive(Debug, Clone)]
 pub struct LicenseStore {
-    pub licensee:   String,
-    pub email:      String,
-    pub tier:       LicenseTier,
-    pub issued_at:  NaiveDate,
+    pub licensee: String,
+    pub email: String,
+    pub tier: LicenseTier,
+    pub issued_at: NaiveDate,
     pub expires_at: NaiveDate,
-    pub features:   Vec<Feature>,
+    pub features: Vec<Feature>,
     /// true = loaded from a signed license.json; false = implicit free tier.
-    pub is_signed:  bool,
+    pub is_signed: bool,
 }
 
 impl LicenseStore {
@@ -132,47 +139,63 @@ impl LicenseStore {
         // ── Signature verification ────────────────────────────────────────
         let pubkey_bytes = hex::decode(VECTORGUARD_LICENSE_PUBKEY_HEX)
             .map_err(|_| LicenseError::InvalidSignature)?;
-        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into()
+        let pubkey_arr: [u8; 32] = pubkey_bytes
+            .try_into()
             .map_err(|_| LicenseError::InvalidSignature)?;
-        let verifying_key = VerifyingKey::from_bytes(&pubkey_arr)
-            .map_err(|_| LicenseError::InvalidSignature)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| LicenseError::InvalidSignature)?;
 
-        let sig_bytes = hex::decode(&file.signature)
-            .map_err(|_| LicenseError::InvalidSignature)?;
-        let sig_arr: [u8; 64] = sig_bytes.try_into()
+        let sig_bytes = hex::decode(&file.signature).map_err(|_| LicenseError::InvalidSignature)?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
             .map_err(|_| LicenseError::InvalidSignature)?;
         let signature = Signature::from_bytes(&sig_arr);
 
         let payload = file.canonical_payload();
-        verifying_key.verify(&payload, &signature)
+        verifying_key
+            .verify(&payload, &signature)
             .map_err(|_| LicenseError::InvalidSignature)?;
 
         // ── Expiry check ──────────────────────────────────────────────────
-        let expires = NaiveDate::parse_from_str(&file.expires_at, "%Y-%m-%d")
-            .map_err(|_| LicenseError::MalformedField { field: "expires_at".into() })?;
+        let expires = NaiveDate::parse_from_str(&file.expires_at, "%Y-%m-%d").map_err(|_| {
+            LicenseError::MalformedField {
+                field: "expires_at".into(),
+            }
+        })?;
         let today = Utc::now().date_naive();
         if today > expires {
-            return Err(LicenseError::Expired { expired_at: file.expires_at.clone() });
+            return Err(LicenseError::Expired {
+                expired_at: file.expires_at.clone(),
+            });
         }
 
-        let issued = NaiveDate::parse_from_str(&file.issued_at, "%Y-%m-%d")
-            .map_err(|_| LicenseError::MalformedField { field: "issued_at".into() })?;
+        let issued = NaiveDate::parse_from_str(&file.issued_at, "%Y-%m-%d").map_err(|_| {
+            LicenseError::MalformedField {
+                field: "issued_at".into(),
+            }
+        })?;
 
-        let tier: LicenseTier = file.tier.parse()
-            .map_err(|_| LicenseError::MalformedField { field: "tier".into() })?;
+        let tier: LicenseTier = file
+            .tier
+            .parse()
+            .map_err(|_| LicenseError::MalformedField {
+                field: "tier".into(),
+            })?;
 
-        let features: Vec<Feature> = file.features.iter()
+        let features: Vec<Feature> = file
+            .features
+            .iter()
             .filter_map(|f| f.parse().ok())
             .collect();
 
         Ok(Self {
-            licensee:   file.licensee,
-            email:      file.email,
+            licensee: file.licensee,
+            email: file.email,
             tier,
-            issued_at:  issued,
+            issued_at: issued,
             expires_at: expires,
             features,
-            is_signed:  true,
+            is_signed: true,
         })
     }
 
@@ -180,13 +203,13 @@ impl LicenseStore {
     pub fn free() -> Self {
         let today = Utc::now().date_naive();
         Self {
-            licensee:   "unlicensed".into(),
-            email:      String::new(),
-            tier:       LicenseTier::Free,
-            issued_at:  today,
+            licensee: "unlicensed".into(),
+            email: String::new(),
+            tier: LicenseTier::Free,
+            issued_at: today,
             expires_at: NaiveDate::from_ymd_opt(9999, 12, 31).unwrap(),
-            features:   vec![],
-            is_signed:  false,
+            features: vec![],
+            is_signed: false,
         }
     }
 
@@ -227,10 +250,7 @@ impl LicenseStore {
             let days = self.days_remaining().unwrap_or(0);
             println!(
                 "  License    : {} — {} ({} days remaining, expires {})",
-                self.tier,
-                self.licensee,
-                days,
-                self.expires_at,
+                self.tier, self.licensee, days, self.expires_at,
             );
             if days < 30 {
                 println!(

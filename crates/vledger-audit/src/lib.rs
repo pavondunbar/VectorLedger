@@ -34,10 +34,10 @@
 
 pub mod error;
 pub mod event;
-pub mod log;
 pub mod export;
+pub mod log;
 
 pub use error::AuditError;
 pub use event::{AuditEvent, AuditEventKind};
-pub use log::AuditLog;
 pub use export::{ExportFormat, TimeRange};
+pub use log::AuditLog;

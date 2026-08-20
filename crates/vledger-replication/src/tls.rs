@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::config::ReplicationTlsConfig;
@@ -42,7 +42,9 @@ pub fn build_acceptor(cfg: &ReplicationTlsConfig) -> Result<TlsAcceptor, Replica
         let ca_certs = load_ca_certs(ca_path)?;
         let mut roots = rustls::RootCertStore::empty();
         for cert in ca_certs {
-            roots.add(cert).map_err(|e| ReplicationError::Tls(e.to_string()))?;
+            roots
+                .add(cert)
+                .map_err(|e| ReplicationError::Tls(e.to_string()))?;
         }
         let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
             .build()
@@ -79,7 +81,9 @@ pub fn build_connector(cfg: &ReplicationTlsConfig) -> Result<TlsConnector, Repli
         let ca_certs = load_ca_certs(ca_path)?;
         let mut roots = rustls::RootCertStore::empty();
         for cert in ca_certs {
-            roots.add(cert).map_err(|e| ReplicationError::Tls(e.to_string()))?;
+            roots
+                .add(cert)
+                .map_err(|e| ReplicationError::Tls(e.to_string()))?;
         }
 
         if let (Some(cert_path), Some(key_path)) = (&cfg.client_cert, &cfg.client_key) {
@@ -148,9 +152,7 @@ fn load_server_cert_key(
                 generate_simple_self_signed(vec![cfg.server_hostname.clone()])
                     .map_err(|e| ReplicationError::Tls(e.to_string()))?;
             let cert_der = CertificateDer::from(cert.der().to_vec());
-            let key_der  = PrivateKeyDer::Pkcs8(
-                PrivatePkcs8KeyDer::from(key_pair.serialize_der())
-            );
+            let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
             tracing::info!(
                 hostname = %cfg.server_hostname,
                 "Replication: generated self-signed TLS certificate"
@@ -163,7 +165,7 @@ fn load_server_cert_key(
 /// Load a certificate chain and private key from PEM files.
 fn load_cert_key(
     cert_path: &str,
-    key_path:  &str,
+    key_path: &str,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), ReplicationError> {
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
         .map_err(|e| ReplicationError::Tls(format!("read cert {cert_path}: {e}")))?
@@ -177,9 +179,7 @@ fn load_cert_key(
 }
 
 /// Load CA certificates from a PEM file.
-fn load_ca_certs(
-    ca_path: &str,
-) -> Result<Vec<CertificateDer<'static>>, ReplicationError> {
+fn load_ca_certs(ca_path: &str) -> Result<Vec<CertificateDer<'static>>, ReplicationError> {
     CertificateDer::pem_file_iter(ca_path)
         .map_err(|e| ReplicationError::Tls(format!("read CA cert {ca_path}: {e}")))?
         .collect::<Result<Vec<_>, _>>()
@@ -209,18 +209,18 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message:   &[u8],
-        _cert:      &CertificateDer<'_>,
-        _dss:       &rustls::DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
         &self,
-        _message:   &[u8],
-        _cert:      &CertificateDer<'_>,
-        _dss:       &rustls::DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }

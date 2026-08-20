@@ -38,14 +38,14 @@ use vledger_hsm::{HsmClient, RemotePyHsmConfig};
 ///   `/tmp/pyhsm.sock` when `None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn rotate_keys(
-    data_dir:          &Path,
-    socket_path:       Option<&str>,
-    caller_id:         &str,
-    pyhsm_endpoint:    Option<&str>,
-    pyhsm_ca_cert:     Option<&str>,
+    data_dir: &Path,
+    socket_path: Option<&str>,
+    caller_id: &str,
+    pyhsm_endpoint: Option<&str>,
+    pyhsm_ca_cert: Option<&str>,
     pyhsm_client_cert: Option<&str>,
-    pyhsm_client_key:  Option<&str>,
-    pyhsm_timeout_ms:  u64,
+    pyhsm_client_key: Option<&str>,
+    pyhsm_timeout_ms: u64,
     pyhsm_max_retries: u32,
 ) -> Result<Vec<String>> {
     // ── Build the appropriate client ──────────────────────────────────────
@@ -54,20 +54,23 @@ pub async fn rotate_keys(
         let ca_cert = pyhsm_ca_cert
             .map(|s| s.to_string())
             .or_else(|| std::env::var("PYHSM_CA_CERT").ok())
-            .ok_or_else(|| anyhow::anyhow!(
-                "--pyhsm-ca-cert (or PYHSM_CA_CERT) is required when using --pyhsm-endpoint"
-            ))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--pyhsm-ca-cert (or PYHSM_CA_CERT) is required when using --pyhsm-endpoint"
+                )
+            })?;
         let cfg = RemotePyHsmConfig {
-            endpoint:    endpoint.to_string(),
+            endpoint: endpoint.to_string(),
             ca_cert,
             client_cert: pyhsm_client_cert
                 .map(|s| s.to_string())
                 .or_else(|| std::env::var("PYHSM_CLIENT_CERT").ok()),
-            client_key:  pyhsm_client_key
+            client_key: pyhsm_client_key
                 .map(|s| s.to_string())
                 .or_else(|| std::env::var("PYHSM_CLIENT_KEY").ok()),
-            timeout_ms:  std::env::var("PYHSM_TIMEOUT_MS")
-                .ok().and_then(|v| v.parse().ok())
+            timeout_ms: std::env::var("PYHSM_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
                 .unwrap_or(pyhsm_timeout_ms),
             max_retries: pyhsm_max_retries,
         };
@@ -99,8 +102,7 @@ pub async fn rotate_keys(
 
     // ── Open audit log ────────────────────────────────────────────────────
     let audit_path = data_dir.join("audit").join("audit.log");
-    let audit = AuditLog::open(&audit_path)
-        .context("Failed to open audit log")?;
+    let audit = AuditLog::open(&audit_path).context("Failed to open audit log")?;
 
     // ── Collect key IDs to rotate ─────────────────────────────────────────
     let mut key_ids: Vec<String> = vec![
@@ -111,14 +113,13 @@ pub async fn rotate_keys(
     // Per-table encryption keys: scan the pages directory for table IDs.
     let pages_dir = data_dir.join("pages");
     if pages_dir.exists() {
-        for entry in std::fs::read_dir(&pages_dir)
-            .context("Failed to read pages directory")?
-        {
+        for entry in std::fs::read_dir(&pages_dir).context("Failed to read pages directory")? {
             let entry = entry?;
-            let name  = entry.file_name().to_string_lossy().to_string();
+            let name = entry.file_name().to_string_lossy().to_string();
             if let Some(id_str) = name.strip_prefix("table_") {
                 let table_id: u32 = id_str
-                    .split('_').next()
+                    .split('_')
+                    .next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
                 let key_id = HsmClient::table_encrypt_key_id(table_id);
@@ -144,10 +145,12 @@ pub async fn rotate_keys(
         info!(key_id, "Rotating HSM key");
         match client.rotate_key(key_id).await {
             Ok(()) => {
-                audit.append(AuditEventKind::KeyRotated {
-                    key_id:    key_id.clone(),
-                    caller_id: caller_id.to_string(),
-                }).context("Failed to write audit event")?;
+                audit
+                    .append(AuditEventKind::KeyRotated {
+                        key_id: key_id.clone(),
+                        caller_id: caller_id.to_string(),
+                    })
+                    .context("Failed to write audit event")?;
                 rotated.push(key_id.clone());
                 info!(key_id, "Key rotation complete");
             }

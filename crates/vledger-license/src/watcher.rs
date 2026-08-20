@@ -53,12 +53,12 @@ pub type SharedLicense = Arc<RwLock<LicenseStore>>;
 ///   signal; the background task exits when this is cancelled.
 pub fn spawn_license_watcher(
     data_dir: &Path,
-    initial:  LicenseStore,
+    initial: LicenseStore,
     shutdown: CancellationToken,
 ) -> SharedLicense {
-    let shared  = Arc::new(RwLock::new(initial));
-    let handle  = Arc::clone(&shared);
-    let dir     = data_dir.to_path_buf();
+    let shared = Arc::new(RwLock::new(initial));
+    let handle = Arc::clone(&shared);
+    let dir = data_dir.to_path_buf();
 
     tokio::spawn(async move {
         loop {
@@ -84,8 +84,8 @@ async fn refresh(shared: &SharedLicense, data_dir: &PathBuf) {
     let new_license = LicenseStore::load_or_free(data_dir);
 
     let mut guard = shared.write().await;
-    let old_tier  = guard.tier.clone();
-    let new_tier  = new_license.tier.clone();
+    let old_tier = guard.tier.clone();
+    let new_tier = new_license.tier.clone();
 
     *guard = new_license;
     drop(guard); // release write lock before logging
@@ -110,10 +110,10 @@ async fn refresh(shared: &SharedLicense, data_dir: &PathBuf) {
 /// Minimum value is 1 second so the loop never busy-spins if called at exactly
 /// midnight.
 fn seconds_until_next_midnight() -> u64 {
-    let now         = Utc::now();
-    let seconds_today = now.timestamp() % 86_400;   // seconds elapsed since midnight
-    let remaining     = 86_400 - seconds_today;      // seconds until next midnight
-    // Clamp to at least 1 so we never sleep 0 seconds.
+    let now = Utc::now();
+    let seconds_today = now.timestamp() % 86_400; // seconds elapsed since midnight
+    let remaining = 86_400 - seconds_today; // seconds until next midnight
+                                            // Clamp to at least 1 so we never sleep 0 seconds.
     remaining.max(1) as u64
 }
 

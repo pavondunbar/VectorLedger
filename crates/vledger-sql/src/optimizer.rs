@@ -38,7 +38,7 @@ fn predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
         LogicalPlan::Join(mut spec) => {
             // We can't push the join condition itself; push any filters on
             // the individual scan sides that are already expressed.
-            spec.left  = Box::new(predicate_pushdown(*spec.left));
+            spec.left = Box::new(predicate_pushdown(*spec.left));
             spec.right = Box::new(predicate_pushdown(*spec.right));
             LogicalPlan::Join(spec)
         }
@@ -65,12 +65,16 @@ fn predicate_pushdown(plan: LogicalPlan) -> LogicalPlan {
 /// Eliminate trivially true/false filters (e.g. `WHERE 1=1`, empty LIMIT 0).
 fn constant_fold(plan: LogicalPlan) -> LogicalPlan {
     match plan {
-        LogicalPlan::ScanEntries { filter: Some(EntryFilter::Limit(0)) } => {
+        LogicalPlan::ScanEntries {
+            filter: Some(EntryFilter::Limit(0)),
+        } => {
             // LIMIT 0 ⟹ empty result; keep plan but signal with Limit(0).
-            LogicalPlan::ScanEntries { filter: Some(EntryFilter::Limit(0)) }
+            LogicalPlan::ScanEntries {
+                filter: Some(EntryFilter::Limit(0)),
+            }
         }
         LogicalPlan::Join(mut spec) => {
-            spec.left  = Box::new(constant_fold(*spec.left));
+            spec.left = Box::new(constant_fold(*spec.left));
             spec.right = Box::new(constant_fold(*spec.right));
             LogicalPlan::Join(spec)
         }
@@ -92,41 +96,43 @@ fn constant_fold(plan: LogicalPlan) -> LogicalPlan {
 pub fn explain(plan: &LogicalPlan, indent: usize) -> String {
     let pad = "  ".repeat(indent);
     match plan {
-        LogicalPlan::ScanEntries { filter } =>
-            format!("{pad}ScanEntries {{ filter: {filter:?} }}"),
-        LogicalPlan::ScanLedgerLines { filter } =>
-            format!("{pad}ScanLedgerLines {{ filter: {filter:?} }}"),
-        LogicalPlan::ScanAccounts { filter } =>
-            format!("{pad}ScanAccounts {{ filter: {filter:?} }}"),
-        LogicalPlan::GetBalance { account_ref } =>
-            format!("{pad}GetBalance({account_ref})"),
-        LogicalPlan::VerifyChain { from_seq, to_seq } =>
-            format!("{pad}VerifyChain {{ from: {from_seq:?}, to: {to_seq:?} }}"),
-        LogicalPlan::VerifyEntry { sequence } =>
-            format!("{pad}VerifyEntry({sequence})"),
-        LogicalPlan::Constant { col, val } =>
-            format!("{pad}Constant {{ {col}: {val} }}"),
-        LogicalPlan::PostEntry(_) =>
-            format!("{pad}PostEntry"),
-        LogicalPlan::CreateAccount(_) =>
-            format!("{pad}CreateAccount"),
+        LogicalPlan::ScanEntries { filter } => format!("{pad}ScanEntries {{ filter: {filter:?} }}"),
+        LogicalPlan::ScanLedgerLines { filter } => {
+            format!("{pad}ScanLedgerLines {{ filter: {filter:?} }}")
+        }
+        LogicalPlan::ScanAccounts { filter } => {
+            format!("{pad}ScanAccounts {{ filter: {filter:?} }}")
+        }
+        LogicalPlan::GetBalance { account_ref } => format!("{pad}GetBalance({account_ref})"),
+        LogicalPlan::VerifyChain { from_seq, to_seq } => {
+            format!("{pad}VerifyChain {{ from: {from_seq:?}, to: {to_seq:?} }}")
+        }
+        LogicalPlan::VerifyEntry { sequence } => format!("{pad}VerifyEntry({sequence})"),
+        LogicalPlan::Constant { col, val } => format!("{pad}Constant {{ {col}: {val} }}"),
+        LogicalPlan::PostEntry(_) => format!("{pad}PostEntry"),
+        LogicalPlan::CreateAccount(_) => format!("{pad}CreateAccount"),
         #[cfg(test)]
-        LogicalPlan::TamperEntry { sequence, .. } =>
-            format!("{pad}TamperEntry({sequence}) [TEST ONLY]"),
+        LogicalPlan::TamperEntry { sequence, .. } => {
+            format!("{pad}TamperEntry({sequence}) [TEST ONLY]")
+        }
         LogicalPlan::Join(s) => {
-            let l = explain(&s.left,  indent + 1);
+            let l = explain(&s.left, indent + 1);
             let r = explain(&s.right, indent + 1);
             format!("{pad}Join {{ on: {:?} }}\n{l}\n{r}", s.on_condition)
         }
         LogicalPlan::Aggregate(s) => {
             let inner = explain(&s.input, indent + 1);
-            format!("{pad}Aggregate {{ group_by: {:?}, aggs: {:?} }}\n{inner}",
-                    s.group_by, s.aggregates)
+            format!(
+                "{pad}Aggregate {{ group_by: {:?}, aggs: {:?} }}\n{inner}",
+                s.group_by, s.aggregates
+            )
         }
         LogicalPlan::Window(s) => {
             let inner = explain(&s.input, indent + 1);
-            format!("{pad}Window {{ partition_by: {:?}, order_by: {:?}, fn: {:?} }}\n{inner}",
-                    s.partition_by, s.order_by, s.window_fn)
+            format!(
+                "{pad}Window {{ partition_by: {:?}, order_by: {:?}, fn: {:?} }}\n{inner}",
+                s.partition_by, s.order_by, s.window_fn
+            )
         }
     }
 }

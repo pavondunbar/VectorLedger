@@ -108,7 +108,7 @@ mod tests {
         let versions = vec![
             make_version(1, 0),
             make_version(3, 0),
-            make_version(8, 0),  // too new for snapshot=7
+            make_version(8, 0), // too new for snapshot=7
         ];
         let v = latest_visible(&versions, 7).unwrap();
         assert_eq!(v.tx_id_created, 3);

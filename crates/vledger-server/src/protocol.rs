@@ -43,13 +43,20 @@ pub struct Request {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum AdminCommand {
     /// Change a user's password.
-    SetPassword { username: String, new_password: String },
+    SetPassword {
+        username: String,
+        new_password: String,
+    },
     /// Create a new user.
-    CreateUser  { username: String, password: String, role: String },
+    CreateUser {
+        username: String,
+        password: String,
+        role: String,
+    },
     /// Delete a user.
-    DeleteUser  { username: String },
+    DeleteUser { username: String },
     /// Enable or disable a user.
-    SetEnabled  { username: String, enabled: bool },
+    SetEnabled { username: String, enabled: bool },
     /// List all users.
     ListUsers,
 }
@@ -92,9 +99,15 @@ impl Response {
         proof: Option<MerkleProof>,
         message: String,
     ) -> Self {
-        let json_rows: Vec<Vec<serde_json::Value>> = rows.iter().map(|r| {
-            r.values.iter().map(|v| serde_json::Value::String(v.to_string())).collect()
-        }).collect();
+        let json_rows: Vec<Vec<serde_json::Value>> = rows
+            .iter()
+            .map(|r| {
+                r.values
+                    .iter()
+                    .map(|v| serde_json::Value::String(v.to_string()))
+                    .collect()
+            })
+            .collect();
 
         let proof_json = proof.map(|p| {
             let verified = p.leaf_proofs.iter().all(|lp| {
@@ -124,7 +137,7 @@ impl Response {
             proof: proof_json,
             message,
             token: None,
-            role:  None,
+            role: None,
         }
     }
 
@@ -138,7 +151,7 @@ impl Response {
             proof: None,
             message: "authenticated".into(),
             token: Some(token),
-            role:  Some(role),
+            role: Some(role),
         }
     }
 
@@ -152,7 +165,7 @@ impl Response {
             proof: None,
             message: String::new(),
             token: None,
-            role:  None,
+            role: None,
         }
     }
 }

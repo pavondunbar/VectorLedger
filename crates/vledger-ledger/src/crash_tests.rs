@@ -40,10 +40,22 @@ mod tests {
 
     fn cash_and_revenue(store: &mut LedgerStore) -> (Uuid, Uuid) {
         let cash = store
-            .create_account(Account::new("CASH", "Cash", AccountType::Asset, "USD", "test"))
+            .create_account(Account::new(
+                "CASH",
+                "Cash",
+                AccountType::Asset,
+                "USD",
+                "test",
+            ))
             .unwrap();
         let rev = store
-            .create_account(Account::new("REV", "Revenue", AccountType::Income, "USD", "test"))
+            .create_account(Account::new(
+                "REV",
+                "Revenue",
+                AccountType::Income,
+                "USD",
+                "test",
+            ))
             .unwrap();
         (cash, rev)
     }
@@ -67,8 +79,8 @@ mod tests {
     /// calling commit(), then dropping and reopening the store.
     #[test]
     fn uncommitted_wal_data_discarded_after_crash() {
-        let dir   = setup_dir();
-        let path  = dir.path();
+        let dir = setup_dir();
+        let path = dir.path();
 
         // Step 1: Open store and write accounts.
         let (cash_id, rev_id) = {
@@ -82,9 +94,9 @@ mod tests {
         // Step 2: Manually write an uncommitted transaction directly to the
         // WAL (Begin + Data but no Commit) to simulate a mid-write crash.
         {
-            use vledger_wal::{WalWriter, RecordType};
-            use vledger_wal::record::{BeginPayload, DataPayload, MutationKind};
             use vledger_crypto::hash::hash_bytes;
+            use vledger_wal::record::{BeginPayload, DataPayload, MutationKind};
+            use vledger_wal::{RecordType, WalWriter};
 
             let wal_dir = path.join("wal");
             let mut wal = WalWriter::open(&wal_dir).unwrap();
@@ -93,29 +105,45 @@ mod tests {
             let row_hash = hash_bytes(fake_row);
 
             // tx_id 9999 — will not have a matching Commit record
-            wal.append_record(9999, RecordType::Begin, &BeginPayload { description: None }).unwrap();
-            wal.append_record(9999, RecordType::Data, &DataPayload {
-                table_id:  1,
-                page_id:   999,
-                slot_id:   0,
-                mutation:  MutationKind::Insert,
-                row_data:  fake_row.to_vec(),
-                row_hash,
-                prev_hash: None,
-            }).unwrap();
+            wal.append_record(9999, RecordType::Begin, &BeginPayload { description: None })
+                .unwrap();
+            wal.append_record(
+                9999,
+                RecordType::Data,
+                &DataPayload {
+                    table_id: 1,
+                    page_id: 999,
+                    slot_id: 0,
+                    mutation: MutationKind::Insert,
+                    row_data: fake_row.to_vec(),
+                    row_hash,
+                    prev_hash: None,
+                },
+            )
+            .unwrap();
             // Intentionally no Commit — simulates crash after Data write
         }
 
         // Step 3: Reopen and verify the partial transaction is not replayed.
         let store2 = LedgerStore::open(path).unwrap();
         // The original committed entry must be present.
-        assert_eq!(store2.entry_count(), 1,
-            "uncommitted transaction must be discarded (got {} entries)", store2.entry_count());
+        assert_eq!(
+            store2.entry_count(),
+            1,
+            "uncommitted transaction must be discarded (got {} entries)",
+            store2.entry_count()
+        );
         assert_eq!(store2.balance(&cash_id), 1_000);
         assert_eq!(store2.balance(&rev_id), 1_000);
         // The accounts must also be recovered
-        assert!(store2.get_account(&cash_id).is_some(), "cash account must survive");
-        assert!(store2.get_account(&rev_id).is_some(), "rev account must survive");
+        assert!(
+            store2.get_account(&cash_id).is_some(),
+            "cash account must survive"
+        );
+        assert!(
+            store2.get_account(&rev_id).is_some(),
+            "rev account must survive"
+        );
         store2.verify_chain_integrity().unwrap();
     }
 
@@ -123,7 +151,7 @@ mod tests {
 
     #[test]
     fn committed_entry_survives_crash_and_reopen() {
-        let dir  = setup_dir();
+        let dir = setup_dir();
         let path = dir.path();
 
         let (cash_id, rev_id) = {
@@ -146,7 +174,7 @@ mod tests {
 
     #[test]
     fn multiple_crash_reopen_cycles_preserve_correctness() {
-        let dir  = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let path = dir.path();
         std::fs::create_dir_all(path.join("wal")).unwrap();
         std::fs::create_dir_all(path.join("pages")).unwrap();
@@ -155,20 +183,40 @@ mod tests {
         // Use the accounts' IDs directly via get_account to verify insertion.
         let (cash_id, rev_id) = {
             let mut store = LedgerStore::open(path).unwrap();
-            let c = store.create_account(
-                Account::new("CASH", "Cash", AccountType::Asset, "USD", "test")
-            ).unwrap();
-            let r = store.create_account(
-                Account::new("REV", "Revenue", AccountType::Income, "USD", "test")
-            ).unwrap();
+            let c = store
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let r = store
+                .create_account(Account::new(
+                    "REV",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
             // Verify immediately after create
             // Verify immediately after create
-            assert!(store.get_account(&c).is_some(), "cash must be in store right after create");
-            assert!(store.get_account(&r).is_some(), "rev must be in store right after create");
+            assert!(
+                store.get_account(&c).is_some(),
+                "cash must be in store right after create"
+            );
+            assert!(
+                store.get_account(&r).is_some(),
+                "rev must be in store right after create"
+            );
             // Now post
             let amt = Amount::new(1_000).unwrap();
             let e = JournalEntryBuilder::new("test", "test")
-                .debit(c, amt, "USD").credit(r, amt, "USD").build();
+                .debit(c, amt, "USD")
+                .credit(r, amt, "USD")
+                .build();
             store.post_entry(e).unwrap();
             let _ = store.checkpoint();
             (c, r)
@@ -178,11 +226,16 @@ mod tests {
         // Round 2 — reopen, write more
         {
             let mut store = LedgerStore::open(path).unwrap();
-            assert!(store.get_account(&cash_id).is_some(),
-                "cash account must survive WAL replay (accounts: {})", store.all_accounts().count());
+            assert!(
+                store.get_account(&cash_id).is_some(),
+                "cash account must survive WAL replay (accounts: {})",
+                store.all_accounts().count()
+            );
             let amt = Amount::new(2_000).unwrap();
             let e = JournalEntryBuilder::new("test", "test")
-                .debit(cash_id, amt, "USD").credit(rev_id, amt, "USD").build();
+                .debit(cash_id, amt, "USD")
+                .credit(rev_id, amt, "USD")
+                .build();
             store.post_entry(e).unwrap();
             let _ = store.checkpoint();
         }
@@ -193,7 +246,9 @@ mod tests {
             let mut store = LedgerStore::open(path).unwrap();
             let amt = Amount::new(3_000).unwrap();
             let e = JournalEntryBuilder::new("test", "test")
-                .debit(cash_id, amt, "USD").credit(rev_id, amt, "USD").build();
+                .debit(cash_id, amt, "USD")
+                .credit(rev_id, amt, "USD")
+                .build();
             store.post_entry(e).unwrap();
             let _ = store.checkpoint();
         }
@@ -210,7 +265,7 @@ mod tests {
 
     #[test]
     fn idempotency_key_survives_crash_reopen() {
-        let dir  = setup_dir();
+        let dir = setup_dir();
         let path = dir.path();
 
         let (cash_id, rev_id) = {
@@ -240,7 +295,11 @@ mod tests {
         store2.post_entry(dup).unwrap(); // must not error
 
         // Still only 1 entry.
-        assert_eq!(store2.entry_count(), 1, "idempotent re-post must not create duplicate");
+        assert_eq!(
+            store2.entry_count(),
+            1,
+            "idempotent re-post must not create duplicate"
+        );
         assert_eq!(store2.balance(&cash_id), 500);
     }
 
@@ -248,7 +307,7 @@ mod tests {
 
     #[test]
     fn reversal_is_atomic_survives_crash() {
-        let dir  = setup_dir();
+        let dir = setup_dir();
         let path = dir.path();
 
         let (original_id, cash_id, rev_id) = {
@@ -262,9 +321,20 @@ mod tests {
 
         // Reopen — reversal event index must be rebuilt.
         let store2 = LedgerStore::open(path).unwrap();
-        assert_eq!(store2.entry_count(), 2, "original + reversal must both survive");
-        assert!(store2.is_reversed(&original_id), "is_reversed must be true after replay");
-        assert_eq!(store2.balance(&cash_id), 0, "balance must be zero after reversal replay");
+        assert_eq!(
+            store2.entry_count(),
+            2,
+            "original + reversal must both survive"
+        );
+        assert!(
+            store2.is_reversed(&original_id),
+            "is_reversed must be true after replay"
+        );
+        assert_eq!(
+            store2.balance(&cash_id),
+            0,
+            "balance must be zero after reversal replay"
+        );
         assert_eq!(store2.balance(&rev_id), 0);
         store2.verify_chain_integrity().unwrap();
     }
@@ -273,7 +343,7 @@ mod tests {
 
     #[test]
     fn hash_chain_valid_after_wal_replay_with_many_entries() {
-        let dir  = setup_dir();
+        let dir = setup_dir();
         let path = dir.path();
 
         let (cash_id, rev_id) = {
@@ -301,7 +371,7 @@ mod tests {
 
     #[test]
     fn accounts_survive_crash_before_any_entries() {
-        let dir  = setup_dir();
+        let dir = setup_dir();
         let path = dir.path();
 
         let (cash_id, rev_id) = {
@@ -313,8 +383,14 @@ mod tests {
 
         // Reopen — accounts must be there.
         let mut store2 = LedgerStore::open(path).unwrap();
-        assert!(store2.get_account(&cash_id).is_some(), "cash account must survive crash");
-        assert!(store2.get_account(&rev_id).is_some(), "revenue account must survive crash");
+        assert!(
+            store2.get_account(&cash_id).is_some(),
+            "cash account must survive crash"
+        );
+        assert!(
+            store2.get_account(&rev_id).is_some(),
+            "revenue account must survive crash"
+        );
 
         // Can post to recovered accounts without error.
         post_entry(&mut store2, cash_id, rev_id, 100);
@@ -325,7 +401,7 @@ mod tests {
 
     #[test]
     fn torn_wal_segment_stops_recovery_cleanly() {
-        let dir  = setup_dir();
+        let dir = setup_dir();
         let path = dir.path();
 
         let (cash_id, rev_id) = {
@@ -339,13 +415,15 @@ mod tests {
         let wal_dir = path.join("wal");
         let segments = vledger_wal::segment::list_segments(&wal_dir).unwrap();
         let seg_path = wal_dir.join(vledger_wal::segment::segment_filename(
-            *segments.last().unwrap()
+            *segments.last().unwrap(),
         ));
         let mut contents = std::fs::read(&seg_path).unwrap();
         // Overwrite the last 16 bytes with garbage.
         let len = contents.len();
         if len > 16 {
-            for b in &mut contents[len - 16..] { *b = 0xFF; }
+            for b in &mut contents[len - 16..] {
+                *b = 0xFF;
+            }
         }
         std::fs::write(&seg_path, &contents).unwrap();
 
@@ -368,20 +446,31 @@ mod tests {
 
     #[test]
     fn account_closure_survives_crash_and_reopen() {
-        let dir  = setup_dir();
+        let dir = setup_dir();
         let path = dir.path();
 
         let cash_id = {
             let mut store = LedgerStore::open(path).unwrap();
-            let c = store.create_account(Account::new("CASH","Cash",AccountType::Asset,"USD","test")).unwrap();
+            let c = store
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
             store.close_account(&c).unwrap();
             c
         };
 
         let store2 = LedgerStore::open(path).unwrap();
         let acct = store2.get_account(&cash_id).unwrap();
-        assert_eq!(acct.status, crate::account::AccountStatus::Closed,
-            "closed status must survive crash/reopen");
+        assert_eq!(
+            acct.status,
+            crate::account::AccountStatus::Closed,
+            "closed status must survive crash/reopen"
+        );
     }
 
     // ── Test 10: prove idempotency under retry after partial crash ─────────
@@ -391,7 +480,7 @@ mod tests {
     /// exactly-once semantics regardless.
     #[test]
     fn exactly_once_under_retry_after_crash() {
-        let dir  = setup_dir();
+        let dir = setup_dir();
         let path = dir.path();
 
         let (cash_id, rev_id) = {
@@ -421,7 +510,11 @@ mod tests {
             store2.post_entry(retry).unwrap();
         }
 
-        assert_eq!(store2.entry_count(), 1, "retries must not create duplicate entries");
+        assert_eq!(
+            store2.entry_count(),
+            1,
+            "retries must not create duplicate entries"
+        );
         assert_eq!(store2.balance(&cash_id), 999);
     }
 }

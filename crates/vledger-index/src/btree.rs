@@ -23,12 +23,18 @@ pub struct BTreeIndex {
 impl BTreeIndex {
     /// Create a new unique index.
     pub fn new_unique() -> Self {
-        Self { map: BTreeMap::new(), unique: true }
+        Self {
+            map: BTreeMap::new(),
+            unique: true,
+        }
     }
 
     /// Create a new non-unique index.
     pub fn new() -> Self {
-        Self { map: BTreeMap::new(), unique: false }
+        Self {
+            map: BTreeMap::new(),
+            unique: false,
+        }
     }
 
     /// Insert a key → location mapping.
@@ -82,14 +88,42 @@ mod tests {
     #[test]
     fn insert_and_lookup() {
         let mut idx = BTreeIndex::new_unique();
-        idx.insert(b"key1".to_vec(), RowLocation { page_id: 1, slot_id: 0 }).unwrap();
-        assert_eq!(idx.get(b"key1"), Some(RowLocation { page_id: 1, slot_id: 0 }));
+        idx.insert(
+            b"key1".to_vec(),
+            RowLocation {
+                page_id: 1,
+                slot_id: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            idx.get(b"key1"),
+            Some(RowLocation {
+                page_id: 1,
+                slot_id: 0
+            })
+        );
     }
 
     #[test]
     fn duplicate_key_unique_index_fails() {
         let mut idx = BTreeIndex::new_unique();
-        idx.insert(b"k".to_vec(), RowLocation { page_id: 1, slot_id: 0 }).unwrap();
-        assert!(idx.insert(b"k".to_vec(), RowLocation { page_id: 2, slot_id: 0 }).is_err());
+        idx.insert(
+            b"k".to_vec(),
+            RowLocation {
+                page_id: 1,
+                slot_id: 0,
+            },
+        )
+        .unwrap();
+        assert!(idx
+            .insert(
+                b"k".to_vec(),
+                RowLocation {
+                    page_id: 2,
+                    slot_id: 0
+                }
+            )
+            .is_err());
     }
 }

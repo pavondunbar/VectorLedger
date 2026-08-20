@@ -60,7 +60,10 @@ use zeroize::Zeroizing;
 
 use crate::error::HsmError;
 use crate::protocol::{HsmRequest, HsmResponse, KeyPolicy};
-use crate::remote::{HsmTransport, RemotePyHsmConfig, build_tls_connector, new_request_id, server_name, utc_timestamp};
+use crate::remote::{
+    build_tls_connector, new_request_id, server_name, utc_timestamp, HsmTransport,
+    RemotePyHsmConfig,
+};
 
 // ── HsmClient ─────────────────────────────────────────────────────────────────
 
@@ -72,8 +75,8 @@ use crate::remote::{HsmTransport, RemotePyHsmConfig, build_tls_connector, new_re
 /// detail invisible to callers.
 #[derive(Clone)]
 pub struct HsmClient {
-    transport:  HsmTransport,
-    caller_id:  String,
+    transport: HsmTransport,
+    caller_id: String,
 }
 
 impl HsmClient {
@@ -89,7 +92,10 @@ impl HsmClient {
         } else {
             HsmTransport::LocalSocket(path.to_path_buf())
         };
-        Self { transport, caller_id: caller_id.into() }
+        Self {
+            transport,
+            caller_id: caller_id.into(),
+        }
     }
 
     /// **Model 1** — use the platform default address.
@@ -106,14 +112,17 @@ impl HsmClient {
     /// `client_key` are required for full mutual TLS.
     pub fn remote(config: RemotePyHsmConfig, caller_id: impl Into<String>) -> Self {
         Self {
-            transport:  HsmTransport::remote(config),
-            caller_id:  caller_id.into(),
+            transport: HsmTransport::remote(config),
+            caller_id: caller_id.into(),
         }
     }
 
     /// Construct from any `HsmTransport` value directly.
     pub fn with_transport(transport: HsmTransport, caller_id: impl Into<String>) -> Self {
-        Self { transport, caller_id: caller_id.into() }
+        Self {
+            transport,
+            caller_id: caller_id.into(),
+        }
     }
 
     /// Returns a description of the active transport for logging.
@@ -126,26 +135,32 @@ impl HsmClient {
     /// Encrypt `plaintext` with the key identified by `key_id`.
     pub async fn encrypt(&self, key_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, HsmError> {
         let req = HsmRequest::Encrypt {
-            key_id:    key_id.to_string(),
+            key_id: key_id.to_string(),
             plaintext: hex::encode(plaintext),
             caller_id: self.caller_id.clone(),
         };
         let resp = self.send(&req).await?;
-        let hex_ct = resp.data
+        let hex_ct = resp
+            .data
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .ok_or_else(|| HsmError::Remote("encrypt: missing data in response".into()))?;
         hex::decode(&hex_ct).map_err(|e| HsmError::Serialisation(e.to_string()))
     }
 
     /// Decrypt `ciphertext` with the key identified by `key_id`.
-    pub async fn decrypt(&self, key_id: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, HsmError> {
+    pub async fn decrypt(
+        &self,
+        key_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, HsmError> {
         let req = HsmRequest::Decrypt {
-            key_id:     key_id.to_string(),
+            key_id: key_id.to_string(),
             ciphertext: hex::encode(ciphertext),
-            caller_id:  self.caller_id.clone(),
+            caller_id: self.caller_id.clone(),
         };
         let resp = self.send(&req).await?;
-        let hex_pt = resp.data
+        let hex_pt = resp
+            .data
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .ok_or_else(|| HsmError::Remote("decrypt: missing data in response".into()))?;
         let bytes = hex::decode(&hex_pt).map_err(|e| HsmError::Serialisation(e.to_string()))?;
@@ -157,22 +172,28 @@ impl HsmClient {
     /// Sign `message` with the key identified by `key_id`.
     pub async fn sign(&self, key_id: &str, message: &[u8]) -> Result<Vec<u8>, HsmError> {
         let req = HsmRequest::Sign {
-            key_id:    key_id.to_string(),
-            message:   hex::encode(message),
+            key_id: key_id.to_string(),
+            message: hex::encode(message),
             caller_id: self.caller_id.clone(),
         };
         let resp = self.send(&req).await?;
-        let hex_sig = resp.data
+        let hex_sig = resp
+            .data
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .ok_or_else(|| HsmError::Remote("sign: missing data in response".into()))?;
         hex::decode(&hex_sig).map_err(|e| HsmError::Serialisation(e.to_string()))
     }
 
     /// Verify `signature` over `message` using the key identified by `key_id`.
-    pub async fn verify(&self, key_id: &str, message: &[u8], signature: &[u8]) -> Result<bool, HsmError> {
+    pub async fn verify(
+        &self,
+        key_id: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, HsmError> {
         let req = HsmRequest::Verify {
-            key_id:    key_id.to_string(),
-            message:   hex::encode(message),
+            key_id: key_id.to_string(),
+            message: hex::encode(message),
             signature: hex::encode(signature),
             caller_id: self.caller_id.clone(),
         };
@@ -183,9 +204,13 @@ impl HsmClient {
     // ── Key management ────────────────────────────────────────────────────
 
     /// Generate a new key with the given policy.
-    pub async fn generate_key(&self, key_id: &str, policy: Option<KeyPolicy>) -> Result<(), HsmError> {
+    pub async fn generate_key(
+        &self,
+        key_id: &str,
+        policy: Option<KeyPolicy>,
+    ) -> Result<(), HsmError> {
         let req = HsmRequest::GenerateKey {
-            key_id:    key_id.to_string(),
+            key_id: key_id.to_string(),
             policy,
             caller_id: self.caller_id.clone(),
         };
@@ -195,7 +220,7 @@ impl HsmClient {
     /// Rotate a key (old version archived for decryption, new version used for encryption).
     pub async fn rotate_key(&self, key_id: &str) -> Result<(), HsmError> {
         let req = HsmRequest::RotateKey {
-            key_id:    key_id.to_string(),
+            key_id: key_id.to_string(),
             caller_id: self.caller_id.clone(),
         };
         self.send(&req).await.map(|_| ())
@@ -204,7 +229,7 @@ impl HsmClient {
     /// Permanently destroy a key. Irreversible.
     pub async fn destroy_key(&self, key_id: &str) -> Result<(), HsmError> {
         let req = HsmRequest::DestroyKey {
-            key_id:    key_id.to_string(),
+            key_id: key_id.to_string(),
             caller_id: self.caller_id.clone(),
         };
         self.send(&req).await.map(|_| ())
@@ -214,7 +239,9 @@ impl HsmClient {
 
     /// Check that the PyHSM daemon is running and responsive.
     pub async fn health(&self) -> Result<(), HsmError> {
-        let req = HsmRequest::Health { caller_id: self.caller_id.clone() };
+        let req = HsmRequest::Health {
+            caller_id: self.caller_id.clone(),
+        };
         self.send(&req).await.map(|_| ())
     }
 
@@ -249,7 +276,7 @@ impl HsmClient {
     /// Ensure the core vledger keys exist, generating them if absent.
     pub async fn provision_vgdb_keys(&self) -> Result<(), HsmError> {
         let keys = [
-            (Self::wal_signing_key_id(),    KeyPolicy::sign_only()),
+            (Self::wal_signing_key_id(), KeyPolicy::sign_only()),
             (Self::commit_signing_key_id(), KeyPolicy::sign_only()),
         ];
         for (kid, policy) in &keys {
@@ -267,9 +294,9 @@ impl HsmClient {
 
     async fn send(&self, req: &HsmRequest) -> Result<HsmResponse, HsmError> {
         match &self.transport {
-            HsmTransport::LocalSocket(path)  => self.send_unix(req, path).await,
-            HsmTransport::LocalTcp(addr)     => self.send_tcp(req, addr).await,
-            HsmTransport::Remote(cfg)        => self.send_remote(req, cfg).await,
+            HsmTransport::LocalSocket(path) => self.send_unix(req, path).await,
+            HsmTransport::LocalTcp(addr) => self.send_tcp(req, addr).await,
+            HsmTransport::Remote(cfg) => self.send_remote(req, cfg).await,
         }
     }
 
@@ -282,7 +309,9 @@ impl HsmClient {
         const MS: u64 = 10_000;
 
         if !path.exists() {
-            return Err(HsmError::SocketNotFound { path: path.display().to_string() });
+            return Err(HsmError::SocketNotFound {
+                path: path.display().to_string(),
+            });
         }
 
         let stream = timeout(Duration::from_millis(MS), UnixStream::connect(path))
@@ -298,8 +327,8 @@ impl HsmClient {
             .map_err(|_| HsmError::Timeout { ms: MS })?
             .map_err(|e| HsmError::Ipc(e.to_string()))?;
 
-        let mut buf   = BufReader::new(reader_half);
-        let mut resp  = String::new();
+        let mut buf = BufReader::new(reader_half);
+        let mut resp = String::new();
         timeout(Duration::from_millis(MS), buf.read_line(&mut resp))
             .await
             .map_err(|_| HsmError::Timeout { ms: MS })?
@@ -336,7 +365,7 @@ impl HsmClient {
             .map_err(|_| HsmError::Timeout { ms: MS })?
             .map_err(|e| HsmError::Ipc(e.to_string()))?;
 
-        let mut buf  = BufReader::new(reader_half);
+        let mut buf = BufReader::new(reader_half);
         let mut resp = String::new();
         timeout(Duration::from_millis(MS), buf.read_line(&mut resp))
             .await
@@ -348,7 +377,11 @@ impl HsmClient {
 
     // ── Model 2: Remote TLS 1.3 + mTLS ───────────────────────────────────
 
-    async fn send_remote(&self, req: &HsmRequest, cfg: &RemotePyHsmConfig) -> Result<HsmResponse, HsmError> {
+    async fn send_remote(
+        &self,
+        req: &HsmRequest,
+        cfg: &RemotePyHsmConfig,
+    ) -> Result<HsmResponse, HsmError> {
         let ms = cfg.timeout_ms;
         let mut last_error = String::new();
 
@@ -379,7 +412,7 @@ impl HsmClient {
         }
 
         Err(HsmError::RetriesExhausted {
-            attempts:   cfg.max_retries,
+            attempts: cfg.max_retries,
             last_error,
         })
     }
@@ -424,12 +457,15 @@ impl HsmClient {
 
         let (reader_half, mut writer) = tokio::io::split(tls_stream);
 
-        timeout(Duration::from_millis(timeout_ms), writer.write_all(line.as_bytes()))
-            .await
-            .map_err(|_| HsmError::Timeout { ms: timeout_ms })?
-            .map_err(|e| HsmError::Connection(e.to_string()))?;
+        timeout(
+            Duration::from_millis(timeout_ms),
+            writer.write_all(line.as_bytes()),
+        )
+        .await
+        .map_err(|_| HsmError::Timeout { ms: timeout_ms })?
+        .map_err(|e| HsmError::Connection(e.to_string()))?;
 
-        let mut buf  = BufReader::new(reader_half);
+        let mut buf = BufReader::new(reader_half);
         let mut resp = String::new();
         timeout(Duration::from_millis(timeout_ms), buf.read_line(&mut resp))
             .await
@@ -443,8 +479,8 @@ impl HsmClient {
 
     /// Serialize for local transports — plain NDJSON, no extra fields.
     fn serialize_local(&self, req: &HsmRequest) -> Result<String, HsmError> {
-        let mut line = serde_json::to_string(req)
-            .map_err(|e| HsmError::Serialisation(e.to_string()))?;
+        let mut line =
+            serde_json::to_string(req).map_err(|e| HsmError::Serialisation(e.to_string()))?;
         line.push('\n');
         Ok(line)
     }
@@ -452,14 +488,20 @@ impl HsmClient {
     /// Serialize for remote transport — inject `requestId` and `timestamp`
     /// for replay-attack prevention.
     fn serialize_remote(&self, req: &HsmRequest) -> Result<String, HsmError> {
-        let mut value = serde_json::to_value(req)
-            .map_err(|e| HsmError::Serialisation(e.to_string()))?;
+        let mut value =
+            serde_json::to_value(req).map_err(|e| HsmError::Serialisation(e.to_string()))?;
         if let Some(obj) = value.as_object_mut() {
-            obj.insert("requestId".into(),  serde_json::Value::String(new_request_id()));
-            obj.insert("timestamp".into(),  serde_json::Value::String(utc_timestamp()));
+            obj.insert(
+                "requestId".into(),
+                serde_json::Value::String(new_request_id()),
+            );
+            obj.insert(
+                "timestamp".into(),
+                serde_json::Value::String(utc_timestamp()),
+            );
         }
-        let mut line = serde_json::to_string(&value)
-            .map_err(|e| HsmError::Serialisation(e.to_string()))?;
+        let mut line =
+            serde_json::to_string(&value).map_err(|e| HsmError::Serialisation(e.to_string()))?;
         line.push('\n');
         Ok(line)
     }
@@ -485,9 +527,13 @@ fn parse_response(resp_line: &str) -> Result<HsmResponse, HsmError> {
 /// - Windows: `127.0.0.1:7777`
 pub fn default_pyhsm_address() -> &'static str {
     #[cfg(unix)]
-    { "/tmp/pyhsm.sock" }
+    {
+        "/tmp/pyhsm.sock"
+    }
     #[cfg(not(unix))]
-    { "127.0.0.1:7777" }
+    {
+        "127.0.0.1:7777"
+    }
 }
 
 // ── KeyProvider trait ─────────────────────────────────────────────────────────
@@ -496,17 +542,37 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait KeyProvider: Send + Sync + 'static {
-    async fn encrypt_data(&self, key_id: &str, plaintext: &[u8], aad: Option<&[u8]>) -> Result<Vec<u8>, HsmError>;
-    async fn decrypt_data(&self, key_id: &str, ciphertext: &[u8], aad: Option<&[u8]>) -> Result<Zeroizing<Vec<u8>>, HsmError>;
+    async fn encrypt_data(
+        &self,
+        key_id: &str,
+        plaintext: &[u8],
+        aad: Option<&[u8]>,
+    ) -> Result<Vec<u8>, HsmError>;
+    async fn decrypt_data(
+        &self,
+        key_id: &str,
+        ciphertext: &[u8],
+        aad: Option<&[u8]>,
+    ) -> Result<Zeroizing<Vec<u8>>, HsmError>;
     async fn sign_data(&self, key_id: &str, message: &[u8]) -> Result<Vec<u8>, HsmError>;
 }
 
 #[async_trait]
 impl KeyProvider for HsmClient {
-    async fn encrypt_data(&self, key_id: &str, plaintext: &[u8], _aad: Option<&[u8]>) -> Result<Vec<u8>, HsmError> {
+    async fn encrypt_data(
+        &self,
+        key_id: &str,
+        plaintext: &[u8],
+        _aad: Option<&[u8]>,
+    ) -> Result<Vec<u8>, HsmError> {
         self.encrypt(key_id, plaintext).await
     }
-    async fn decrypt_data(&self, key_id: &str, ciphertext: &[u8], _aad: Option<&[u8]>) -> Result<Zeroizing<Vec<u8>>, HsmError> {
+    async fn decrypt_data(
+        &self,
+        key_id: &str,
+        ciphertext: &[u8],
+        _aad: Option<&[u8]>,
+    ) -> Result<Zeroizing<Vec<u8>>, HsmError> {
         self.decrypt(key_id, ciphertext).await
     }
     async fn sign_data(&self, key_id: &str, message: &[u8]) -> Result<Vec<u8>, HsmError> {

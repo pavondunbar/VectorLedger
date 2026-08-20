@@ -47,18 +47,18 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind_addr:              "127.0.0.1:5433".into(),
-            max_connections:        128,
-            tls_cert_path:          None,
-            tls_key_path:           None,
-            tls_hostname:           "localhost".into(),
-            attach_proofs:          false,
-            require_auth:           true,
-            catalog_dir:            None,
-            mtls_ca_cert:           None,
-            wal_sync_mode:          WalSyncMode::GroupCommit,
-            group_commit_delay_ms:  2,
-            query_timeout_ms:       30_000,
+            bind_addr: "127.0.0.1:5433".into(),
+            max_connections: 128,
+            tls_cert_path: None,
+            tls_key_path: None,
+            tls_hostname: "localhost".into(),
+            attach_proofs: false,
+            require_auth: true,
+            catalog_dir: None,
+            mtls_ca_cert: None,
+            wal_sync_mode: WalSyncMode::GroupCommit,
+            group_commit_delay_ms: 2,
+            query_timeout_ms: 30_000,
         }
     }
 }

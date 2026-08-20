@@ -28,9 +28,7 @@ impl EncryptionKey {
     /// Generate a random key using the OS CSPRNG.
     pub fn generate() -> Self {
         let key = Aes256Gcm::generate_key(OsRng);
-        Self {
-            bytes: key.into(),
-        }
+        Self { bytes: key.into() }
     }
 
     /// Load from raw bytes.

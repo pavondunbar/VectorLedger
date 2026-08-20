@@ -38,8 +38,8 @@ pub mod tls;
 
 pub use config::{ReplicationConfig, ReplicationRole};
 pub use divergence::{
-    DivergenceCheckpoint, DivergenceReport,
-    build_checkpoint, compute_wal_chain_hash, verify_checkpoint,
+    build_checkpoint, compute_wal_chain_hash, verify_checkpoint, DivergenceCheckpoint,
+    DivergenceReport,
 };
 pub use error::ReplicationError;
 pub use primary::WalShipper;

@@ -41,7 +41,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use vledger_ledger::LedgerStore;
-use vledger_sql::{executor::{Executor, ReadExecutor}, parser::parse_one, planner::{LogicalPlan, LogicalPlanBuilder}};
+use vledger_sql::{
+    executor::{Executor, ReadExecutor},
+    parser::parse_one,
+    planner::{LogicalPlan, LogicalPlanBuilder},
+};
 
 use crate::auth::{check_plan_privilege, Session, UserStore};
 use crate::config::ServerConfig;
@@ -73,14 +77,14 @@ const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// reaped so they don't hold resources indefinitely.
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 pub async fn handle_connection(
-    stream:     TlsStream<TcpStream>,
-    ledger:     Arc<RwLock<LedgerStore>>,
-    config:     Arc<ServerConfig>,
+    stream: TlsStream<TcpStream>,
+    ledger: Arc<RwLock<LedgerStore>>,
+    config: Arc<ServerConfig>,
     user_store: Arc<UserStore>,
-    shipper:    Option<Arc<vledger_replication::WalShipper>>,
-    audit_log:  Option<Arc<vledger_audit::AuditLog>>,
-    peer_addr:  std::net::SocketAddr,
-    shutdown:   CancellationToken,
+    shipper: Option<Arc<vledger_replication::WalShipper>>,
+    audit_log: Option<Arc<vledger_audit::AuditLog>>,
+    peer_addr: std::net::SocketAddr,
+    shutdown: CancellationToken,
 ) {
     // Task #5: the require_auth=false path only exists in dev-no-auth builds.
     // In a default (production) build this warning and the anonymous-session
@@ -108,7 +112,7 @@ pub async fn handle_connection(
     info!(peer = %peer_addr, "New connection");
 
     let (reader_half, mut writer_half) = tokio::io::split(stream);
-    let mut reader  = BufReader::new(reader_half);
+    let mut reader = BufReader::new(reader_half);
     let mut session: Option<Session> = None;
     // Fix #3: track consecutive auth failures on this connection so we can
     // close it after MAX_AUTH_ATTEMPTS_PER_CONN without waiting for the
@@ -119,7 +123,11 @@ pub async fn handle_connection(
     loop {
         // Fix #6: use a tighter deadline for the unauthenticated auth frame
         // and a longer idle timeout for subsequent frames.
-        let deadline = if session.is_none() { AUTH_TIMEOUT } else { IDLE_TIMEOUT };
+        let deadline = if session.is_none() {
+            AUTH_TIMEOUT
+        } else {
+            IDLE_TIMEOUT
+        };
 
         // Fix #8: read line with a hard byte cap, wrapped in a timeout.
         // Also select on the shutdown token so graceful shutdown closes
@@ -174,9 +182,13 @@ pub async fn handle_connection(
         debug!(peer = %peer_addr, "Received frame");
 
         let req: Request = match serde_json::from_str(&line) {
-            Ok(r)  => r,
+            Ok(r) => r,
             Err(e) => {
-                send(&mut writer_half, Response::err(format!("Invalid JSON: {e}"))).await;
+                send(
+                    &mut writer_half,
+                    Response::err(format!("Invalid JSON: {e}")),
+                )
+                .await;
                 continue;
             }
         };
@@ -184,10 +196,13 @@ pub async fn handle_connection(
         // ── Authentication gate ───────────────────────────────────────────
         if session.is_none() {
             let result = if let Some(creds) = &req.auth {
-                user_store.authenticate(&creds.username, &creds.password)
+                user_store
+                    .authenticate(&creds.username, &creds.password)
                     .map_err(|e| e.to_string())
             } else if let Some(token) = &req.token {
-                user_store.validate_token(token).await
+                user_store
+                    .validate_token(token)
+                    .await
                     .map_err(|e| e.to_string())
             } else {
                 // Task #5: the unauthenticated path is compiled in only when
@@ -196,9 +211,9 @@ pub async fn handle_connection(
                 if !config.require_auth {
                     // Dev mode: anonymous ReadOnly session (never Admin).
                     Ok(Session {
-                        username:   "anonymous".into(),
-                        role:       crate::auth::Role::ReadOnly,
-                        token:      "no-auth".into(),
+                        username: "anonymous".into(),
+                        role: crate::auth::Role::ReadOnly,
+                        token: "no-auth".into(),
                         expires_at: std::time::SystemTime::now()
                             + std::time::Duration::from_secs(86400),
                     })
@@ -220,10 +235,12 @@ pub async fn handle_connection(
                     // ── Audit: auth failure ───────────────────────────────
                     if let Some(log) = &audit_log {
                         let _ = log.append(vledger_audit::AuditEventKind::AuthEvent {
-                            caller_id: req.auth.as_ref()
+                            caller_id: req
+                                .auth
+                                .as_ref()
                                 .map(|a| a.username.clone())
                                 .unwrap_or_else(|| "unknown".into()),
-                            success:   false,
+                            success: false,
                             peer_addr: peer_addr.to_string(),
                         });
                     }
@@ -239,9 +256,13 @@ pub async fn handle_connection(
                             "Connection closed: exceeded {} auth attempts on one connection",
                             MAX_AUTH_ATTEMPTS_PER_CONN
                         );
-                        send(&mut writer_half, Response::err(
-                            format!("too many authentication failures — reconnect to try again")
-                        )).await;
+                        send(
+                            &mut writer_half,
+                            Response::err(format!(
+                                "too many authentication failures — reconnect to try again"
+                            )),
+                        )
+                        .await;
                         break;
                     }
                     send(&mut writer_half, Response::err(e)).await;
@@ -252,12 +273,12 @@ pub async fn handle_connection(
                     if let Some(log) = &audit_log {
                         let _ = log.append(vledger_audit::AuditEventKind::AuthEvent {
                             caller_id: s.username.clone(),
-                            success:   true,
+                            success: true,
                             peer_addr: peer_addr.to_string(),
                         });
                     }
                     let token = s.token.clone();
-                    let role  = s.role.to_string();
+                    let role = s.role.to_string();
                     session = Some(s);
                     if req.sql.is_none() {
                         send(&mut writer_half, Response::auth_ok(token, role)).await;
@@ -268,7 +289,9 @@ pub async fn handle_connection(
         } else if let Some(token) = &req.token {
             // Re-validate token on every frame (catches expiry mid-session).
             match user_store.validate_token(token).await {
-                Ok(s)  => { session = Some(s); }
+                Ok(s) => {
+                    session = Some(s);
+                }
                 Err(e) => {
                     send(&mut writer_half, Response::err(e.to_string())).await;
                     break;
@@ -280,9 +303,14 @@ pub async fn handle_connection(
         if let Some(admin_cmd) = req.admin {
             let sess = session.as_ref().unwrap();
             if !sess.role.can_admin() {
-                send(&mut writer_half, Response::err(
-                    format!("Permission denied: role '{}' cannot perform admin operations", sess.role)
-                )).await;
+                send(
+                    &mut writer_half,
+                    Response::err(format!(
+                        "Permission denied: role '{}' cannot perform admin operations",
+                        sess.role
+                    )),
+                )
+                .await;
                 continue;
             }
             let resp = execute_admin(admin_cmd, &user_store).await;
@@ -295,15 +323,28 @@ pub async fn handle_connection(
             Some(ref s) => s.as_str(),
             None => {
                 if let Some(ref s) = session {
-                    send(&mut writer_half,
-                        Response::auth_ok(s.token.clone(), s.role.to_string())).await;
+                    send(
+                        &mut writer_half,
+                        Response::auth_ok(s.token.clone(), s.role.to_string()),
+                    )
+                    .await;
                 }
                 continue;
             }
         };
 
         let sess = session.as_ref().unwrap();
-        let response = execute_sql(sql, req.with_proof, &ledger, &config, sess, &shipper, &audit_log, peer_addr).await;
+        let response = execute_sql(
+            sql,
+            req.with_proof,
+            &ledger,
+            &config,
+            sess,
+            &shipper,
+            &audit_log,
+            peer_addr,
+        )
+        .await;
         send(&mut writer_half, response).await;
     }
 
@@ -315,23 +356,23 @@ pub async fn handle_connection(
 }
 
 async fn execute_sql(
-    sql:        &str,
+    sql: &str,
     with_proof: bool,
-    ledger:     &Arc<RwLock<LedgerStore>>,
-    config:     &Arc<ServerConfig>,
-    session:    &Session,
-    shipper:    &Option<Arc<vledger_replication::WalShipper>>,
-    audit_log:  &Option<Arc<vledger_audit::AuditLog>>,
-    peer_addr:  std::net::SocketAddr,
+    ledger: &Arc<RwLock<LedgerStore>>,
+    config: &Arc<ServerConfig>,
+    session: &Session,
+    shipper: &Option<Arc<vledger_replication::WalShipper>>,
+    audit_log: &Option<Arc<vledger_audit::AuditLog>>,
+    peer_addr: std::net::SocketAddr,
 ) -> Response {
     let start = std::time::Instant::now();
 
     let stmt = match parse_one(sql) {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => return Response::err(format!("SQL parse error: {e}")),
     };
     let plan = match LogicalPlanBuilder::plan(stmt) {
-        Ok(p)  => p,
+        Ok(p) => p,
         Err(e) => return Response::err(format!("Plan error: {e}")),
     };
 
@@ -347,7 +388,7 @@ async fn execute_sql(
         None
     };
 
-    let is_post_entry  = matches!(plan, LogicalPlan::PostEntry(_));
+    let is_post_entry = matches!(plan, LogicalPlan::PostEntry(_));
     let is_write = matches!(
         plan,
         LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_)
@@ -386,7 +427,7 @@ async fn execute_sql(
                 Executor::new(&mut *guard).execute(plan)
             };
             // Capture replication data while still holding the lock.
-            let bytes   = if exec_result.is_ok() && is_post_entry {
+            let bytes = if exec_result.is_ok() && is_post_entry {
                 guard.last_entry_bytes()
             } else {
                 None
@@ -413,21 +454,21 @@ async fn execute_sql(
                 if is_post_entry {
                     if let Some(log) = audit_log {
                         let _ = log.append(vledger_audit::AuditEventKind::EntryPosted {
-                            entry_id:       qr.entry_id.unwrap_or_else(uuid::Uuid::new_v4),
+                            entry_id: qr.entry_id.unwrap_or_else(uuid::Uuid::new_v4),
                             entry_sequence: qr.entry_sequence.unwrap_or(0),
-                            domain:         qr.domain.clone().unwrap_or_default(),
-                            amount_sum:     qr.amount_sum.unwrap_or(0),
-                            caller_id:      session.username.clone(),
+                            domain: qr.domain.clone().unwrap_or_default(),
+                            amount_sum: qr.amount_sum.unwrap_or(0),
+                            caller_id: session.username.clone(),
                         });
                     }
                 }
                 // ── Audit: QueryExecuted ──────────────────────────────────
                 if let Some(log) = audit_log {
                     let _ = log.append(vledger_audit::AuditEventKind::QueryExecuted {
-                        sql:           sql.to_string(),
-                        caller_id:     session.username.clone(),
+                        sql: sql.to_string(),
+                        caller_id: session.username.clone(),
                         rows_affected: qr.rows_affected,
-                        duration_ms:   elapsed_ms,
+                        duration_ms: elapsed_ms,
                     });
                 }
                 Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message)
@@ -449,10 +490,10 @@ async fn execute_sql(
                 // ── Audit: QueryExecuted (reads) ──────────────────────────
                 if let Some(log) = audit_log {
                     let _ = log.append(vledger_audit::AuditEventKind::QueryExecuted {
-                        sql:           sql.to_string(),
-                        caller_id:     session.username.clone(),
+                        sql: sql.to_string(),
+                        caller_id: session.username.clone(),
                         rows_affected: qr.rows_affected,
-                        duration_ms:   elapsed_ms,
+                        duration_ms: elapsed_ms,
                     });
                 }
                 Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message)
@@ -472,7 +513,7 @@ async fn execute_sql(
 /// - `Ok(None)`       — the peer closed the connection cleanly.
 /// - `Err(_)`         — I/O error or the line exceeded `max_bytes`.
 async fn read_line_bounded<R>(
-    reader:    &mut BufReader<R>,
+    reader: &mut BufReader<R>,
     max_bytes: usize,
 ) -> std::io::Result<Option<String>>
 where
@@ -511,42 +552,60 @@ async fn send(writer: &mut (impl AsyncWriteExt + Unpin), resp: Response) {
 
 async fn execute_admin(cmd: AdminCommand, user_store: &Arc<UserStore>) -> Response {
     match cmd {
-        AdminCommand::SetPassword { username, new_password } => {
-            match user_store.set_password(&username, &new_password) {
+        AdminCommand::SetPassword {
+            username,
+            new_password,
+        } => match user_store.set_password(&username, &new_password) {
+            Ok(()) => Response::ok(
+                vec!["result".into()],
+                vec![],
+                0,
+                None,
+                format!("Password updated for '{username}'. All sessions revoked."),
+            ),
+            Err(e) => Response::err(e.to_string()),
+        },
+        AdminCommand::CreateUser {
+            username,
+            password,
+            role,
+        } => {
+            let parsed_role = match role.parse::<crate::auth::Role>() {
+                Ok(r) => r,
+                Err(e) => return Response::err(e),
+            };
+            match user_store.create_user(&username, &password, parsed_role, None) {
                 Ok(()) => Response::ok(
-                    vec!["result".into()],
+                    vec![],
                     vec![],
                     0,
                     None,
-                    format!("Password updated for '{username}'. All sessions revoked."),
+                    format!("User '{username}' created with role '{role}'."),
                 ),
                 Err(e) => Response::err(e.to_string()),
             }
         }
-        AdminCommand::CreateUser { username, password, role } => {
-            let parsed_role = match role.parse::<crate::auth::Role>() {
-                Ok(r)  => r,
-                Err(e) => return Response::err(e),
-            };
-            match user_store.create_user(&username, &password, parsed_role, None) {
-                Ok(()) => Response::ok(vec![], vec![], 0, None,
-                    format!("User '{username}' created with role '{role}'.")),
-                Err(e) => Response::err(e.to_string()),
-            }
-        }
-        AdminCommand::DeleteUser { username } => {
-            match user_store.delete_user(&username) {
-                Ok(()) => Response::ok(vec![], vec![], 0, None,
-                    format!("User '{username}' deleted.")),
-                Err(e) => Response::err(e.to_string()),
-            }
-        }
+        AdminCommand::DeleteUser { username } => match user_store.delete_user(&username) {
+            Ok(()) => Response::ok(
+                vec![],
+                vec![],
+                0,
+                None,
+                format!("User '{username}' deleted."),
+            ),
+            Err(e) => Response::err(e.to_string()),
+        },
         AdminCommand::SetEnabled { username, enabled } => {
             match user_store.set_enabled(&username, enabled) {
                 Ok(()) => {
                     let state = if enabled { "enabled" } else { "disabled" };
-                    Response::ok(vec![], vec![], 0, None,
-                        format!("User '{username}' {state}."))
+                    Response::ok(
+                        vec![],
+                        vec![],
+                        0,
+                        None,
+                        format!("User '{username}' {state}."),
+                    )
                 }
                 Err(e) => Response::err(e.to_string()),
             }
@@ -554,16 +613,17 @@ async fn execute_admin(cmd: AdminCommand, user_store: &Arc<UserStore>) -> Respon
         AdminCommand::ListUsers => {
             let mut users = user_store.list_users();
             users.sort_by(|a, b| a.0.cmp(&b.0));
-            let rows = users.iter().map(|(name, role, enabled)| {
-                vledger_sql::result::Row {
+            let rows = users
+                .iter()
+                .map(|(name, role, enabled)| vledger_sql::result::Row {
                     columns: vec!["username".into(), "role".into(), "enabled".into()],
                     values: vec![
                         vledger_sql::result::Value::Text(name.clone()),
                         vledger_sql::result::Value::Text(role.to_string()),
                         vledger_sql::result::Value::Text(enabled.to_string()),
                     ],
-                }
-            }).collect();
+                })
+                .collect();
             Response::ok(
                 vec!["username".into(), "role".into(), "enabled".into()],
                 rows,

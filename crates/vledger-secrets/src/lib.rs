@@ -45,6 +45,6 @@ pub mod provider;
 
 pub use error::SecretsError;
 pub use provider::{
-    AwsKmsProvider, EnvVarProvider, FileProvider, HashiCorpVaultProvider,
-    KeySourceConfig, MasterKeyProvider, build_provider,
+    build_provider, AwsKmsProvider, EnvVarProvider, FileProvider, HashiCorpVaultProvider,
+    KeySourceConfig, MasterKeyProvider,
 };

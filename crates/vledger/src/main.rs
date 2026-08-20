@@ -3,8 +3,8 @@
 //! Cryptographically verifiable financial database engine.
 //! Built by VectorGuard Labs.
 
-mod backup;
 mod audit_package;
+mod backup;
 mod key_rotation;
 mod self_test;
 
@@ -217,7 +217,6 @@ enum Commands {
     SelfTestPhase3,
 
     // ── Phase 3 CLI ───────────────────────────────────────────────────────
-
     /// Create a point-in-time backup snapshot (tar archive + BLAKE3 manifest).
     Backup {
         /// Output path for the .tar archive.
@@ -475,44 +474,189 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
         )
         .with_target(true)
         .compact()
         .init();
 
     match cli.command {
-        Commands::Init { force, key_source, vault_addr, vault_mount, vault_path, kms_key_id, kms_region, pyhsm_socket, pyhsm_caller_id, pyhsm_endpoint, pyhsm_ca_cert, pyhsm_client_cert, pyhsm_client_key, pyhsm_timeout_ms, pyhsm_max_retries }
-            => cmd_init(&cli.data_dir, force, &key_source, &vault_addr, &vault_mount, &vault_path, kms_key_id.as_deref(), &kms_region, pyhsm_socket.as_deref(), &pyhsm_caller_id, pyhsm_endpoint.as_deref(), pyhsm_ca_cert.as_deref(), pyhsm_client_cert.as_deref(), pyhsm_client_key.as_deref(), pyhsm_timeout_ms, pyhsm_max_retries).await,
-        Commands::Start { bind, pgwire, with_proofs, wal_sync_mode, group_commit_delay_ms, query_timeout_ms, metrics_addr, max_connections }
-            => cmd_start(&cli.data_dir, &bind, pgwire, with_proofs, &wal_sync_mode, group_commit_delay_ms, query_timeout_ms, &metrics_addr, max_connections).await,
-        Commands::Status                             => cmd_status(&cli.data_dir).await,
-        Commands::Verify { self_test, entries, keep_data }  => {
+        Commands::Init {
+            force,
+            key_source,
+            vault_addr,
+            vault_mount,
+            vault_path,
+            kms_key_id,
+            kms_region,
+            pyhsm_socket,
+            pyhsm_caller_id,
+            pyhsm_endpoint,
+            pyhsm_ca_cert,
+            pyhsm_client_cert,
+            pyhsm_client_key,
+            pyhsm_timeout_ms,
+            pyhsm_max_retries,
+        } => {
+            cmd_init(
+                &cli.data_dir,
+                force,
+                &key_source,
+                &vault_addr,
+                &vault_mount,
+                &vault_path,
+                kms_key_id.as_deref(),
+                &kms_region,
+                pyhsm_socket.as_deref(),
+                &pyhsm_caller_id,
+                pyhsm_endpoint.as_deref(),
+                pyhsm_ca_cert.as_deref(),
+                pyhsm_client_cert.as_deref(),
+                pyhsm_client_key.as_deref(),
+                pyhsm_timeout_ms,
+                pyhsm_max_retries,
+            )
+            .await
+        }
+        Commands::Start {
+            bind,
+            pgwire,
+            with_proofs,
+            wal_sync_mode,
+            group_commit_delay_ms,
+            query_timeout_ms,
+            metrics_addr,
+            max_connections,
+        } => {
+            cmd_start(
+                &cli.data_dir,
+                &bind,
+                pgwire,
+                with_proofs,
+                &wal_sync_mode,
+                group_commit_delay_ms,
+                query_timeout_ms,
+                &metrics_addr,
+                max_connections,
+            )
+            .await
+        }
+        Commands::Status => cmd_status(&cli.data_dir).await,
+        Commands::Verify {
+            self_test,
+            entries,
+            keep_data,
+        } => {
             if self_test {
                 crate::self_test::run(entries, keep_data).await
             } else {
                 cmd_verify(&cli.data_dir).await
             }
         }
-        Commands::Sql { query, username, password, server, ca_cert } => cmd_sql(&cli.data_dir, query.as_deref(), username.as_deref(), password.as_deref(), server.as_deref(), ca_cert.as_deref()).await,
-        Commands::SelfTest                           => cmd_self_test().await,
-        Commands::SelfTestPhase3                     => cmd_self_test_phase3().await,
+        Commands::Sql {
+            query,
+            username,
+            password,
+            server,
+            ca_cert,
+        } => {
+            cmd_sql(
+                &cli.data_dir,
+                query.as_deref(),
+                username.as_deref(),
+                password.as_deref(),
+                server.as_deref(),
+                ca_cert.as_deref(),
+            )
+            .await
+        }
+        Commands::SelfTest => cmd_self_test().await,
+        Commands::SelfTestPhase3 => cmd_self_test_phase3().await,
         // Phase 3
-        Commands::Backup { output }                  => cmd_backup(&cli.data_dir, output.as_deref()).await,
-        Commands::Restore { from, target, force }    => cmd_restore(&from, target.as_deref(), &cli.data_dir, force).await,
-        Commands::RotateKeys { hsm_socket, caller_id, pyhsm_endpoint, pyhsm_ca_cert, pyhsm_client_cert, pyhsm_client_key, pyhsm_timeout_ms, pyhsm_max_retries } => cmd_rotate_keys(&cli.data_dir, hsm_socket.as_deref(), &caller_id, pyhsm_endpoint.as_deref(), pyhsm_ca_cert.as_deref(), pyhsm_client_cert.as_deref(), pyhsm_client_key.as_deref(), pyhsm_timeout_ms, pyhsm_max_retries).await,
-        Commands::AuditExport { format, output, from, to } => cmd_audit_export(&cli.data_dir, &format, output.as_deref(), from.as_deref(), to.as_deref()).await,
-        Commands::ComplianceReport { standard, format, output } => cmd_compliance_report(&cli.data_dir, &standard, &format, output.as_deref()).await,
-        Commands::User { action, ca_cert } => cmd_user(&cli.data_dir, action, ca_cert.as_deref()).await,
-        Commands::License          => cmd_license(&cli.data_dir),
-        Commands::BackupVerify { from, decrypt } => cmd_backup_verify(&cli.data_dir, &from, decrypt).await,
-        Commands::StartPrimary { bind }    => cmd_start_primary(&cli.data_dir, bind.as_deref()).await,
-        Commands::StartReplica { primary } => cmd_start_replica(&cli.data_dir, primary.as_deref()).await,
-        Commands::AuditPackage { output, include_entries, tenant, description, period_start, period_end } =>
-            cmd_audit_package(&cli.data_dir, output.as_deref(), include_entries, tenant, description, period_start, period_end).await,
-        Commands::AuditProof { commitment, sequence, output } =>
-            cmd_audit_proof(&cli.data_dir, &commitment, sequence, output.as_deref()).await,
+        Commands::Backup { output } => cmd_backup(&cli.data_dir, output.as_deref()).await,
+        Commands::Restore {
+            from,
+            target,
+            force,
+        } => cmd_restore(&from, target.as_deref(), &cli.data_dir, force).await,
+        Commands::RotateKeys {
+            hsm_socket,
+            caller_id,
+            pyhsm_endpoint,
+            pyhsm_ca_cert,
+            pyhsm_client_cert,
+            pyhsm_client_key,
+            pyhsm_timeout_ms,
+            pyhsm_max_retries,
+        } => {
+            cmd_rotate_keys(
+                &cli.data_dir,
+                hsm_socket.as_deref(),
+                &caller_id,
+                pyhsm_endpoint.as_deref(),
+                pyhsm_ca_cert.as_deref(),
+                pyhsm_client_cert.as_deref(),
+                pyhsm_client_key.as_deref(),
+                pyhsm_timeout_ms,
+                pyhsm_max_retries,
+            )
+            .await
+        }
+        Commands::AuditExport {
+            format,
+            output,
+            from,
+            to,
+        } => {
+            cmd_audit_export(
+                &cli.data_dir,
+                &format,
+                output.as_deref(),
+                from.as_deref(),
+                to.as_deref(),
+            )
+            .await
+        }
+        Commands::ComplianceReport {
+            standard,
+            format,
+            output,
+        } => cmd_compliance_report(&cli.data_dir, &standard, &format, output.as_deref()).await,
+        Commands::User { action, ca_cert } => {
+            cmd_user(&cli.data_dir, action, ca_cert.as_deref()).await
+        }
+        Commands::License => cmd_license(&cli.data_dir),
+        Commands::BackupVerify { from, decrypt } => {
+            cmd_backup_verify(&cli.data_dir, &from, decrypt).await
+        }
+        Commands::StartPrimary { bind } => cmd_start_primary(&cli.data_dir, bind.as_deref()).await,
+        Commands::StartReplica { primary } => {
+            cmd_start_replica(&cli.data_dir, primary.as_deref()).await
+        }
+        Commands::AuditPackage {
+            output,
+            include_entries,
+            tenant,
+            description,
+            period_start,
+            period_end,
+        } => {
+            cmd_audit_package(
+                &cli.data_dir,
+                output.as_deref(),
+                include_entries,
+                tenant,
+                description,
+                period_start,
+                period_end,
+            )
+            .await
+        }
+        Commands::AuditProof {
+            commitment,
+            sequence,
+            output,
+        } => cmd_audit_proof(&cli.data_dir, &commitment, sequence, output.as_deref()).await,
         Commands::VerifyAuditPackage { file } => cmd_verify_audit_package(&file).await,
     }
 }
@@ -520,21 +664,21 @@ async fn main() -> Result<()> {
 // ── init ──────────────────────────────────────────────────────────────────────
 
 async fn cmd_init(
-    data_dir:          &PathBuf,
-    force:             bool,
-    key_source:        &str,
-    vault_addr:        &str,
-    vault_mount:       &str,
-    vault_path:        &str,
-    kms_key_id:        Option<&str>,
-    kms_region:        &str,
-    pyhsm_socket:      Option<&str>,
-    pyhsm_caller_id:   &str,
-    pyhsm_endpoint:    Option<&str>,
-    pyhsm_ca_cert:     Option<&str>,
+    data_dir: &PathBuf,
+    force: bool,
+    key_source: &str,
+    vault_addr: &str,
+    vault_mount: &str,
+    vault_path: &str,
+    kms_key_id: Option<&str>,
+    kms_region: &str,
+    pyhsm_socket: Option<&str>,
+    pyhsm_caller_id: &str,
+    pyhsm_endpoint: Option<&str>,
+    pyhsm_ca_cert: Option<&str>,
     pyhsm_client_cert: Option<&str>,
-    pyhsm_client_key:  Option<&str>,
-    pyhsm_timeout_ms:  u64,
+    pyhsm_client_key: Option<&str>,
+    pyhsm_timeout_ms: u64,
     pyhsm_max_retries: u32,
 ) -> Result<()> {
     if data_dir.exists() && !force {
@@ -546,18 +690,29 @@ async fn cmd_init(
 
     info!(data_dir = %data_dir.display(), "Initialising VectorLedger");
 
-    let dirs = ["wal", "pages", "indexes", "catalog", "snapshots", "keys", "audit"];
+    let dirs = [
+        "wal",
+        "pages",
+        "indexes",
+        "catalog",
+        "snapshots",
+        "keys",
+        "audit",
+    ];
     for d in &dirs {
         std::fs::create_dir_all(data_dir.join(d))
             .with_context(|| format!("Failed to create {d}"))?;
     }
 
-    let signing_key   = vledger_crypto::sign::DbSigningKey::generate();
-    let pubkey_hex    = hex::encode(signing_key.public_key().to_bytes());
-    let privkey_hex   = hex::encode(signing_key.to_bytes());
-    std::fs::write(data_dir.join("keys").join("db_signing_pubkey.hex"), &pubkey_hex)?;
+    let signing_key = vledger_crypto::sign::DbSigningKey::generate();
+    let pubkey_hex = hex::encode(signing_key.public_key().to_bytes());
+    let privkey_hex = hex::encode(signing_key.to_bytes());
+    std::fs::write(
+        data_dir.join("keys").join("db_signing_pubkey.hex"),
+        &pubkey_hex,
+    )?;
     // Private key persisted with mode 0o600 — required for WAL commit signing.
-    let privkey_path  = data_dir.join("keys").join("db_signing_key.hex");
+    let privkey_path = data_dir.join("keys").join("db_signing_key.hex");
     std::fs::write(&privkey_path, &privkey_hex)?;
     #[cfg(unix)]
     {
@@ -573,7 +728,7 @@ async fn cmd_init(
 
     // ── Task #3: configure and persist key source ──────────────────────
     {
-        use vledger_secrets::{KeySourceConfig, FileProvider};
+        use vledger_secrets::{FileProvider, KeySourceConfig};
 
         // ── HSM license check ─────────────────────────────────────────────
         // PyHSM key sources (pyhsm, remote-pyhsm) are Enterprise-only.
@@ -581,32 +736,33 @@ async fn cmd_init(
         // error immediately rather than a partial initialisation.
         if matches!(key_source, "pyhsm" | "remote-pyhsm" | "pyhsm-remote") {
             let license = vledger_license::LicenseStore::load_or_free(data_dir);
-            license.require_feature(vledger_license::Feature::Hsm)
+            license
+                .require_feature(vledger_license::Feature::Hsm)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
 
         let key_source_cfg = match key_source {
             "file" => {
                 let key_path = data_dir.join("keys").join("master_key.hex");
-                FileProvider::generate(&key_path)
-                    .context("Failed to generate master key file")?;
-                KeySourceConfig::File { path: key_path.display().to_string() }
-            }
-            "vault" => {
-                KeySourceConfig::Vault {
-                    addr:        vault_addr.to_string(),
-                    mount:       vault_mount.to_string(),
-                    secret_path: vault_path.to_string(),
-                    field:       "value".to_string(),
-                    namespace:   None,
+                FileProvider::generate(&key_path).context("Failed to generate master key file")?;
+                KeySourceConfig::File {
+                    path: key_path.display().to_string(),
                 }
             }
+            "vault" => KeySourceConfig::Vault {
+                addr: vault_addr.to_string(),
+                mount: vault_mount.to_string(),
+                secret_path: vault_path.to_string(),
+                field: "value".to_string(),
+                namespace: None,
+            },
             "aws_kms" => {
-                let key_id = kms_key_id
-                    .ok_or_else(|| anyhow::anyhow!("--kms-key-id is required for aws_kms key source"))?;
+                let key_id = kms_key_id.ok_or_else(|| {
+                    anyhow::anyhow!("--kms-key-id is required for aws_kms key source")
+                })?;
                 KeySourceConfig::AwsKms {
-                    key_id:             key_id.to_string(),
-                    region:             kms_region.to_string(),
+                    key_id: key_id.to_string(),
+                    region: kms_region.to_string(),
                     encryption_context: std::collections::HashMap::new(),
                 }
             }
@@ -618,8 +774,8 @@ async fn cmd_init(
                     .unwrap_or_else(|| vledger_hsm::default_pyhsm_address().to_string());
                 KeySourceConfig::PyHsm {
                     socket_path: socket,
-                    caller_id:   pyhsm_caller_id.to_string(),
-                    key_id:      "vledger.master-key".to_string(),
+                    caller_id: pyhsm_caller_id.to_string(),
+                    key_id: "vledger.master-key".to_string(),
                 }
             }
             // Model 2: explicitly requested, or auto-detected when --pyhsm-endpoint is supplied.
@@ -633,49 +789,65 @@ async fn cmd_init(
                 let ca_cert = pyhsm_ca_cert
                     .map(|s| s.to_string())
                     .or_else(|| std::env::var("PYHSM_CA_CERT").ok())
-                    .ok_or_else(|| anyhow::anyhow!(
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
                         "--pyhsm-ca-cert (or PYHSM_CA_CERT) is required for remote-pyhsm key source"
-                    ))?;
+                    )
+                    })?;
                 KeySourceConfig::RemotePyHsm {
                     endpoint,
                     ca_cert,
                     client_cert: pyhsm_client_cert
                         .map(|s| s.to_string())
                         .or_else(|| std::env::var("PYHSM_CLIENT_CERT").ok()),
-                    client_key:  pyhsm_client_key
+                    client_key: pyhsm_client_key
                         .map(|s| s.to_string())
                         .or_else(|| std::env::var("PYHSM_CLIENT_KEY").ok()),
-                    timeout_ms:  std::env::var("PYHSM_TIMEOUT_MS")
-                        .ok().and_then(|v| v.parse().ok())
+                    timeout_ms: std::env::var("PYHSM_TIMEOUT_MS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
                         .unwrap_or(pyhsm_timeout_ms),
                     max_retries: pyhsm_max_retries,
-                    caller_id:   pyhsm_caller_id.to_string(),
-                    key_id:      "vledger.master-key".to_string(),
+                    caller_id: pyhsm_caller_id.to_string(),
+                    key_id: "vledger.master-key".to_string(),
                 }
             }
             _ => {
                 // Explicit --key-source env, or unrecognised value: fall back to env var.
-                KeySourceConfig::Env { var: "VectorLedger_MASTER_KEY".to_string() }
+                KeySourceConfig::Env {
+                    var: "VectorLedger_MASTER_KEY".to_string(),
+                }
             }
         };
 
         let key_source_path = data_dir.join("keys").join("key_source.json");
-        key_source_cfg.save_to_file(&key_source_path)
+        key_source_cfg
+            .save_to_file(&key_source_path)
             .context("Failed to write key_source.json")?;
 
         println!("  Key source : {key_source}");
         match &key_source_cfg {
-            KeySourceConfig::Env { var } =>
-                println!("  ⚠  Set ${var} before starting the server."),
-            KeySourceConfig::File { path } =>
-                println!("  ⚠  Master key written to {path} — move to a secrets manager before production."),
-            KeySourceConfig::Vault { addr, secret_path, .. } =>
-                println!("  Vault: {addr} → {secret_path}"),
-            KeySourceConfig::AwsKms { key_id, region, .. } =>
-                println!("  AWS KMS: {key_id} in {region}"),
-            KeySourceConfig::PyHsm { socket_path, key_id, .. } =>
-                println!("  PyHSM (local): socket={socket_path}  wrapping-key={key_id}"),
-            KeySourceConfig::RemotePyHsm { endpoint, key_id, client_cert, .. } => {
+            KeySourceConfig::Env { var } => println!("  ⚠  Set ${var} before starting the server."),
+            KeySourceConfig::File { path } => println!(
+                "  ⚠  Master key written to {path} — move to a secrets manager before production."
+            ),
+            KeySourceConfig::Vault {
+                addr, secret_path, ..
+            } => println!("  Vault: {addr} → {secret_path}"),
+            KeySourceConfig::AwsKms { key_id, region, .. } => {
+                println!("  AWS KMS: {key_id} in {region}")
+            }
+            KeySourceConfig::PyHsm {
+                socket_path,
+                key_id,
+                ..
+            } => println!("  PyHSM (local): socket={socket_path}  wrapping-key={key_id}"),
+            KeySourceConfig::RemotePyHsm {
+                endpoint,
+                key_id,
+                client_cert,
+                ..
+            } => {
                 println!("  PyHSM (remote mTLS): endpoint={endpoint}  wrapping-key={key_id}");
                 if client_cert.is_some() {
                     println!("  mTLS client cert : configured");
@@ -688,20 +860,36 @@ async fn cmd_init(
 
     std::fs::write(
         data_dir.join("catalog").join("VERSION"),
-        format!("vledger_version={}\ncreated_at={}\npubkey={}\n",
-            env!("CARGO_PKG_VERSION"), chrono::Utc::now().to_rfc3339(), pubkey_hex),
+        format!(
+            "vledger_version={}\ncreated_at={}\npubkey={}\n",
+            env!("CARGO_PKG_VERSION"),
+            chrono::Utc::now().to_rfc3339(),
+            pubkey_hex
+        ),
     )?;
 
     println!("✓ VectorLedger initialised at: {}", data_dir.display());
     println!("  Signing key (first 16 hex): {}", &pubkey_hex[..16]);
-    for d in &dirs { println!("    {d}"); }
+    for d in &dirs {
+        println!("    {d}");
+    }
     println!("\n  Master key source stored in: keys/key_source.json");
     Ok(())
 }
 
 // ── start ─────────────────────────────────────────────────────────────────────
 
-async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bool, wal_sync_mode: &str, group_commit_delay_ms: u64, query_timeout_ms: u64, metrics_addr: &str, max_connections: usize) -> Result<()> {
+async fn cmd_start(
+    data_dir: &PathBuf,
+    bind: &str,
+    pgwire: bool,
+    with_proofs: bool,
+    wal_sync_mode: &str,
+    group_commit_delay_ms: u64,
+    query_timeout_ms: u64,
+    metrics_addr: &str,
+    max_connections: usize,
+) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Data directory not found — run `vledger init` first.");
     }
@@ -750,7 +938,8 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     let initial_license = vledger_license::LicenseStore::load_or_free(data_dir);
 
     if pgwire {
-        initial_license.require_feature(vledger_license::Feature::PgWire)
+        initial_license
+            .require_feature(vledger_license::Feature::PgWire)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
@@ -759,14 +948,14 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     // config file is present so the server refuses to start rather than
     // silently running without replication when a user is on a lower tier.
     if data_dir.join("replication.json").exists() {
-        initial_license.require_feature(vledger_license::Feature::Replication)
+        initial_license
+            .require_feature(vledger_license::Feature::Replication)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
     info!("Opening ledger at {}", data_dir.display());
     let ledger = std::sync::Arc::new(tokio::sync::RwLock::new(
-        vledger_ledger::LedgerStore::open(data_dir)
-            .context("Failed to open ledger")?
+        vledger_ledger::LedgerStore::open(data_dir).context("Failed to open ledger")?,
     ));
 
     // Write a ServerStarted audit event so audit/audit.log is created on
@@ -781,7 +970,7 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
                 let log = std::sync::Arc::new(log);
                 let _ = log.append(vledger_audit::AuditEventKind::ServerStarted {
                     bind_addr: bind.to_string(),
-                    version:   env!("CARGO_PKG_VERSION").to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
                 });
                 log
             }
@@ -812,11 +1001,12 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     let config = vledger_server::ServerConfig {
         bind_addr: bind.to_string(),
         attach_proofs: with_proofs,
-        wal_sync_mode: wal_sync_mode.parse()
-            .unwrap_or_else(|e| {
-                eprintln!("⚠  Invalid --wal-sync-mode '{wal_sync_mode}': {e}. Defaulting to group_commit.");
-                vledger_wal::WalSyncMode::GroupCommit
-            }),
+        wal_sync_mode: wal_sync_mode.parse().unwrap_or_else(|e| {
+            eprintln!(
+                "⚠  Invalid --wal-sync-mode '{wal_sync_mode}': {e}. Defaulting to group_commit."
+            );
+            vledger_wal::WalSyncMode::GroupCommit
+        }),
         group_commit_delay_ms,
         query_timeout_ms,
         max_connections,
@@ -828,14 +1018,16 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     println!("  Data dir   : {}", data_dir.display());
     println!("  Proofs     : {with_proofs}");
     println!("  Protocol   : newline-delimited JSON");
-    println!("  WAL sync   : {wal_sync_mode}{}",
+    println!(
+        "  WAL sync   : {wal_sync_mode}{}",
         if wal_sync_mode == "group_commit" {
             format!("  (flush every {group_commit_delay_ms} ms)")
         } else {
             String::new()
         }
     );
-    println!("  Query limit: {}",
+    println!(
+        "  Query limit: {}",
         if query_timeout_ms == 0 {
             "none (⚠  disabled — not recommended for production)".to_string()
         } else {
@@ -878,7 +1070,10 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
                 }
             }
             #[cfg(not(unix))]
-            { ctrl_c.await.ok(); tracing::info!("CTRL-C received — shutting down"); }
+            {
+                ctrl_c.await.ok();
+                tracing::info!("CTRL-C received — shutting down");
+            }
             token.cancel();
         });
     }
@@ -888,31 +1083,27 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
     // that re-reads license.json at each UTC midnight.  Any downgrade or
     // expiry applied during the day takes effect at the next midnight tick
     // without requiring a server restart.
-    let _license = vledger_license::spawn_license_watcher(
-        data_dir,
-        initial_license,
-        shutdown.clone(),
-    );
+    let _license =
+        vledger_license::spawn_license_watcher(data_dir, initial_license, shutdown.clone());
 
-    let catalog_dir_str = data_dir.join("catalog")
-        .to_string_lossy().to_string();
+    let catalog_dir_str = data_dir.join("catalog").to_string_lossy().to_string();
     let mut config_with_catalog = config.clone();
     config_with_catalog.catalog_dir = Some(catalog_dir_str);
 
     let user_store = std::sync::Arc::new(
         vledger_server::UserStore::open(&data_dir.join("catalog"))
-            .context("Failed to open user store")?
+            .context("Failed to open user store")?,
     );
 
     if pgwire {
         let pg_config = vledger_pgwire::PgWireConfig {
-            bind_addr:       "127.0.0.1:5432".into(),
-            database:        "vledger".into(),
-            attach_proofs:   with_proofs,
-            tls_cert_path:   None,
-            tls_key_path:    None,
-            tls_hostname:    "localhost".into(),
-            catalog_dir:     None,
+            bind_addr: "127.0.0.1:5432".into(),
+            database: "vledger".into(),
+            attach_proofs: with_proofs,
+            tls_cert_path: None,
+            tls_key_path: None,
+            tls_hostname: "localhost".into(),
+            catalog_dir: None,
             max_connections,
         };
         let pg_server = vledger_pgwire::PgWireServer::new_shared(
@@ -930,9 +1121,9 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
 
     // ── Prometheus metrics server ─────────────────────────────────────────
     if !metrics_addr.is_empty() {
-        let metrics     = vledger_server::Metrics::new();
+        let metrics = vledger_server::Metrics::new();
         let metrics_tok = shutdown.clone();
-        let addr        = metrics_addr.to_string();
+        let addr = metrics_addr.to_string();
         tokio::spawn(async move {
             if let Err(e) = vledger_server::run_metrics_server(addr, metrics, metrics_tok).await {
                 tracing::warn!("Metrics server error: {e}");
@@ -1024,14 +1215,14 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
     // Ledger hash chain
     print!("  Ledger hash chain        ... ");
     match vledger_ledger::LedgerStore::open(data_dir) {
-        Ok(ledger) => {
-            match ledger.verify_chain_integrity() {
-                Ok(()) => println!("✓ ({} entries, tip={})",
-                    ledger.entry_count(),
-                    hex::encode(&ledger.chain_tip()[..8])),
-                Err(e) => println!("✗ BROKEN: {e}"),
-            }
-        }
+        Ok(ledger) => match ledger.verify_chain_integrity() {
+            Ok(()) => println!(
+                "✓ ({} entries, tip={})",
+                ledger.entry_count(),
+                hex::encode(&ledger.chain_tip()[..8])
+            ),
+            Err(e) => println!("✗ BROKEN: {e}"),
+        },
         Err(e) => println!("N/A ({e})"),
     }
 
@@ -1043,11 +1234,11 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
 
 async fn cmd_sql(
     data_dir: &PathBuf,
-    query:    Option<&str>,
+    query: Option<&str>,
     username: Option<&str>,
     password: Option<&str>,
-    server:   Option<&str>,
-    ca_cert:  Option<&str>,
+    server: Option<&str>,
+    ca_cert: Option<&str>,
 ) -> Result<()> {
     // Resolve credentials first (needed for both network and direct modes).
     let resolved_username = resolve_username(username);
@@ -1057,23 +1248,30 @@ async fn cmd_sql(
     // Use this when `vledger start` is running (it holds the data-dir lock).
     // Explicitly requested via --server, OR auto-detected by probing the
     // default address.
-    let server_addr = server
-        .map(|s| s.to_string())
-        .or_else(|| {
-            // Auto-detect: if the default port is reachable, prefer network mode.
-            let addr = "127.0.0.1:5433";
-            if std::net::TcpStream::connect_timeout(
-                &addr.parse().unwrap(),
-                std::time::Duration::from_millis(200),
-            ).is_ok() {
-                Some(addr.to_string())
-            } else {
-                None
-            }
-        });
+    let server_addr = server.map(|s| s.to_string()).or_else(|| {
+        // Auto-detect: if the default port is reachable, prefer network mode.
+        let addr = "127.0.0.1:5433";
+        if std::net::TcpStream::connect_timeout(
+            &addr.parse().unwrap(),
+            std::time::Duration::from_millis(200),
+        )
+        .is_ok()
+        {
+            Some(addr.to_string())
+        } else {
+            None
+        }
+    });
 
     if let Some(addr) = server_addr {
-        return cmd_sql_network(&addr, query, &resolved_username, &resolved_password, ca_cert).await;
+        return cmd_sql_network(
+            &addr,
+            query,
+            &resolved_username,
+            &resolved_password,
+            ca_cert,
+        )
+        .await;
     }
 
     // ── Direct mode: open the data directory (only safe when server is NOT running) ──
@@ -1088,7 +1286,8 @@ async fn cmd_sql(
     let user_store = vledger_server::UserStore::open(&catalog_dir)
         .context("Failed to open user store — run `vledger start` to initialise auth")?;
 
-    let session = user_store.authenticate(&resolved_username, &resolved_password)
+    let session = user_store
+        .authenticate(&resolved_username, &resolved_password)
         .map_err(|_| anyhow::anyhow!("Authentication failed"))?;
 
     info!(
@@ -1097,14 +1296,20 @@ async fn cmd_sql(
         "CLI authenticated"
     );
 
-    let mut ledger = vledger_ledger::LedgerStore::open(data_dir)
-        .context("Failed to open ledger")?;
+    let mut ledger =
+        vledger_ledger::LedgerStore::open(data_dir).context("Failed to open ledger")?;
 
     if let Some(sql) = query {
         run_sql_authenticated(&mut ledger, sql, &session)?;
     } else {
-        println!("VectorLedger SQL REPL — authenticated as {} ({})", session.username, session.role);
-        println!("  Data dir: {} | Type 'exit' or Ctrl-D to quit", data_dir.display());
+        println!(
+            "VectorLedger SQL REPL — authenticated as {} ({})",
+            session.username, session.role
+        );
+        println!(
+            "  Data dir: {} | Type 'exit' or Ctrl-D to quit",
+            data_dir.display()
+        );
         println!();
         let stdin = std::io::stdin();
         let mut line = String::new();
@@ -1113,10 +1318,16 @@ async fn cmd_sql(
             use std::io::Write;
             let _ = std::io::stdout().flush();
             line.clear();
-            if stdin.read_line(&mut line).unwrap_or(0) == 0 { break; }
+            if stdin.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
             let trimmed = line.trim();
-            if trimmed.is_empty() { continue; }
-            if trimmed == "exit" || trimmed == "\\q" { break; }
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed == "exit" || trimmed == "\\q" {
+                break;
+            }
             if let Err(e) = run_sql_authenticated(&mut ledger, trimmed, &session) {
                 eprintln!("Error: {e}");
             }
@@ -1127,19 +1338,23 @@ async fn cmd_sql(
 
 /// Connect to a running vledger server over TLS and run SQL.
 async fn cmd_sql_network(
-    addr:     &str,
-    query:    Option<&str>,
+    addr: &str,
+    query: Option<&str>,
     username: &str,
     password: &str,
-    ca_cert:  Option<&str>,
+    ca_cert: Option<&str>,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio_rustls::rustls::pki_types::ServerName;
     use tokio_rustls::rustls::ClientConfig;
     use tokio_rustls::TlsConnector;
-    use tokio_rustls::rustls::pki_types::ServerName;
 
     let host_part = addr.split(':').next().unwrap_or("127.0.0.1");
-    let port: u16 = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
+    let port: u16 = addr
+        .split(':')
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(5433);
 
     // Fix #1: only accept self-signed / unverified certificates when the
     // target is a loopback address.  For any non-loopback address the caller
@@ -1155,7 +1370,8 @@ async fn cmd_sql_network(
             .with_context(|| format!("Cannot read CA certificate: {ca_path}"))?;
         let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
         for cert in rustls_pemfile::certs(&mut ca_pem.as_slice()) {
-            root_store.add(cert.context("Invalid CA certificate DER")?)
+            root_store
+                .add(cert.context("Invalid CA certificate DER")?)
                 .context("Failed to add CA certificate to root store")?;
         }
         ClientConfig::builder()
@@ -1183,33 +1399,39 @@ async fn cmd_sql_network(
         );
     };
 
-    let connector  = TlsConnector::from(std::sync::Arc::new(tls_config));
+    let connector = TlsConnector::from(std::sync::Arc::new(tls_config));
 
-    let tcp = tokio::net::TcpStream::connect((host_part, port)).await
+    let tcp = tokio::net::TcpStream::connect((host_part, port))
+        .await
         .with_context(|| format!("Cannot connect to server at {addr}"))?;
 
     let server_name = ServerName::try_from(host_part.to_string())
         .map_err(|_| anyhow::anyhow!("Invalid server hostname: {host_part}"))?;
-    let tls = connector.connect(server_name, tcp).await
+    let tls = connector
+        .connect(server_name, tcp)
+        .await
         .context("TLS handshake failed")?;
 
     // Split into read/write halves with concrete types so the compiler can
     // infer `R` in `BufReader<R>` without ambiguity.
-    let (read_half, mut write_half) =
-        tokio::io::split(tls);
+    let (read_half, mut write_half) = tokio::io::split(tls);
     let mut lines = BufReader::new(read_half).lines();
 
     // ── Authenticate ──────────────────────────────────────────────────────
     let auth_req = serde_json::json!({
         "auth": { "username": username, "password": password }
     });
-    write_half.write_all(format!("{}\n", auth_req).as_bytes()).await?;
+    write_half
+        .write_all(format!("{}\n", auth_req).as_bytes())
+        .await?;
     write_half.flush().await?;
 
-    let auth_line = lines.next_line().await?
+    let auth_line = lines
+        .next_line()
+        .await?
         .ok_or_else(|| anyhow::anyhow!("Server closed connection during auth"))?;
-    let auth_resp: serde_json::Value = serde_json::from_str(&auth_line)
-        .context("Invalid auth response from server")?;
+    let auth_resp: serde_json::Value =
+        serde_json::from_str(&auth_line).context("Invalid auth response from server")?;
 
     if !auth_resp["ok"].as_bool().unwrap_or(false) {
         anyhow::bail!(
@@ -1218,7 +1440,8 @@ async fn cmd_sql_network(
         );
     }
 
-    let token = auth_resp["token"].as_str()
+    let token = auth_resp["token"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("Server did not return a session token"))?
         .to_string();
     let role = auth_resp["role"].as_str().unwrap_or("unknown");
@@ -1241,7 +1464,8 @@ async fn cmd_sql_network(
             eprintln!("Error: {}", resp["error"].as_str().unwrap_or("unknown"));
             return;
         }
-        let cols: Vec<&str> = resp["columns"].as_array()
+        let cols: Vec<&str> = resp["columns"]
+            .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
         let rows = resp["rows"].as_array();
@@ -1254,7 +1478,8 @@ async fn cmd_sql_network(
                     println!("─────────────────────── [ row {} ]", i + 1);
                     if let Some(vals) = row.as_array() {
                         for (col, val) in cols.iter().zip(vals.iter()) {
-                            let v = val.as_str()
+                            let v = val
+                                .as_str()
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| val.to_string());
                             println!("{:>width$} │ {}", col, v, width = col_width);
@@ -1268,27 +1493,44 @@ async fn cmd_sql_network(
         } else if !cols.is_empty() {
             // ── Normal (horizontal) display ───────────────────────────────
             // Calculate column widths: max of header width and widest value.
-            let all_vals: Vec<Vec<String>> = rows.map(|rs| {
-                rs.iter().map(|row| {
-                    row.as_array().map(|vals| {
-                        vals.iter().map(|v| {
-                            v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string())
-                        }).collect::<Vec<_>>()
-                    }).unwrap_or_default()
-                }).collect()
-            }).unwrap_or_default();
+            let all_vals: Vec<Vec<String>> = rows
+                .map(|rs| {
+                    rs.iter()
+                        .map(|row| {
+                            row.as_array()
+                                .map(|vals| {
+                                    vals.iter()
+                                        .map(|v| {
+                                            v.as_str()
+                                                .map(|s| s.to_string())
+                                                .unwrap_or_else(|| v.to_string())
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
-            let widths: Vec<usize> = cols.iter().enumerate().map(|(i, c)| {
-                let val_max = all_vals.iter()
-                    .filter_map(|r| r.get(i))
-                    .map(|v| v.len())
-                    .max()
-                    .unwrap_or(0);
-                c.len().max(val_max)
-            }).collect();
+            let widths: Vec<usize> = cols
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let val_max = all_vals
+                        .iter()
+                        .filter_map(|r| r.get(i))
+                        .map(|v| v.len())
+                        .max()
+                        .unwrap_or(0);
+                    c.len().max(val_max)
+                })
+                .collect();
 
             // Header row.
-            let header: Vec<String> = cols.iter().zip(widths.iter())
+            let header: Vec<String> = cols
+                .iter()
+                .zip(widths.iter())
                 .map(|(c, w)| format!("{:<width$}", c, width = w))
                 .collect();
             println!("{}", header.join(" │ "));
@@ -1299,10 +1541,14 @@ async fn cmd_sql_network(
 
             // Data rows.
             for row_vals in &all_vals {
-                let cells: Vec<String> = widths.iter().enumerate().map(|(i, w)| {
-                    let v = row_vals.get(i).map(|s| s.as_str()).unwrap_or("");
-                    format!("{:<width$}", v, width = w)
-                }).collect();
+                let cells: Vec<String> = widths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| {
+                        let v = row_vals.get(i).map(|s| s.as_str()).unwrap_or("");
+                        format!("{:<width$}", v, width = w)
+                    })
+                    .collect();
                 println!("{}", cells.join(" │ "));
             }
         }
@@ -1311,10 +1557,14 @@ async fn cmd_sql_network(
 
         // ── Merkle proof display ──────────────────────────────────────────
         if let Some(proof) = resp.get("proof").filter(|p| !p.is_null()) {
-            let root_hex  = proof["root_hex"].as_str().unwrap_or("");
+            let root_hex = proof["root_hex"].as_str().unwrap_or("");
             let leaf_count = proof["leaf_count"].as_u64().unwrap_or(0);
-            let verified   = proof["verified"].as_bool().unwrap_or(false);
-            let verified_str = if verified { "✓ verified" } else { "✗ FAILED" };
+            let verified = proof["verified"].as_bool().unwrap_or(false);
+            let verified_str = if verified {
+                "✓ verified"
+            } else {
+                "✗ FAILED"
+            };
             println!("   Merkle proof : {} ({} leaves)", verified_str, leaf_count);
             if !root_hex.is_empty() {
                 println!("   Merkle root  : {}", &root_hex[..root_hex.len().min(32)]);
@@ -1337,20 +1587,33 @@ async fn cmd_sql_network(
         let stdin = std::io::stdin();
         let mut line = String::new();
         loop {
-            let prompt = if expanded { "vledger (expanded)> " } else { "vledger> " };
+            let prompt = if expanded {
+                "vledger (expanded)> "
+            } else {
+                "vledger> "
+            };
             print!("{prompt}");
             use std::io::Write;
             let _ = std::io::stdout().flush();
             line.clear();
-            if stdin.read_line(&mut line).unwrap_or(0) == 0 { break; }
+            if stdin.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
             let trimmed = line.trim().to_string();
-            if trimmed.is_empty() { continue; }
-            if trimmed == "exit" || trimmed == "\\q" { break; }
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed == "exit" || trimmed == "\\q" {
+                break;
+            }
 
             // Handle REPL meta-commands (no server round-trip needed).
             if trimmed == "\\x" {
                 expanded = !expanded;
-                println!("Expanded display is {}.", if expanded { "on" } else { "off" });
+                println!(
+                    "Expanded display is {}.",
+                    if expanded { "on" } else { "off" }
+                );
                 println!();
                 continue;
             }
@@ -1364,8 +1627,11 @@ async fn cmd_sql_network(
             }
 
             let req = serde_json::json!({ "sql": trimmed, "token": token });
-            if let Err(e) = write_half.write_all(format!("{}\n", req).as_bytes()).await
-                .and(write_half.flush().await) {
+            if let Err(e) = write_half
+                .write_all(format!("{}\n", req).as_bytes())
+                .await
+                .and(write_half.flush().await)
+            {
                 eprintln!("Connection error: {e}");
                 break;
             }
@@ -1373,11 +1639,17 @@ async fn cmd_sql_network(
                 Ok(Some(resp_line)) => {
                     match serde_json::from_str::<serde_json::Value>(&resp_line) {
                         Ok(resp) => print_response(&resp, expanded),
-                        Err(e)   => eprintln!("Bad response: {e}"),
+                        Err(e) => eprintln!("Bad response: {e}"),
                     }
                 }
-                Ok(None) => { eprintln!("Server closed connection."); break; }
-                Err(e)   => { eprintln!("Read error: {e}"); break; }
+                Ok(None) => {
+                    eprintln!("Server closed connection.");
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("Read error: {e}");
+                    break;
+                }
             }
         }
     }
@@ -1403,7 +1675,8 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyCert 
         _server_name: &tokio_rustls::rustls::pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
         _now: tokio_rustls::rustls::pki_types::UnixTime,
-    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error> {
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
+    {
         Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
     }
 
@@ -1412,7 +1685,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyCert 
         _message: &[u8],
         _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -1421,7 +1697,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyCert 
         _message: &[u8],
         _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -1476,8 +1755,8 @@ fn resolve_password(password: Option<&str>) -> String {
 
 async fn cmd_backup_verify(
     data_dir: &PathBuf,
-    from:     &std::path::Path,
-    decrypt:  bool,
+    from: &std::path::Path,
+    decrypt: bool,
 ) -> Result<()> {
     if !from.exists() {
         anyhow::bail!("Archive not found: {}", from.display());
@@ -1493,12 +1772,16 @@ async fn cmd_backup_verify(
                     Ok(provider) => match provider.load_master_key().await {
                         Ok(raw_key) => Some(vledger_crypto::kdf::MasterKey::from_bytes(*raw_key)),
                         Err(e) => {
-                            eprintln!("⚠  Could not load master key ({e}) — verifying manifest only.");
+                            eprintln!(
+                                "⚠  Could not load master key ({e}) — verifying manifest only."
+                            );
                             None
                         }
                     },
                     Err(e) => {
-                        eprintln!("⚠  Could not build key provider ({e}) — verifying manifest only.");
+                        eprintln!(
+                            "⚠  Could not build key provider ({e}) — verifying manifest only."
+                        );
                         None
                     }
                 },
@@ -1592,7 +1875,9 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction, ca_cert: Option<&str>)
         if std::net::TcpStream::connect_timeout(
             &addr.parse().unwrap(),
             std::time::Duration::from_millis(200),
-        ).is_ok() {
+        )
+        .is_ok()
+        {
             Some(addr.to_string())
         } else {
             None
@@ -1611,32 +1896,47 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction, ca_cert: Option<&str>)
             data_dir.display()
         );
     }
-    let store = vledger_server::UserStore::open(&catalog_dir)
-        .context("Failed to open user store")?;
+    let store =
+        vledger_server::UserStore::open(&catalog_dir).context("Failed to open user store")?;
 
     match action {
-        UserAction::SetPassword { username, new_password } => {
+        UserAction::SetPassword {
+            username,
+            new_password,
+        } => {
             let target = username.unwrap_or_else(|| resolve_username(None));
             let new_pw = new_password.unwrap_or_else(|| {
                 let pw1 = prompt_new_password("New password: ");
                 let pw2 = prompt_new_password("Confirm password: ");
-                if pw1 != pw2 { eprintln!("Passwords do not match."); std::process::exit(1); }
+                if pw1 != pw2 {
+                    eprintln!("Passwords do not match.");
+                    std::process::exit(1);
+                }
                 pw1
             });
-            store.set_password(&target, &new_pw)
+            store
+                .set_password(&target, &new_pw)
                 .with_context(|| format!("Failed to set password for '{target}'"))?;
             println!("✓ Password updated for '{target}'.");
         }
-        UserAction::Create { username, role, password } => {
-            let role_parsed: vledger_server::auth::Role = role.parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
+        UserAction::Create {
+            username,
+            role,
+            password,
+        } => {
+            let role_parsed: vledger_server::auth::Role =
+                role.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let pw = password.unwrap_or_else(|| {
                 let pw1 = prompt_new_password("Password: ");
                 let pw2 = prompt_new_password("Confirm password: ");
-                if pw1 != pw2 { eprintln!("Passwords do not match."); std::process::exit(1); }
+                if pw1 != pw2 {
+                    eprintln!("Passwords do not match.");
+                    std::process::exit(1);
+                }
                 pw1
             });
-            store.create_user(&username, &pw, role_parsed, None)
+            store
+                .create_user(&username, &pw, role_parsed, None)
                 .with_context(|| format!("Failed to create user '{username}'"))?;
             println!("✓ User '{username}' created with role '{role}'.");
         }
@@ -1650,13 +1950,15 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction, ca_cert: Option<&str>)
             }
         }
         UserAction::SetEnabled { username, enabled } => {
-            store.set_enabled(&username, enabled)
+            store
+                .set_enabled(&username, enabled)
                 .with_context(|| format!("Failed to update '{username}'"))?;
             let state = if enabled { "enabled" } else { "disabled" };
             println!("✓ User '{username}' {state}.");
         }
         UserAction::Delete { username } => {
-            store.delete_user(&username)
+            store
+                .delete_user(&username)
                 .with_context(|| format!("Failed to delete '{username}'"))?;
             println!("✓ User '{username}' deleted.");
         }
@@ -1667,13 +1969,17 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction, ca_cert: Option<&str>)
 /// Send a user management command to a running server over TLS.
 async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio_rustls::rustls::pki_types::ServerName;
     use tokio_rustls::rustls::ClientConfig;
     use tokio_rustls::TlsConnector;
-    use tokio_rustls::rustls::pki_types::ServerName;
 
     // Fix #1: same CA-cert / loopback logic as cmd_sql_network.
     let host_part = addr.split(':').next().unwrap_or("127.0.0.1");
-    let port: u16 = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
+    let port: u16 = addr
+        .split(':')
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(5433);
 
     let is_loopback = host_part == "127.0.0.1"
         || host_part == "::1"
@@ -1684,7 +1990,8 @@ async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>)
             .with_context(|| format!("Cannot read CA certificate: {ca_path}"))?;
         let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
         for cert in rustls_pemfile::certs(&mut ca_pem.as_slice()) {
-            root_store.add(cert.context("Invalid CA certificate DER")?)
+            root_store
+                .add(cert.context("Invalid CA certificate DER")?)
                 .context("Failed to add CA certificate to root store")?;
         }
         ClientConfig::builder()
@@ -1715,7 +2022,10 @@ async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>)
     // Collect the new password / other interactive prompts BEFORE opening
     // the TLS connection so the terminal is clean.
     let admin_cmd = match action {
-        UserAction::SetPassword { username: target, new_password } => {
+        UserAction::SetPassword {
+            username: target,
+            new_password,
+        } => {
             let target = target.unwrap_or_else(|| {
                 use std::io::Write;
                 print!("Username to change: ");
@@ -1727,35 +2037,50 @@ async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>)
             let new_pw = new_password.unwrap_or_else(|| {
                 let pw1 = prompt_new_password("New password: ");
                 let pw2 = prompt_new_password("Confirm password: ");
-                if pw1 != pw2 { eprintln!("Passwords do not match."); std::process::exit(1); }
+                if pw1 != pw2 {
+                    eprintln!("Passwords do not match.");
+                    std::process::exit(1);
+                }
                 pw1
             });
             serde_json::json!({ "op": "set_password", "username": target, "new_password": new_pw })
         }
-        UserAction::Create { username: target, role, password } => {
+        UserAction::Create {
+            username: target,
+            role,
+            password,
+        } => {
             let pw = password.unwrap_or_else(|| {
                 let pw1 = prompt_new_password("Password: ");
                 let pw2 = prompt_new_password("Confirm password: ");
-                if pw1 != pw2 { eprintln!("Passwords do not match."); std::process::exit(1); }
+                if pw1 != pw2 {
+                    eprintln!("Passwords do not match.");
+                    std::process::exit(1);
+                }
                 pw1
             });
             serde_json::json!({ "op": "create_user", "username": target, "password": pw, "role": role })
         }
-        UserAction::List =>
-            serde_json::json!({ "op": "list_users" }),
-        UserAction::SetEnabled { username: target, enabled } =>
-            serde_json::json!({ "op": "set_enabled", "username": target, "enabled": enabled }),
-        UserAction::Delete { username: target } =>
-            serde_json::json!({ "op": "delete_user", "username": target }),
+        UserAction::List => serde_json::json!({ "op": "list_users" }),
+        UserAction::SetEnabled {
+            username: target,
+            enabled,
+        } => serde_json::json!({ "op": "set_enabled", "username": target, "enabled": enabled }),
+        UserAction::Delete { username: target } => {
+            serde_json::json!({ "op": "delete_user", "username": target })
+        }
     };
 
     // Connect.
     let connector = TlsConnector::from(std::sync::Arc::new(tls_config));
-    let tcp = tokio::net::TcpStream::connect((host_part, port)).await
+    let tcp = tokio::net::TcpStream::connect((host_part, port))
+        .await
         .with_context(|| format!("Cannot connect to server at {addr}"))?;
     let server_name = ServerName::try_from(host_part.to_string())
         .map_err(|_| anyhow::anyhow!("Invalid hostname: {host_part}"))?;
-    let tls = connector.connect(server_name, tcp).await
+    let tls = connector
+        .connect(server_name, tcp)
+        .await
         .context("TLS handshake failed")?;
 
     let (read_half, mut write_half) = tokio::io::split(tls);
@@ -1763,26 +2088,37 @@ async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>)
 
     // Authenticate first.
     let auth_req = serde_json::json!({ "auth": { "username": username, "password": password } });
-    write_half.write_all(format!("{}\n", auth_req).as_bytes()).await?;
+    write_half
+        .write_all(format!("{}\n", auth_req).as_bytes())
+        .await?;
     write_half.flush().await?;
 
-    let auth_line = lines.next_line().await?
+    let auth_line = lines
+        .next_line()
+        .await?
         .ok_or_else(|| anyhow::anyhow!("Server closed connection during auth"))?;
     let auth_resp: serde_json::Value = serde_json::from_str(&auth_line)?;
     if !auth_resp["ok"].as_bool().unwrap_or(false) {
-        anyhow::bail!("Authentication failed: {}",
-            auth_resp["error"].as_str().unwrap_or("unknown"));
+        anyhow::bail!(
+            "Authentication failed: {}",
+            auth_resp["error"].as_str().unwrap_or("unknown")
+        );
     }
-    let token = auth_resp["token"].as_str()
+    let token = auth_resp["token"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("No token in auth response"))?
         .to_string();
 
     // Send the admin command.
     let req = serde_json::json!({ "token": token, "admin": admin_cmd });
-    write_half.write_all(format!("{}\n", req).as_bytes()).await?;
+    write_half
+        .write_all(format!("{}\n", req).as_bytes())
+        .await?;
     write_half.flush().await?;
 
-    let resp_line = lines.next_line().await?
+    let resp_line = lines
+        .next_line()
+        .await?
         .ok_or_else(|| anyhow::anyhow!("Server closed connection"))?;
     let resp: serde_json::Value = serde_json::from_str(&resp_line)?;
 
@@ -1793,21 +2129,35 @@ async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>)
     // Print list output if present.
     if let Some(rows) = resp["rows"].as_array() {
         if !rows.is_empty() {
-            let cols: Vec<&str> = resp["columns"].as_array()
+            let cols: Vec<&str> = resp["columns"]
+                .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
             if !cols.is_empty() {
-                println!("{:<20} {:<12} {}", cols[0], cols.get(1).unwrap_or(&""), cols.get(2).unwrap_or(&""));
+                println!(
+                    "{:<20} {:<12} {}",
+                    cols[0],
+                    cols.get(1).unwrap_or(&""),
+                    cols.get(2).unwrap_or(&"")
+                );
                 println!("{}", "-".repeat(40));
             }
             for row in rows {
                 if let Some(vals) = row.as_array() {
-                    let v: Vec<String> = vals.iter()
-                        .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                    let v: Vec<String> = vals
+                        .iter()
+                        .map(|v| {
+                            v.as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| v.to_string())
+                        })
                         .collect();
-                    println!("{:<20} {:<12} {}", v.get(0).map(|s| s.as_str()).unwrap_or(""),
-                             v.get(1).map(|s| s.as_str()).unwrap_or(""),
-                             v.get(2).map(|s| s.as_str()).unwrap_or(""));
+                    println!(
+                        "{:<20} {:<12} {}",
+                        v.get(0).map(|s| s.as_str()).unwrap_or(""),
+                        v.get(1).map(|s| s.as_str()).unwrap_or(""),
+                        v.get(2).map(|s| s.as_str()).unwrap_or("")
+                    );
                 }
             }
         }
@@ -1828,9 +2178,7 @@ async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>)
 #[cfg(windows)]
 fn suppress_echo_windows<F: FnOnce() -> String>(f: F) -> String {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::Console::{
-        GetConsoleMode, SetConsoleMode, ENABLE_ECHO_INPUT,
-    };
+    use windows_sys::Win32::System::Console::{GetConsoleMode, SetConsoleMode, ENABLE_ECHO_INPUT};
 
     let handle = std::io::stdin().as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
     let mut orig_mode: u32 = 0;
@@ -1864,7 +2212,9 @@ fn prompt_new_password(prompt: &str) -> String {
             termios.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
             unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
             Some(orig)
-        } else { None };
+        } else {
+            None
+        };
         let mut pw = String::new();
         let _ = std::io::stdin().read_line(&mut pw);
         println!();
@@ -1892,25 +2242,34 @@ fn prompt_new_password(prompt: &str) -> String {
 
 /// Execute one SQL statement with full privilege enforcement.
 fn run_sql_authenticated(
-    ledger:  &mut vledger_ledger::LedgerStore,
-    sql:     &str,
+    ledger: &mut vledger_ledger::LedgerStore,
+    sql: &str,
     session: &vledger_server::auth::Session,
 ) -> Result<()> {
-    use vledger_sql::{executor::Executor, parser::parse_one, planner::LogicalPlanBuilder};
     use vledger_server::auth::check_plan_privilege;
+    use vledger_sql::{executor::Executor, parser::parse_one, planner::LogicalPlanBuilder};
 
     let stmt = parse_one(sql).map_err(|e| anyhow::anyhow!("Parse error: {e}"))?;
     let plan = LogicalPlanBuilder::plan(stmt).map_err(|e| anyhow::anyhow!("Plan error: {e}"))?;
 
     // Enforce RBAC on the resolved LogicalPlan — identical to the network path.
-    check_plan_privilege(session, &plan)
-        .map_err(|e| anyhow::anyhow!("Permission denied: {e}"))?;
+    check_plan_privilege(session, &plan).map_err(|e| anyhow::anyhow!("Permission denied: {e}"))?;
 
     match Executor::with_proofs(ledger).execute(plan) {
         Err(e) => eprintln!("Error: {e}"),
         Ok(result) => {
             println!("{}", result.columns.join(" | "));
-            println!("{}", "-".repeat(result.columns.iter().map(|c| c.len() + 3).sum::<usize>().max(40)));
+            println!(
+                "{}",
+                "-".repeat(
+                    result
+                        .columns
+                        .iter()
+                        .map(|c| c.len() + 3)
+                        .sum::<usize>()
+                        .max(40)
+                )
+            );
             for row in &result.rows {
                 let vals: Vec<String> = row.values.iter().map(|v| v.to_string()).collect();
                 println!("{}", vals.join(" | "));
@@ -1918,7 +2277,11 @@ fn run_sql_authenticated(
             println!(
                 "── {} | {}",
                 result.message,
-                if result.proof.is_some() { "proof attached ✓" } else { "no proof" }
+                if result.proof.is_some() {
+                    "proof attached ✓"
+                } else {
+                    "no proof"
+                }
             );
             if let Some(ref proof) = result.proof {
                 println!("   Merkle root : {}", &hex::encode(proof.root)[..16]);
@@ -1988,7 +2351,10 @@ async fn cmd_self_test() -> Result<()> {
     // ── 1. Crypto primitives ────────────────────────────────────────────────
     print!("  [1/7] Hash chain             ... ");
     {
-        use vledger_crypto::{hash::{ChainEntry, verify_chain}, ZERO_HASH};
+        use vledger_crypto::{
+            hash::{verify_chain, ChainEntry},
+            ZERO_HASH,
+        };
         let e1 = ChainEntry::new(1, &ZERO_HASH, b"entry one");
         let e2 = ChainEntry::new(2, &e1.chain_hash, b"entry two");
         verify_chain(&[e1, e2]).unwrap();
@@ -1997,7 +2363,7 @@ async fn cmd_self_test() -> Result<()> {
 
     print!("  [2/7] AES-256-GCM encryption ... ");
     {
-        use vledger_crypto::encrypt::{EncryptionKey, encrypt, decrypt};
+        use vledger_crypto::encrypt::{decrypt, encrypt, EncryptionKey};
         let k = EncryptionKey::generate();
         let ct = encrypt(&k, b"secret financial row", Some(b"table=1")).unwrap();
         let pt = decrypt(&k, &ct, Some(b"table=1")).unwrap();
@@ -2019,7 +2385,9 @@ async fn cmd_self_test() -> Result<()> {
     print!("  [4/7] WAL-backed ledger      ... ");
     {
         use tempfile::TempDir;
-        use vledger_ledger::{Account, AccountType, Amount, LedgerStore, entry::JournalEntryBuilder};
+        use vledger_ledger::{
+            entry::JournalEntryBuilder, Account, AccountType, Amount, LedgerStore,
+        };
         let dir = TempDir::new().unwrap();
         let data = dir.path();
         std::fs::create_dir_all(data.join("wal")).unwrap();
@@ -2027,10 +2395,29 @@ async fn cmd_self_test() -> Result<()> {
 
         let (cash_id, rev_id) = {
             let mut store = LedgerStore::open(data).unwrap();
-            let cash = store.create_account(Account::new("CASH","Cash",AccountType::Asset,"USD","test")).unwrap();
-            let rev  = store.create_account(Account::new("REV","Revenue",AccountType::Income,"USD","test")).unwrap();
-            let amt  = Amount::new(50_000).unwrap();
-            let e = JournalEntryBuilder::new("Sale","test").debit(cash,amt,"USD").credit(rev,amt,"USD").build();
+            let cash = store
+                .create_account(Account::new(
+                    "CASH",
+                    "Cash",
+                    AccountType::Asset,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let rev = store
+                .create_account(Account::new(
+                    "REV",
+                    "Revenue",
+                    AccountType::Income,
+                    "USD",
+                    "test",
+                ))
+                .unwrap();
+            let amt = Amount::new(50_000).unwrap();
+            let e = JournalEntryBuilder::new("Sale", "test")
+                .debit(cash, amt, "USD")
+                .credit(rev, amt, "USD")
+                .build();
             store.post_entry(e).unwrap();
             (cash, rev)
         };
@@ -2038,7 +2425,7 @@ async fn cmd_self_test() -> Result<()> {
         // Reopen — WAL replay
         let store2 = LedgerStore::open(data).unwrap();
         assert_eq!(store2.balance(&cash_id), 50_000);
-        assert_eq!(store2.balance(&rev_id),  50_000);
+        assert_eq!(store2.balance(&rev_id), 50_000);
         store2.verify_chain_integrity().unwrap();
     }
     println!("✓");
@@ -2066,7 +2453,9 @@ async fn cmd_self_test() -> Result<()> {
     {
         use tempfile::TempDir;
         use vledger_ledger::LedgerStore;
-        use vledger_sql::{executor::Executor, parser::parse_one, planner::LogicalPlanBuilder, result::Value};
+        use vledger_sql::{
+            executor::Executor, parser::parse_one, planner::LogicalPlanBuilder, result::Value,
+        };
 
         let dir = TempDir::new().unwrap();
         let data = dir.path();
@@ -2154,7 +2543,6 @@ async fn cmd_self_test() -> Result<()> {
     Ok(())
 }
 
-
 // ── backup ────────────────────────────────────────────────────────────────────
 
 async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Result<()> {
@@ -2187,15 +2575,19 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
                         let master = vledger_crypto::kdf::MasterKey::from_bytes(*raw_key);
                         println!("  Encryption : AES-256-GCM (master key loaded)");
                         match &audit_log {
-                            Some(log) => backup::create_backup_encrypted_audited(data_dir, &out_path, &master, log)?,
-                            None      => backup::create_backup_encrypted(data_dir, &out_path, &master)?,
+                            Some(log) => backup::create_backup_encrypted_audited(
+                                data_dir, &out_path, &master, log,
+                            )?,
+                            None => backup::create_backup_encrypted(data_dir, &out_path, &master)?,
                         }
                     }
                     Err(e) => {
-                        eprintln!("⚠  Could not load master key ({e}). Backup will be UNENCRYPTED.");
+                        eprintln!(
+                            "⚠  Could not load master key ({e}). Backup will be UNENCRYPTED."
+                        );
                         match &audit_log {
                             Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
-                            None      => backup::create_backup(data_dir, &out_path)?,
+                            None => backup::create_backup(data_dir, &out_path)?,
                         }
                     }
                 },
@@ -2203,7 +2595,7 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
                     eprintln!("⚠  Could not build key provider ({e}). Backup will be UNENCRYPTED.");
                     match &audit_log {
                         Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
-                        None      => backup::create_backup(data_dir, &out_path)?,
+                        None => backup::create_backup(data_dir, &out_path)?,
                     }
                 }
             },
@@ -2211,7 +2603,7 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
                 eprintln!("⚠  Could not read key_source.json ({e}). Backup will be UNENCRYPTED.");
                 match &audit_log {
                     Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
-                    None      => backup::create_backup(data_dir, &out_path)?,
+                    None => backup::create_backup(data_dir, &out_path)?,
                 }
             }
         }
@@ -2219,13 +2611,16 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
         eprintln!("⚠  key_source.json not found. Backup will be UNENCRYPTED.");
         match &audit_log {
             Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
-            None      => backup::create_backup(data_dir, &out_path)?,
+            None => backup::create_backup(data_dir, &out_path)?,
         }
     };
 
     println!("  Archive   : {}", out_path.display());
     if manifest.encrypted {
-        println!("  Key sidecar: {}.key  (keep alongside archive for restore)", out_path.display());
+        println!(
+            "  Key sidecar: {}.key  (keep alongside archive for restore)",
+            out_path.display()
+        );
     }
     println!("  Files     : {}", manifest.files.len());
     println!("  Created   : {}", manifest.created_at_rfc);
@@ -2237,10 +2632,10 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
 // ── restore ───────────────────────────────────────────────────────────────────
 
 async fn cmd_restore(
-    from:     &std::path::Path,
-    target:   Option<&std::path::Path>,
+    from: &std::path::Path,
+    target: Option<&std::path::Path>,
     data_dir: &PathBuf,
-    force:    bool,
+    force: bool,
 ) -> Result<()> {
     let target = target
         .map(|p| p.to_path_buf())
@@ -2256,28 +2651,32 @@ async fn cmd_restore(
     let keys_dir = data_dir.join("keys");
     let manifest = if key_source_path.exists() {
         match vledger_secrets::KeySourceConfig::from_file(&key_source_path) {
-            Ok(cfg) => match vledger_secrets::build_provider(&cfg, Some(&keys_dir)) {
-                Ok(provider) => match provider.load_master_key().await {
-                    Ok(raw_key) => {
-                        let master = vledger_crypto::kdf::MasterKey::from_bytes(*raw_key);
-                        // Try encrypted restore; if the archive is not
-                        // encrypted the inner code will still work because
-                        // restore_backup_encrypted falls through to plaintext
-                        // when manifest.encrypted = false.
-                        backup::restore_backup_encrypted(from, &target, force, &master)?
-                    }
+            Ok(cfg) => {
+                match vledger_secrets::build_provider(&cfg, Some(&keys_dir)) {
+                    Ok(provider) => match provider.load_master_key().await {
+                        Ok(raw_key) => {
+                            let master = vledger_crypto::kdf::MasterKey::from_bytes(*raw_key);
+                            // Try encrypted restore; if the archive is not
+                            // encrypted the inner code will still work because
+                            // restore_backup_encrypted falls through to plaintext
+                            // when manifest.encrypted = false.
+                            backup::restore_backup_encrypted(from, &target, force, &master)?
+                        }
+                        Err(e) => {
+                            eprintln!("⚠  Could not load master key ({e}). Attempting unencrypted restore.");
+                            backup::restore_backup(from, &target, force)?
+                        }
+                    },
                     Err(e) => {
-                        eprintln!("⚠  Could not load master key ({e}). Attempting unencrypted restore.");
+                        eprintln!("⚠  Could not build key provider ({e}). Attempting unencrypted restore.");
                         backup::restore_backup(from, &target, force)?
                     }
-                },
-                Err(e) => {
-                    eprintln!("⚠  Could not build key provider ({e}). Attempting unencrypted restore.");
-                    backup::restore_backup(from, &target, force)?
                 }
-            },
+            }
             Err(e) => {
-                eprintln!("⚠  Could not read key_source.json ({e}). Attempting unencrypted restore.");
+                eprintln!(
+                    "⚠  Could not read key_source.json ({e}). Attempting unencrypted restore."
+                );
                 backup::restore_backup(from, &target, force)?
             }
         }
@@ -2296,14 +2695,14 @@ async fn cmd_restore(
 // ── rotate-keys ───────────────────────────────────────────────────────────────
 
 async fn cmd_rotate_keys(
-    data_dir:          &PathBuf,
-    hsm_socket:        Option<&str>,
-    caller_id:         &str,
-    pyhsm_endpoint:    Option<&str>,
-    pyhsm_ca_cert:     Option<&str>,
+    data_dir: &PathBuf,
+    hsm_socket: Option<&str>,
+    caller_id: &str,
+    pyhsm_endpoint: Option<&str>,
+    pyhsm_ca_cert: Option<&str>,
     pyhsm_client_cert: Option<&str>,
-    pyhsm_client_key:  Option<&str>,
-    pyhsm_timeout_ms:  u64,
+    pyhsm_client_key: Option<&str>,
+    pyhsm_timeout_ms: u64,
     pyhsm_max_retries: u32,
 ) -> Result<()> {
     if !data_dir.exists() {
@@ -2313,7 +2712,8 @@ async fn cmd_rotate_keys(
     // Key rotation requires HSM access — Enterprise-only feature.
     {
         let license = vledger_license::LicenseStore::load_or_free(data_dir);
-        license.require_feature(vledger_license::Feature::Hsm)
+        license
+            .require_feature(vledger_license::Feature::Hsm)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     println!("── VectorLedger Key Rotation ───────────────────");
@@ -2327,7 +2727,8 @@ async fn cmd_rotate_keys(
         pyhsm_client_key,
         pyhsm_timeout_ms,
         pyhsm_max_retries,
-    ).await?;
+    )
+    .await?;
     if rotated.is_empty() {
         println!("  No keys rotated (HSM may not be running or no keys found)");
     } else {
@@ -2344,10 +2745,10 @@ async fn cmd_rotate_keys(
 
 async fn cmd_audit_export(
     data_dir: &PathBuf,
-    format:   &str,
-    output:   Option<&std::path::Path>,
-    from:     Option<&str>,
-    to:       Option<&str>,
+    format: &str,
+    output: Option<&std::path::Path>,
+    from: Option<&str>,
+    to: Option<&str>,
 ) -> Result<()> {
     use vledger_audit::export::{export_csv, export_json, TimeRange};
 
@@ -2381,13 +2782,19 @@ async fn cmd_audit_export(
 
     // Parse date range
     let range = {
-        let from_dt = from.map(|s| chrono::DateTime::parse_from_rfc3339(s)
-            .map(|d| d.with_timezone(&chrono::Utc))
-            .context("Invalid --from date (use RFC 3339)"))
+        let from_dt = from
+            .map(|s| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .context("Invalid --from date (use RFC 3339)")
+            })
             .transpose()?;
-        let to_dt = to.map(|s| chrono::DateTime::parse_from_rfc3339(s)
-            .map(|d| d.with_timezone(&chrono::Utc))
-            .context("Invalid --to date (use RFC 3339)"))
+        let to_dt = to
+            .map(|s| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .context("Invalid --to date (use RFC 3339)")
+            })
             .transpose()?;
 
         // Apply tier cap: compute the earliest `from` this tier is allowed.
@@ -2418,8 +2825,8 @@ async fn cmd_audit_export(
 
         match (effective_from, to_dt) {
             (Some(f), Some(t)) => TimeRange::new(f, t),
-            (Some(f), None)    => TimeRange::new(f, chrono::Utc::now()),
-            _                  => TimeRange::all(),
+            (Some(f), None) => TimeRange::new(f, chrono::Utc::now()),
+            _ => TimeRange::all(),
         }
     };
 
@@ -2427,15 +2834,15 @@ async fn cmd_audit_export(
         let mut file = std::fs::File::create(out_path)
             .with_context(|| format!("Cannot create output file: {}", out_path.display()))?;
         match format {
-            "csv"  => export_csv(&log_path, &range, &mut file)?,
-            _      => export_json(&log_path, &range, &mut file)?,
+            "csv" => export_csv(&log_path, &range, &mut file)?,
+            _ => export_json(&log_path, &range, &mut file)?,
         }
     } else {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         match format {
-            "csv"  => export_csv(&log_path, &range, &mut out)?,
-            _      => export_json(&log_path, &range, &mut out)?,
+            "csv" => export_csv(&log_path, &range, &mut out)?,
+            _ => export_json(&log_path, &range, &mut out)?,
         }
     };
 
@@ -2446,31 +2853,33 @@ async fn cmd_audit_export(
 // ── compliance-report ─────────────────────────────────────────────────────────
 
 async fn cmd_compliance_report(
-    data_dir:  &PathBuf,
-    standard:  &str,
-    format:    &str,
-    output:    Option<&std::path::Path>,
+    data_dir: &PathBuf,
+    standard: &str,
+    format: &str,
+    output: Option<&std::path::Path>,
 ) -> Result<()> {
     use vledger_compliance::{ComplianceEngine, ComplianceStandard, ReportDateRange};
 
     // ── License check ─────────────────────────────────────────────────────
     let license = vledger_license::LicenseStore::load_or_free(data_dir);
-    license.require_feature(vledger_license::Feature::ComplianceReport)
+    license
+        .require_feature(vledger_license::Feature::ComplianceReport)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let std_enum = match standard.to_lowercase().as_str() {
         "soc2" | "soc-2" => ComplianceStandard::Soc2,
-        "pci"  | "pci-dss" | "pcidss" => ComplianceStandard::PciDss,
+        "pci" | "pci-dss" | "pcidss" => ComplianceStandard::PciDss,
         other => anyhow::bail!("Unknown standard '{other}' — use: soc2 or pci-dss"),
     };
 
     let engine = ComplianceEngine::new(data_dir.clone());
-    let report = engine.generate_report(std_enum, ReportDateRange::last_90_days())
+    let report = engine
+        .generate_report(std_enum, ReportDateRange::last_90_days())
         .context("Failed to generate compliance report")?;
 
     let content = match format.to_lowercase().as_str() {
         "json" => report.to_json().context("Failed to serialise report")?,
-        _      => report.to_markdown(),
+        _ => report.to_markdown(),
     };
 
     if let Some(out_path) = output {
@@ -2484,7 +2893,6 @@ async fn cmd_compliance_report(
     Ok(())
 }
 
-
 // ── self-test-phase3 ──────────────────────────────────────────────────────────
 
 async fn cmd_self_test_phase3() -> Result<()> {
@@ -2494,24 +2902,34 @@ async fn cmd_self_test_phase3() -> Result<()> {
     print!("  [1/7] Audit log (WORM + chain)     ... ");
     {
         use tempfile::TempDir;
+        use vledger_audit::export::{export_csv, export_json, TimeRange};
         use vledger_audit::{AuditEventKind, AuditLog};
-        use vledger_audit::export::{export_json, export_csv, TimeRange};
 
         let dir = TempDir::new().unwrap();
         let log_path = dir.path().join("audit.log");
         let log = AuditLog::open(&log_path).unwrap();
 
         log.append(AuditEventKind::AuthEvent {
-            caller_id: "alice".into(), success: true, peer_addr: "127.0.0.1".into(),
-        }).unwrap();
+            caller_id: "alice".into(),
+            success: true,
+            peer_addr: "127.0.0.1".into(),
+        })
+        .unwrap();
         log.append(AuditEventKind::EntryPosted {
-            entry_id: vledger_ledger::entry::JournalEntryBuilder::new("x","x").build().id,
-            entry_sequence: 1, domain: "test".into(),
-            amount_sum: 50_000, caller_id: "alice".into(),
-        }).unwrap();
+            entry_id: vledger_ledger::entry::JournalEntryBuilder::new("x", "x")
+                .build()
+                .id,
+            entry_sequence: 1,
+            domain: "test".into(),
+            amount_sum: 50_000,
+            caller_id: "alice".into(),
+        })
+        .unwrap();
         log.append(AuditEventKind::KeyRotated {
-            key_id: "vledger.wal.signing".into(), caller_id: "admin".into(),
-        }).unwrap();
+            key_id: "vledger.wal.signing".into(),
+            caller_id: "admin".into(),
+        })
+        .unwrap();
 
         let count = log.verify_chain().unwrap();
         assert_eq!(count, 3);
@@ -2536,7 +2954,7 @@ async fn cmd_self_test_phase3() -> Result<()> {
         use tempfile::TempDir;
         use vledger_foureyes::FourEyesQueue;
 
-        let dir  = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let queue = FourEyesQueue::open(dir.path()).unwrap();
 
         let fake_entry = b"fake-journal-entry-payload";
@@ -2547,17 +2965,26 @@ async fn cmd_self_test_phase3() -> Result<()> {
         assert!(queue.approve(rec.id, "alice", |_| Ok(())).is_err());
 
         // Bob approves
-        let approved = queue.approve(rec.id, "bob", |bytes| {
-            assert_eq!(bytes, fake_entry);
-            Ok(())
-        }).unwrap();
+        let approved = queue
+            .approve(rec.id, "bob", |bytes| {
+                assert_eq!(bytes, fake_entry);
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(approved.approver_id.as_deref(), Some("bob"));
         assert_eq!(queue.list_pending().len(), 0);
 
         // Test rejection path
-        let rec2 = queue.submit(fake_entry, "Transfer", "test", "carol").unwrap();
-        let rejected = queue.reject(rec2.id, "dave", "Insufficient documentation").unwrap();
-        assert_eq!(rejected.reject_reason.as_deref(), Some("Insufficient documentation"));
+        let rec2 = queue
+            .submit(fake_entry, "Transfer", "test", "carol")
+            .unwrap();
+        let rejected = queue
+            .reject(rec2.id, "dave", "Insufficient documentation")
+            .unwrap();
+        assert_eq!(
+            rejected.reject_reason.as_deref(),
+            Some("Insufficient documentation")
+        );
         assert_eq!(queue.list_pending().len(), 0);
     }
     println!("✓");
@@ -2574,15 +3001,21 @@ async fn cmd_self_test_phase3() -> Result<()> {
         std::fs::create_dir_all(data.join("catalog")).unwrap();
         std::fs::create_dir_all(data.join("wal")).unwrap();
         std::fs::create_dir_all(data.join("pages")).unwrap();
-        std::fs::write(data.join("catalog").join("VERSION"), "vledger_version=0.1.0\n").unwrap();
+        std::fs::write(
+            data.join("catalog").join("VERSION"),
+            "vledger_version=0.1.0\n",
+        )
+        .unwrap();
 
         let engine = ComplianceEngine::new(data.to_path_buf());
-        let report = engine.generate_report(
-            ComplianceStandard::Soc2,
-            ReportDateRange::last_90_days(),
-        ).unwrap();
+        let report = engine
+            .generate_report(ComplianceStandard::Soc2, ReportDateRange::last_90_days())
+            .unwrap();
 
-        assert!(!report.evidence.is_empty(), "SOC 2 report must contain evidence");
+        assert!(
+            !report.evidence.is_empty(),
+            "SOC 2 report must contain evidence"
+        );
         let md = report.to_markdown();
         assert!(md.contains("Soc2"), "Markdown must contain standard name");
         let _json = report.to_json().unwrap();
@@ -2599,13 +3032,16 @@ async fn cmd_self_test_phase3() -> Result<()> {
         let data = dir.path();
         std::fs::create_dir_all(data.join("catalog")).unwrap();
         std::fs::create_dir_all(data.join("pages")).unwrap();
-        std::fs::write(data.join("catalog").join("VERSION"), "vledger_version=0.1.0\n").unwrap();
+        std::fs::write(
+            data.join("catalog").join("VERSION"),
+            "vledger_version=0.1.0\n",
+        )
+        .unwrap();
 
         let engine = ComplianceEngine::new(data.to_path_buf());
-        let report = engine.generate_report(
-            ComplianceStandard::PciDss,
-            ReportDateRange::last_year(),
-        ).unwrap();
+        let report = engine
+            .generate_report(ComplianceStandard::PciDss, ReportDateRange::last_year())
+            .unwrap();
         assert!(!report.evidence.is_empty());
     }
     println!("✓");
@@ -2623,8 +3059,16 @@ async fn cmd_self_test_phase3() -> Result<()> {
         std::fs::create_dir_all(data.join("catalog")).unwrap();
         std::fs::create_dir_all(data.join("audit")).unwrap();
         std::fs::create_dir_all(data.join("keys")).unwrap();
-        std::fs::write(data.join("catalog").join("VERSION"), "vledger_version=0.1.0\n").unwrap();
-        std::fs::write(data.join("wal").join("00000000000000000001.wal"), b"fake-wal-data").unwrap();
+        std::fs::write(
+            data.join("catalog").join("VERSION"),
+            "vledger_version=0.1.0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("wal").join("00000000000000000001.wal"),
+            b"fake-wal-data",
+        )
+        .unwrap();
         std::fs::write(data.join("keys").join("db_signing_pubkey.hex"), b"deadbeef").unwrap();
 
         let archive_dir = TempDir::new().unwrap();
@@ -2646,20 +3090,20 @@ async fn cmd_self_test_phase3() -> Result<()> {
     {
         use vledger_pgwire::*;
         // Verify all backend message builders produce valid framing
-        let auth    = messages::auth_ok();
+        let auth = messages::auth_ok();
         assert_eq!(auth[0], b'R');
-        let rd      = messages::row_description(&[messages::FieldDesc::text("balance")]);
+        let rd = messages::row_description(&[messages::FieldDesc::text("balance")]);
         assert_eq!(rd[0], b'T');
-        let dr      = messages::data_row(&[Some("99000".into())]);
+        let dr = messages::data_row(&[Some("99000".into())]);
         assert_eq!(dr[0], b'D');
-        let cc      = messages::command_complete("SELECT 1");
+        let cc = messages::command_complete("SELECT 1");
         assert_eq!(cc[0], b'C');
-        let rfq     = messages::ready_for_query(b'I');
+        let rfq = messages::ready_for_query(b'I');
         assert_eq!(rfq[0], b'Z');
-        let err     = messages::error_response("ERROR", "42601", "syntax error");
+        let err = messages::error_response("ERROR", "42601", "syntax error");
         assert_eq!(err[0], b'E');
         // Verify length fields are consistent (len field at bytes 1-4 = payload+4)
-        let cc_len  = u32::from_be_bytes([cc[1], cc[2], cc[3], cc[4]]) as usize;
+        let cc_len = u32::from_be_bytes([cc[1], cc[2], cc[3], cc[4]]) as usize;
         assert_eq!(cc_len, cc.len() - 1);
     }
     println!("✓");
@@ -2671,7 +3115,7 @@ async fn cmd_self_test_phase3() -> Result<()> {
         use vledger_ledger::LedgerStore;
         use vledger_sql::{executor::Executor, parser::parse_one, planner::LogicalPlanBuilder};
 
-        let dir  = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let data = dir.path();
         std::fs::create_dir_all(data.join("wal")).unwrap();
         std::fs::create_dir_all(data.join("pages")).unwrap();
@@ -2703,7 +3147,11 @@ async fn cmd_self_test_phase3() -> Result<()> {
         let stmt = parse_one(win_sql).unwrap();
         let plan = LogicalPlanBuilder::plan(stmt).unwrap();
         let result = Executor::new(&mut ledger).execute(plan).unwrap();
-        assert_eq!(result.rows.len(), 3, "Window function should return all rows");
+        assert_eq!(
+            result.rows.len(),
+            3,
+            "Window function should return all rows"
+        );
     }
     println!("✓");
 
@@ -2724,34 +3172,34 @@ async fn cmd_self_test_phase3() -> Result<()> {
     Ok(())
 }
 
-
 // ── start-primary ─────────────────────────────────────────────────────────────
 
 async fn cmd_start_primary(data_dir: &PathBuf, bind: Option<&str>) -> Result<()> {
     if !data_dir.exists() {
-        anyhow::bail!("Not initialised at: {} — run `vledger init` first.", data_dir.display());
+        anyhow::bail!(
+            "Not initialised at: {} — run `vledger init` first.",
+            data_dir.display()
+        );
     }
 
     // ── License check ─────────────────────────────────────────────────────
     let license = vledger_license::LicenseStore::load_or_free(data_dir);
-    license.require_feature(vledger_license::Feature::Replication)
+    license
+        .require_feature(vledger_license::Feature::Replication)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // ── Load or default config ─────────────────────────────────────────────
     let cfg_path = data_dir.join("replication.json");
     let mut cfg: vledger_replication::ReplicationConfig = if cfg_path.exists() {
-        let raw = std::fs::read_to_string(&cfg_path)
-            .context("Failed to read replication.json")?;
-        serde_json::from_str(&raw)
-            .context("Invalid replication.json — check the format")?
+        let raw = std::fs::read_to_string(&cfg_path).context("Failed to read replication.json")?;
+        serde_json::from_str(&raw).context("Invalid replication.json — check the format")?
     } else {
         // No file — write a sensible default so the operator has something
         // to customise, then proceed with that default.
         let default = vledger_replication::ReplicationConfig::default();
         let json = serde_json::to_string_pretty(&default)
             .context("Failed to serialise default replication config")?;
-        std::fs::write(&cfg_path, &json)
-            .context("Failed to write default replication.json")?;
+        std::fs::write(&cfg_path, &json).context("Failed to write default replication.json")?;
         eprintln!(
             "⚠  No replication.json found — wrote default config to {}.\n   \
              Review and adjust before deploying to production.",
@@ -2769,17 +3217,26 @@ async fn cmd_start_primary(data_dir: &PathBuf, bind: Option<&str>) -> Result<()>
     let shipper = vledger_replication::WalShipper::new(cfg.clone(), data_dir)
         .context("Failed to initialise WAL shipper")?;
 
-    shipper.listen_and_accept().await
+    shipper
+        .listen_and_accept()
+        .await
         .context("Failed to bind replication listener")?;
 
     println!("── VectorLedger Primary (WAL Shipper) ──────────────");
-    println!("  Replication : {} (TLS {})",
+    println!(
+        "  Replication : {} (TLS {})",
         cfg.replication_addr,
-        if cfg.tls.enabled { "enabled" } else { "disabled — dev only" },
+        if cfg.tls.enabled {
+            "enabled"
+        } else {
+            "disabled — dev only"
+        },
     );
     println!("  Hostname    : {}", cfg.tls.server_hostname);
-    println!("  Secret      : {}",
-        cfg.secret_path.as_deref()
+    println!(
+        "  Secret      : {}",
+        cfg.secret_path
+            .as_deref()
             .unwrap_or("replication_secret.hex (auto-generated in data dir)"),
     );
     println!(
@@ -2806,7 +3263,9 @@ async fn cmd_start_primary(data_dir: &PathBuf, bind: Option<&str>) -> Result<()>
                 _ = sigterm.recv() => {},
             }
             #[cfg(not(unix))]
-            { ctrl_c.await.ok(); }
+            {
+                ctrl_c.await.ok();
+            }
             token.cancel();
         });
     }
@@ -2834,21 +3293,23 @@ async fn cmd_start_primary(data_dir: &PathBuf, bind: Option<&str>) -> Result<()>
 
 async fn cmd_start_replica(data_dir: &PathBuf, primary: Option<&str>) -> Result<()> {
     if !data_dir.exists() {
-        anyhow::bail!("Not initialised at: {} — run `vledger init` first.", data_dir.display());
+        anyhow::bail!(
+            "Not initialised at: {} — run `vledger init` first.",
+            data_dir.display()
+        );
     }
 
     // ── License check ─────────────────────────────────────────────────────
     let license = vledger_license::LicenseStore::load_or_free(data_dir);
-    license.require_feature(vledger_license::Feature::Replication)
+    license
+        .require_feature(vledger_license::Feature::Replication)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // ── Load config ────────────────────────────────────────────────────────
     let cfg_path = data_dir.join("replication.json");
     let mut cfg: vledger_replication::ReplicationConfig = if cfg_path.exists() {
-        let raw = std::fs::read_to_string(&cfg_path)
-            .context("Failed to read replication.json")?;
-        serde_json::from_str(&raw)
-            .context("Invalid replication.json — check the format")?
+        let raw = std::fs::read_to_string(&cfg_path).context("Failed to read replication.json")?;
+        serde_json::from_str(&raw).context("Invalid replication.json — check the format")?
     } else {
         anyhow::bail!(
             "replication.json not found at {}.\n\
@@ -2870,8 +3331,7 @@ async fn cmd_start_replica(data_dir: &PathBuf, primary: Option<&str>) -> Result<
 
     // ── Ensure WAL directory exists ────────────────────────────────────────
     let wal_dir = data_dir.join("wal");
-    std::fs::create_dir_all(&wal_dir)
-        .context("Failed to create local WAL directory")?;
+    std::fs::create_dir_all(&wal_dir).context("Failed to create local WAL directory")?;
 
     // ── Construct receiver ─────────────────────────────────────────────────
     // The HMAC secret must already exist — it is not generated on the replica.
@@ -2888,8 +3348,13 @@ async fn cmd_start_replica(data_dir: &PathBuf, primary: Option<&str>) -> Result<
 
     println!("── VectorLedger Replica (WAL Receiver) ─────────────");
     println!("  Primary     : {}", cfg.replication_addr);
-    println!("  TLS         : {} (SNI: {})",
-        if cfg.tls.enabled { "enabled" } else { "disabled — dev only" },
+    println!(
+        "  TLS         : {} (SNI: {})",
+        if cfg.tls.enabled {
+            "enabled"
+        } else {
+            "disabled — dev only"
+        },
         cfg.tls.server_hostname,
     );
     println!("  Local WAL   : {}", wal_dir.display());
@@ -2912,7 +3377,9 @@ async fn cmd_start_replica(data_dir: &PathBuf, primary: Option<&str>) -> Result<
                 _ = sigterm.recv() => {},
             }
             #[cfg(not(unix))]
-            { ctrl_c.await.ok(); }
+            {
+                ctrl_c.await.ok();
+            }
             token.cancel();
         });
     }
@@ -2940,20 +3407,22 @@ async fn cmd_start_replica(data_dir: &PathBuf, primary: Option<&str>) -> Result<
     Ok(())
 }
 
-
 // ── audit-package ─────────────────────────────────────────────────────────────
 
 async fn cmd_audit_package(
-    data_dir:        &PathBuf,
-    output:          Option<&std::path::Path>,
+    data_dir: &PathBuf,
+    output: Option<&std::path::Path>,
     include_entries: bool,
-    tenant:          Option<String>,
-    description:     Option<String>,
-    period_start:    Option<String>,
-    period_end:      Option<String>,
+    tenant: Option<String>,
+    description: Option<String>,
+    period_start: Option<String>,
+    period_end: Option<String>,
 ) -> Result<()> {
     if !data_dir.exists() {
-        anyhow::bail!("Not initialised at: {} — run `vledger init` first.", data_dir.display());
+        anyhow::bail!(
+            "Not initialised at: {} — run `vledger init` first.",
+            data_dir.display()
+        );
     }
 
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
@@ -2964,10 +3433,27 @@ async fn cmd_audit_package(
 
     println!("── VectorLedger Audit Package ──────────────────");
     println!("  Data dir : {}", data_dir.display());
-    println!("  Mode     : {}", if include_entries { "full (entries + proofs)" } else { "commitment-only (fast)" });
-    if let Some(ref t) = tenant      { println!("  Tenant   : {t}"); }
-    if let Some(ref d) = description { println!("  Desc     : {d}"); }
-    if let Some(ref s) = period_start { println!("  Period   : {} → {}", s, period_end.as_deref().unwrap_or("?")); }
+    println!(
+        "  Mode     : {}",
+        if include_entries {
+            "full (entries + proofs)"
+        } else {
+            "commitment-only (fast)"
+        }
+    );
+    if let Some(ref t) = tenant {
+        println!("  Tenant   : {t}");
+    }
+    if let Some(ref d) = description {
+        println!("  Desc     : {d}");
+    }
+    if let Some(ref s) = period_start {
+        println!(
+            "  Period   : {} → {}",
+            s,
+            period_end.as_deref().unwrap_or("?")
+        );
+    }
 
     if include_entries {
         println!("  ⚠  --include-entries is slow for large ledgers. Use the default");
@@ -2985,9 +3471,22 @@ async fn cmd_audit_package(
         .context("Failed to generate audit package")?;
 
     println!("  Entries  : {}", report.entry_count);
-    println!("  Root     : {}", &report.root_hex[..report.root_hex.len().min(32)]);
-    println!("  Chain tip: {}", &report.chain_tip_hex[..report.chain_tip_hex.len().min(32)]);
-    println!("  Signed   : {}", if report.signed { "yes (Ed25519)" } else { "no (no signing key)" });
+    println!(
+        "  Root     : {}",
+        &report.root_hex[..report.root_hex.len().min(32)]
+    );
+    println!(
+        "  Chain tip: {}",
+        &report.chain_tip_hex[..report.chain_tip_hex.len().min(32)]
+    );
+    println!(
+        "  Signed   : {}",
+        if report.signed {
+            "yes (Ed25519)"
+        } else {
+            "no (no signing key)"
+        }
+    );
     println!("  Type     : {}", report.package_type);
     println!("  Output   : {}", report.output_path.display());
     println!("✓ Audit package generated");
@@ -2999,20 +3498,26 @@ async fn cmd_audit_package(
         println!("    --sequence <N>");
     }
     println!("  To verify:");
-    println!("  vledger verify-audit-package --file {}", report.output_path.display());
+    println!(
+        "  vledger verify-audit-package --file {}",
+        report.output_path.display()
+    );
     Ok(())
 }
 
 // ── audit-proof ───────────────────────────────────────────────────────────────
 
 async fn cmd_audit_proof(
-    data_dir:        &PathBuf,
+    data_dir: &PathBuf,
     commitment_file: &std::path::Path,
-    sequence:        u64,
-    output:          Option<&std::path::Path>,
+    sequence: u64,
+    output: Option<&std::path::Path>,
 ) -> Result<()> {
     if !data_dir.exists() {
-        anyhow::bail!("Not initialised at: {} — run `vledger init` first.", data_dir.display());
+        anyhow::bail!(
+            "Not initialised at: {} — run `vledger init` first.",
+            data_dir.display()
+        );
     }
     if !commitment_file.exists() {
         anyhow::bail!("Commitment file not found: {}", commitment_file.display());
@@ -3031,12 +3536,18 @@ async fn cmd_audit_proof(
         .context("Failed to generate entry proof")?;
 
     println!("  Entry ID   : {}", report.entry_id);
-    println!("  Root       : {}", &report.root_hex[..report.root_hex.len().min(32)]);
+    println!(
+        "  Root       : {}",
+        &report.root_hex[..report.root_hex.len().min(32)]
+    );
     println!("  Output     : {}", report.output_path.display());
     println!("✓ Entry proof generated");
     println!();
     println!("  Send this file to the auditor. They can verify it with:");
-    println!("  vledger verify-audit-package --file {}", report.output_path.display());
+    println!(
+        "  vledger verify-audit-package --file {}",
+        report.output_path.display()
+    );
     Ok(())
 }
 
@@ -3065,11 +3576,14 @@ async fn cmd_verify_audit_package(file: &std::path::Path) -> Result<()> {
     // Show checks relevant to the package type.
     match report.package_type.as_str() {
         "commitment" => {
-            println!("  [1/1] Root signature   {}", match report.sig_status {
-                audit_package::SigStatus::Valid   => "✓ verified",
-                audit_package::SigStatus::Invalid => "✗ FAILED",
-                audit_package::SigStatus::Absent  => "⚠  absent",
-            });
+            println!(
+                "  [1/1] Root signature   {}",
+                match report.sig_status {
+                    audit_package::SigStatus::Valid => "✓ verified",
+                    audit_package::SigStatus::Invalid => "✗ FAILED",
+                    audit_package::SigStatus::Absent => "⚠  absent",
+                }
+            );
         }
         "entry_proof" => {
             println!("  [1/3] Content hash     {}", mark(report.content_ok));
@@ -3081,30 +3595,47 @@ async fn cmd_verify_audit_package(file: &std::path::Path) -> Result<()> {
             println!("  [1/4] Content hashes   {}", mark(report.content_ok));
             println!("  [2/4] Chain linkage    {}", mark(report.chain_ok));
             println!("  [3/4] Merkle proofs    {}", mark(report.merkle_ok));
-            println!("  [4/4] Root signature   {}", match report.sig_status {
-                audit_package::SigStatus::Valid   => "✓ verified",
-                audit_package::SigStatus::Invalid => "✗ FAILED",
-                audit_package::SigStatus::Absent  => "⚠  absent",
-            });
+            println!(
+                "  [4/4] Root signature   {}",
+                match report.sig_status {
+                    audit_package::SigStatus::Valid => "✓ verified",
+                    audit_package::SigStatus::Invalid => "✗ FAILED",
+                    audit_package::SigStatus::Absent => "⚠  absent",
+                }
+            );
         }
     }
 
     println!();
 
     if report.passed {
-        println!("✓ INTEGRITY VERIFIED — {} entries, all checks passed.", report.entry_count);
+        println!(
+            "✓ INTEGRITY VERIFIED — {} entries, all checks passed.",
+            report.entry_count
+        );
         if !report.root_hex.is_empty() {
-            println!("  Merkle root : {}", &report.root_hex[..report.root_hex.len().min(32)]);
+            println!(
+                "  Merkle root : {}",
+                &report.root_hex[..report.root_hex.len().min(32)]
+            );
         }
         match report.sig_status {
             audit_package::SigStatus::Valid => {
                 println!();
                 println!("✓ AUTHENTICITY VERIFIED");
                 println!("  Tenant      : {}", report.tenant);
-                println!("  Period      : {} → {}", report.period_start, report.period_end);
-                println!("  Entries     : {} (seq {} → {})",
-                    report.entry_count, report.first_sequence, report.last_sequence);
-                println!("  Signing key : {}", &report.signing_pubkey[..report.signing_pubkey.len().min(32)]);
+                println!(
+                    "  Period      : {} → {}",
+                    report.period_start, report.period_end
+                );
+                println!(
+                    "  Entries     : {} (seq {} → {})",
+                    report.entry_count, report.first_sequence, report.last_sequence
+                );
+                println!(
+                    "  Signing key : {}",
+                    &report.signing_pubkey[..report.signing_pubkey.len().min(32)]
+                );
                 println!("  All metadata fields are cryptographically bound to the signature.");
             }
             audit_package::SigStatus::Absent => {

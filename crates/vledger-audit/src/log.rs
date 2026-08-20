@@ -17,11 +17,11 @@ use crate::event::{AuditEvent, AuditEventKind};
 /// Thread-safe — a single `AuditLog` can be shared across multiple Tokio
 /// tasks via `Arc<AuditLog>`.
 pub struct AuditLog {
-    log_path:    PathBuf,
-    file:        Mutex<File>,
-    next_seq:    AtomicU64,
+    log_path: PathBuf,
+    file: Mutex<File>,
+    next_seq: AtomicU64,
     /// BLAKE3 chain hash of the last written event.
-    last_chain:  Mutex<String>,
+    last_chain: Mutex<String>,
 }
 
 impl AuditLog {
@@ -42,13 +42,13 @@ impl AuditLog {
 
         let file = OpenOptions::new()
             .create(true)
-            .append(true)   // WORM: O_APPEND only — never seek or truncate
+            .append(true) // WORM: O_APPEND only — never seek or truncate
             .open(&log_path)?;
 
         Ok(Self {
             log_path,
-            file:       Mutex::new(file),
-            next_seq:   AtomicU64::new(next_seq),
+            file: Mutex::new(file),
+            next_seq: AtomicU64::new(next_seq),
             last_chain: Mutex::new(last_chain),
         })
     }
@@ -58,20 +58,20 @@ impl AuditLog {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
 
         let mut event = AuditEvent {
-            sequence:     seq,
-            ts:           Utc::now(),
-            event:        kind,
+            sequence: seq,
+            ts: Utc::now(),
+            event: kind,
             content_hash: String::new(),
-            chain_hash:   String::new(),
-            prev_hash:    String::new(),
+            chain_hash: String::new(),
+            prev_hash: String::new(),
         };
 
         // Compute hashes under the lock to keep the chain consistent.
         let mut last_chain = self.last_chain.lock().unwrap();
         event.finalise(&last_chain);
 
-        let line = serde_json::to_string(&event)
-            .map_err(|e| AuditError::Serialisation(e.to_string()))?;
+        let line =
+            serde_json::to_string(&event).map_err(|e| AuditError::Serialisation(e.to_string()))?;
 
         {
             let mut file = self.file.lock().unwrap();
@@ -107,20 +107,22 @@ impl AuditLog {
 
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             let event: AuditEvent = serde_json::from_str(&line)
                 .map_err(|e| AuditError::Serialisation(e.to_string()))?;
 
             if !event.verify() {
                 return Err(AuditError::ChainBroken {
                     sequence: event.sequence,
-                    reason:   "content_hash or chain_hash mismatch".into(),
+                    reason: "content_hash or chain_hash mismatch".into(),
                 });
             }
             if event.prev_hash != prev_hash {
                 return Err(AuditError::ChainBroken {
                     sequence: event.sequence,
-                    reason:   format!(
+                    reason: format!(
                         "prev_hash mismatch: expected {prev_hash}, got {}",
                         event.prev_hash
                     ),
@@ -143,15 +145,17 @@ impl AuditLog {
 
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let mut last_seq:   u64    = 0;
+        let mut last_seq: u64 = 0;
         let mut last_chain: String = AuditEvent::ZERO_HASH.to_string();
 
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             match serde_json::from_str::<AuditEvent>(&line) {
                 Ok(ev) => {
-                    last_seq   = ev.sequence;
+                    last_seq = ev.sequence;
                     last_chain = ev.chain_hash;
                 }
                 Err(e) => {

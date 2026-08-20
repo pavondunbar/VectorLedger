@@ -39,8 +39,8 @@ pub fn hash_to_hex(hash: &Hash) -> String {
 
 /// Decode a 64-character hex string into a Hash.
 pub fn hash_from_hex(s: &str) -> Result<Hash, CryptoError> {
-    let bytes = hex::decode(s)
-        .map_err(|e| CryptoError::InvalidKey(format!("hex decode failed: {e}")))?;
+    let bytes =
+        hex::decode(s).map_err(|e| CryptoError::InvalidKey(format!("hex decode failed: {e}")))?;
     bytes
         .try_into()
         .map_err(|_| CryptoError::InvalidKey("hash must be 32 bytes".into()))

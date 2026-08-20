@@ -4,9 +4,7 @@
 //! signed so that any external auditor can verify the transaction log without
 //! trusting the server.
 
-use ed25519_dalek::{
-    Signature as DalekSig, Signer, SigningKey, Verifier, VerifyingKey,
-};
+use ed25519_dalek::{Signature as DalekSig, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use zeroize::ZeroizeOnDrop;
@@ -156,7 +154,6 @@ mod tests {
         sc.verify().unwrap();
     }
 }
-
 
 // ── Serde helper for 64-byte Signature ───────────────────────────────────────
 

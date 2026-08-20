@@ -85,7 +85,10 @@ pub struct DivergenceReport {
 ///     chain = BLAKE3(chain || record_bytes)
 /// ```
 /// This produces a rolling hash that commits to the entire WAL history in order.
-pub fn compute_wal_chain_hash(wal_dir: &Path, target_lsn: u64) -> Result<[u8; 32], ReplicationError> {
+pub fn compute_wal_chain_hash(
+    wal_dir: &Path,
+    target_lsn: u64,
+) -> Result<[u8; 32], ReplicationError> {
     let reader = vledger_wal::WalReader::open(wal_dir)
         .map_err(|e| ReplicationError::Ledger(e.to_string()))?;
 
@@ -95,7 +98,9 @@ pub fn compute_wal_chain_hash(wal_dir: &Path, target_lsn: u64) -> Result<[u8; 32
         match result {
             Err(_) => break, // stop at torn write
             Ok(record) => {
-                if record.header.sequence > target_lsn { break; }
+                if record.header.sequence > target_lsn {
+                    break;
+                }
                 // Fold record bytes into the running chain hash.
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(&chain);
@@ -114,15 +119,15 @@ pub fn compute_wal_chain_hash(wal_dir: &Path, target_lsn: u64) -> Result<[u8; 32
 
 /// Build a `DivergenceCheckpoint` for the current WAL state.
 pub fn build_checkpoint(
-    wal_dir:         &Path,
-    current_lsn:     u64,
+    wal_dir: &Path,
+    current_lsn: u64,
     ledger_sequence: u64,
-    ledger_tip:      &[u8; 32],
+    ledger_tip: &[u8; 32],
 ) -> Result<DivergenceCheckpoint, ReplicationError> {
     let chain = compute_wal_chain_hash(wal_dir, current_lsn)?;
     Ok(DivergenceCheckpoint {
-        lsn:                  current_lsn,
-        chain_hash_hex:       hex::encode(chain),
+        lsn: current_lsn,
+        chain_hash_hex: hex::encode(chain),
         ledger_sequence,
         ledger_chain_tip_hex: hex::encode(ledger_tip),
     })
@@ -136,19 +141,19 @@ pub fn build_checkpoint(
 /// If `diverged == true`, the replica should stop accepting new records and
 /// alert the operator — it needs to be re-seeded from the primary.
 pub fn verify_checkpoint(
-    wal_dir:     &Path,
-    checkpoint:  &DivergenceCheckpoint,
-    local_tip:   &[u8; 32],
+    wal_dir: &Path,
+    checkpoint: &DivergenceCheckpoint,
+    local_tip: &[u8; 32],
 ) -> DivergenceReport {
     let local_hash = match compute_wal_chain_hash(wal_dir, checkpoint.lsn) {
-        Ok(h)  => h,
+        Ok(h) => h,
         Err(e) => {
             return DivergenceReport {
-                lsn:                        checkpoint.lsn,
-                local_chain_hash_hex:       hex::encode([0u8; 32]),
+                lsn: checkpoint.lsn,
+                local_chain_hash_hex: hex::encode([0u8; 32]),
                 local_ledger_chain_tip_hex: hex::encode(local_tip),
-                diverged:                   true,
-                reason:                     Some(format!("WAL hash computation failed: {e}")),
+                diverged: true,
+                reason: Some(format!("WAL hash computation failed: {e}")),
             };
         }
     };
@@ -161,11 +166,11 @@ pub fn verify_checkpoint(
         }
         _ => {
             return DivergenceReport {
-                lsn:                        checkpoint.lsn,
-                local_chain_hash_hex:       hex::encode(local_hash),
+                lsn: checkpoint.lsn,
+                local_chain_hash_hex: hex::encode(local_hash),
                 local_ledger_chain_tip_hex: hex::encode(local_tip),
-                diverged:                   true,
-                reason:                     Some("Primary sent invalid chain_hash_hex".into()),
+                diverged: true,
+                reason: Some("Primary sent invalid chain_hash_hex".into()),
             };
         }
     };
@@ -176,7 +181,9 @@ pub fn verify_checkpoint(
     // Compare ledger tip hashes.
     let primary_ledger_tip = match hex::decode(&checkpoint.ledger_chain_tip_hex) {
         Ok(b) if b.len() == 32 => {
-            let mut arr = [0u8; 32]; arr.copy_from_slice(&b); arr
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
         }
         _ => [0u8; 32],
     };
@@ -207,8 +214,8 @@ pub fn verify_checkpoint(
     };
 
     DivergenceReport {
-        lsn:                        checkpoint.lsn,
-        local_chain_hash_hex:       hex::encode(local_hash),
+        lsn: checkpoint.lsn,
+        local_chain_hash_hex: hex::encode(local_hash),
         local_ledger_chain_tip_hex: hex::encode(local_tip),
         diverged,
         reason,
@@ -221,13 +228,20 @@ pub fn verify_checkpoint(
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use vledger_wal::{WalWriter, RecordType};
     use vledger_wal::record::BeginPayload;
+    use vledger_wal::{RecordType, WalWriter};
 
     fn write_records(dir: &Path, count: u64) {
         let mut w = WalWriter::open(dir).unwrap();
         for i in 0..count {
-            w.append_record(i, RecordType::Begin, &BeginPayload { description: Some(format!("tx-{i}")) }).unwrap();
+            w.append_record(
+                i,
+                RecordType::Begin,
+                &BeginPayload {
+                    description: Some(format!("tx-{i}")),
+                },
+            )
+            .unwrap();
         }
     }
 
@@ -246,7 +260,10 @@ mod tests {
         let h1 = compute_wal_chain_hash(dir1.path(), 10).unwrap();
         // Re-compute on same dir — must be deterministic.
         let h2 = compute_wal_chain_hash(dir1.path(), 10).unwrap();
-        assert_eq!(h1, h2, "WAL chain hash must be deterministic for the same input");
+        assert_eq!(
+            h1, h2,
+            "WAL chain hash must be deterministic for the same input"
+        );
     }
 
     #[test]
@@ -258,7 +275,10 @@ mod tests {
 
         let h1 = compute_wal_chain_hash(dir1.path(), 100).unwrap();
         let h2 = compute_wal_chain_hash(dir2.path(), 100).unwrap();
-        assert_ne!(h1, h2, "Different WAL contents must produce different chain hashes");
+        assert_ne!(
+            h1, h2,
+            "Different WAL contents must produce different chain hashes"
+        );
     }
 
     #[test]
@@ -266,24 +286,34 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_records(dir.path(), 5);
 
-        let tip   = [0u8; 32];
-        let cp    = build_checkpoint(dir.path(), 10, 5, &tip).unwrap();
+        let tip = [0u8; 32];
+        let cp = build_checkpoint(dir.path(), 10, 5, &tip).unwrap();
         let report = verify_checkpoint(dir.path(), &cp, &tip);
-        assert!(!report.diverged, "matching WAL and tip must not report divergence");
+        assert!(
+            !report.diverged,
+            "matching WAL and tip must not report divergence"
+        );
     }
 
     #[test]
     fn checkpoint_detects_ledger_tip_divergence() {
-        let dir      = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         write_records(dir.path(), 3);
 
         let primary_tip = [0xAAu8; 32];
-        let local_tip   = [0xBBu8; 32]; // different
-        let cp          = build_checkpoint(dir.path(), 10, 3, &primary_tip).unwrap();
-        let report      = verify_checkpoint(dir.path(), &cp, &local_tip);
+        let local_tip = [0xBBu8; 32]; // different
+        let cp = build_checkpoint(dir.path(), 10, 3, &primary_tip).unwrap();
+        let report = verify_checkpoint(dir.path(), &cp, &local_tip);
 
-        assert!(report.diverged, "different ledger tips must trigger divergence");
-        assert!(report.reason.as_deref().unwrap_or("").contains("Ledger chain tip mismatch"));
+        assert!(
+            report.diverged,
+            "different ledger tips must trigger divergence"
+        );
+        assert!(report
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("Ledger chain tip mismatch"));
     }
 
     #[test]
@@ -297,6 +327,9 @@ mod tests {
         cp.chain_hash_hex = "0".repeat(64);
 
         let report = verify_checkpoint(dir.path(), &cp, &tip);
-        assert!(report.diverged, "tampered chain hash must trigger divergence");
+        assert!(
+            report.diverged,
+            "tampered chain hash must trigger divergence"
+        );
     }
 }

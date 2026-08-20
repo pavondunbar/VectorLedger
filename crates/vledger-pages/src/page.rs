@@ -56,16 +56,22 @@ impl Page {
     /// Deserialize a page from raw bytes (e.g. read from disk).
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, PageError> {
         if bytes.len() < PageHeader::SIZE {
-            return Err(PageError::Io(std::io::Error::other("page buffer too small")));
+            return Err(PageError::Io(std::io::Error::other(
+                "page buffer too small",
+            )));
         }
 
-        let header: PageHeader =
-            bincode::serde::decode_from_slice(&bytes[..PageHeader::SIZE], bincode::config::standard().with_fixed_int_encoding())
-                .map(|(h, _)| h)
-                .map_err(|e: bincode::error::DecodeError| PageError::Serialization(e.to_string()))?;
+        let header: PageHeader = bincode::serde::decode_from_slice(
+            &bytes[..PageHeader::SIZE],
+            bincode::config::standard().with_fixed_int_encoding(),
+        )
+        .map(|(h, _)| h)
+        .map_err(|e: bincode::error::DecodeError| PageError::Serialization(e.to_string()))?;
 
         if !header.validate_magic() {
-            return Err(PageError::BadMagic { page_id: header.page_id });
+            return Err(PageError::BadMagic {
+                page_id: header.page_id,
+            });
         }
 
         let page_size = bytes.len();
@@ -86,7 +92,9 @@ impl Page {
     /// Returns the slot index on success.
     pub fn write_slot(&mut self, data: &[u8]) -> Result<u16, PageError> {
         if self.sealed {
-            return Err(PageError::PageSealed { page_id: self.header.page_id });
+            return Err(PageError::PageSealed {
+                page_id: self.header.page_id,
+            });
         }
 
         let slot_count = self.header.slot_count as usize;
@@ -107,7 +115,11 @@ impl Page {
         let data_end = self.page_size - {
             // Sum of all existing slot data lengths
             (0..slot_count)
-                .map(|i| self.read_slot_entry(i).map(|e| e.length as usize).unwrap_or(0))
+                .map(|i| {
+                    self.read_slot_entry(i)
+                        .map(|e| e.length as usize)
+                        .unwrap_or(0)
+                })
                 .sum::<usize>()
         };
         let data_start = data_end - data.len();
@@ -129,10 +141,12 @@ impl Page {
 
     /// Read raw bytes for slot at `slot_id`.
     pub fn read_slot(&self, slot_id: u16) -> Result<&[u8], PageError> {
-        let entry = self.read_slot_entry(slot_id as usize).ok_or_else(|| PageError::SlotNotFound {
-            page_id: self.header.page_id,
-            slot_id,
-        })?;
+        let entry =
+            self.read_slot_entry(slot_id as usize)
+                .ok_or_else(|| PageError::SlotNotFound {
+                    page_id: self.header.page_id,
+                    slot_id,
+                })?;
         let body_start = PageHeader::SIZE;
         let start = body_start + entry.offset as usize;
         let end = start + entry.length as usize;
@@ -179,18 +193,17 @@ impl Page {
             return None;
         }
         let dir_offset = PageHeader::SIZE + index * SLOT_DIR_ENTRY_SIZE;
-        let offset = u16::from_le_bytes(
-            self.buf[dir_offset..dir_offset + 2].try_into().ok()?,
-        );
-        let length = u16::from_le_bytes(
-            self.buf[dir_offset + 2..dir_offset + 4].try_into().ok()?,
-        );
+        let offset = u16::from_le_bytes(self.buf[dir_offset..dir_offset + 2].try_into().ok()?);
+        let length = u16::from_le_bytes(self.buf[dir_offset + 2..dir_offset + 4].try_into().ok()?);
         Some(SlotEntry { offset, length })
     }
 
     fn flush_header(&mut self) {
-        let encoded = bincode::serde::encode_to_vec(&self.header, bincode::config::standard().with_fixed_int_encoding())
-            .expect("PageHeader serialization must not fail");
+        let encoded = bincode::serde::encode_to_vec(
+            &self.header,
+            bincode::config::standard().with_fixed_int_encoding(),
+        )
+        .expect("PageHeader serialization must not fail");
         self.buf[..encoded.len()].copy_from_slice(&encoded);
     }
 
@@ -199,8 +212,8 @@ impl Page {
         //   header bytes [0..60]  (everything before the crc32 field)
         //   page body    [64..]
         let mut h = Crc32Hasher::new();
-        h.update(&self.buf[..PageHeader::SIZE - 4]);   // header sans crc32 field
-        h.update(&self.buf[PageHeader::SIZE..]);        // full page body
+        h.update(&self.buf[..PageHeader::SIZE - 4]); // header sans crc32 field
+        h.update(&self.buf[PageHeader::SIZE..]); // full page body
         h.finalize()
     }
 
@@ -269,4 +282,3 @@ mod tests {
         assert!(Page::from_bytes(bytes).is_err());
     }
 }
-

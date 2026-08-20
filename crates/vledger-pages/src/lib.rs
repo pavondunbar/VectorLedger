@@ -37,7 +37,7 @@ pub mod store;
 pub use error::PageError;
 pub use header::{PageFlags, PageHeader};
 pub use page::Page;
-pub use store::{PageFlushState, PageStore, spawn_page_commit_flusher};
+pub use store::{spawn_page_commit_flusher, PageFlushState, PageStore};
 
 /// Default page size: 8 KiB — the plaintext data capacity.
 /// Encrypted pages are written to a separate `.epages` file whose on-disk

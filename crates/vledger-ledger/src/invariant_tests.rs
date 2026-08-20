@@ -37,7 +37,9 @@ mod tests {
     }
 
     fn mk_account(store: &mut LedgerStore, code: &str, at: AccountType) -> uuid::Uuid {
-        store.create_account(Account::new(code, code, at, "USD", "test")).unwrap()
+        store
+            .create_account(Account::new(code, code, at, "USD", "test"))
+            .unwrap()
     }
 
     fn post(store: &mut LedgerStore, dr: uuid::Uuid, cr: uuid::Uuid, cents: i64) {
@@ -56,7 +58,7 @@ mod tests {
     #[test]
     fn inv1_inv2_10k_entries_always_balanced_balance_correct() {
         let (_dir, mut store) = setup();
-        let cash    = mk_account(&mut store, "CASH",    AccountType::Asset);
+        let cash = mk_account(&mut store, "CASH", AccountType::Asset);
         let revenue = mk_account(&mut store, "REVENUE", AccountType::Income);
 
         let n = 10_000usize;
@@ -73,20 +75,30 @@ mod tests {
 
         // INV-1: every entry must be balanced
         for entry in store.all_entries() {
-            let debits:  i128 = entry.lines.iter()
-                .filter(|l| l.dr_cr == DrCr::Debit).map(|l| l.amount.as_i128()).sum();
-            let credits: i128 = entry.lines.iter()
-                .filter(|l| l.dr_cr == DrCr::Credit).map(|l| l.amount.as_i128()).sum();
+            let debits: i128 = entry
+                .lines
+                .iter()
+                .filter(|l| l.dr_cr == DrCr::Debit)
+                .map(|l| l.amount.as_i128())
+                .sum();
+            let credits: i128 = entry
+                .lines
+                .iter()
+                .filter(|l| l.dr_cr == DrCr::Credit)
+                .map(|l| l.amount.as_i128())
+                .sum();
             assert_eq!(
                 debits, credits,
-                "entry {} is unbalanced: debits={debits} credits={credits}", entry.sequence
+                "entry {} is unbalanced: debits={debits} credits={credits}",
+                entry.sequence
             );
         }
 
         // INV-2: balance must exactly equal Σ(debit_lines - credit_lines) for CASH
         let expected_cash_balance: i128 = n as i128 * amount_per_entry as i128;
         assert_eq!(
-            store.balance(&cash), expected_cash_balance,
+            store.balance(&cash),
+            expected_cash_balance,
             "CASH balance mismatch after {n} entries"
         );
 
@@ -95,7 +107,10 @@ mod tests {
         // Depending on ledger convention, revenue balance = -expected or +expected
         // Just assert it is non-zero and consistent
         let rev_bal = store.balance(&revenue).abs();
-        assert_eq!(rev_bal, expected_cash_balance, "REVENUE balance magnitude mismatch");
+        assert_eq!(
+            rev_bal, expected_cash_balance,
+            "REVENUE balance magnitude mismatch"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -105,12 +120,12 @@ mod tests {
     #[test]
     fn inv3_idempotency_exactly_once_1000_retries() {
         let (_dir, mut store) = setup();
-        let cash = mk_account(&mut store, "CASH",    AccountType::Asset);
-        let rev  = mk_account(&mut store, "REVENUE", AccountType::Income);
+        let cash = mk_account(&mut store, "CASH", AccountType::Asset);
+        let rev = mk_account(&mut store, "REVENUE", AccountType::Income);
 
         // Post the same 100 unique events, each retried 10 times
         let unique_events = 100;
-        let retries       = 10;
+        let retries = 10;
 
         for event_id in 0..unique_events {
             for _ in 0..retries {
@@ -130,7 +145,8 @@ mod tests {
 
         // Must have exactly `unique_events` entries — not unique_events * retries
         assert_eq!(
-            store.entry_count(), unique_events,
+            store.entry_count(),
+            unique_events,
             "idempotency: must have exactly {unique_events} entries, not {}",
             store.entry_count()
         );
@@ -148,8 +164,8 @@ mod tests {
     #[test]
     fn inv4_sequence_numbers_strictly_monotonic_no_gaps() {
         let (_dir, mut store) = setup();
-        let cash = mk_account(&mut store, "CASH",    AccountType::Asset);
-        let rev  = mk_account(&mut store, "REVENUE", AccountType::Income);
+        let cash = mk_account(&mut store, "CASH", AccountType::Asset);
+        let rev = mk_account(&mut store, "REVENUE", AccountType::Income);
 
         let n = 5_000;
         for _ in 0..n {
@@ -163,12 +179,15 @@ mod tests {
         for entry in entries {
             assert!(
                 entry.sequence > prev_seq,
-                "sequence {} must be > previous {prev_seq}", entry.sequence
+                "sequence {} must be > previous {prev_seq}",
+                entry.sequence
             );
             assert_eq!(
-                entry.sequence, prev_seq + 1,
+                entry.sequence,
+                prev_seq + 1,
                 "sequence must increment by exactly 1: expected {}, got {}",
-                prev_seq + 1, entry.sequence
+                prev_seq + 1,
+                entry.sequence
             );
             prev_seq = entry.sequence;
         }
@@ -181,8 +200,8 @@ mod tests {
     #[test]
     fn inv5_hash_chain_valid_after_1000_entries() {
         let (_dir, mut store) = setup();
-        let cash = mk_account(&mut store, "CASH",    AccountType::Asset);
-        let rev  = mk_account(&mut store, "REVENUE", AccountType::Income);
+        let cash = mk_account(&mut store, "CASH", AccountType::Asset);
+        let rev = mk_account(&mut store, "REVENUE", AccountType::Income);
 
         for i in 0..1_000 {
             post(&mut store, cash, rev, (i % 500 + 1) as i64);
@@ -197,7 +216,8 @@ mod tests {
         for entry in store.all_entries() {
             assert!(
                 entry.verify_hashes(),
-                "entry {} has invalid hash", entry.sequence
+                "entry {} has invalid hash",
+                entry.sequence
             );
         }
     }
@@ -208,7 +228,7 @@ mod tests {
         // must invalidate verify_hashes()
         let (_dir, mut store) = setup();
         let cash = mk_account(&mut store, "CASH", AccountType::Asset);
-        let rev  = mk_account(&mut store, "REVENUE", AccountType::Income);
+        let rev = mk_account(&mut store, "REVENUE", AccountType::Income);
         post(&mut store, cash, rev, 9_999);
 
         let mut entry = store.all_entries()[0].clone();
@@ -227,8 +247,8 @@ mod tests {
     #[test]
     fn inv6_reversal_nets_to_zero_100_entries() {
         let (_dir, mut store) = setup();
-        let cash = mk_account(&mut store, "CASH",    AccountType::Asset);
-        let rev  = mk_account(&mut store, "REVENUE", AccountType::Income);
+        let cash = mk_account(&mut store, "CASH", AccountType::Asset);
+        let rev = mk_account(&mut store, "REVENUE", AccountType::Income);
 
         // Post and reverse 100 entries
         for i in 1i64..=100 {
@@ -244,21 +264,33 @@ mod tests {
         assert_eq!(store.entry_count(), 200);
 
         // Net balance must be zero — every debit was reversed by an equal credit
-        assert_eq!(store.balance(&cash), 0, "CASH balance after all reversals must be 0");
-        assert_eq!(store.balance(&rev).abs(), 0, "REVENUE balance after all reversals must be 0");
+        assert_eq!(
+            store.balance(&cash),
+            0,
+            "CASH balance after all reversals must be 0"
+        );
+        assert_eq!(
+            store.balance(&rev).abs(),
+            0,
+            "REVENUE balance after all reversals must be 0"
+        );
 
         // Hash chain must still be valid
         assert!(store.verify_chain_integrity().is_ok());
 
         // Every original entry must be tracked in the reversal event index
         let entries = store.all_entries();
-        let originals: Vec<_> = entries.iter()
-            .filter(|e| e.status != EntryStatus::Reversal && e.status != EntryStatus::PendingApproval)
+        let originals: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                e.status != EntryStatus::Reversal && e.status != EntryStatus::PendingApproval
+            })
             .collect();
         for original in originals {
             assert!(
                 store.is_reversed(&original.id),
-                "original entry {} must be in reversal_event_index", original.sequence
+                "original entry {} must be in reversal_event_index",
+                original.sequence
             );
         }
     }
@@ -266,8 +298,8 @@ mod tests {
     #[test]
     fn inv6b_double_reversal_rejected() {
         let (_dir, mut store) = setup();
-        let cash = mk_account(&mut store, "CASH",    AccountType::Asset);
-        let rev  = mk_account(&mut store, "REVENUE", AccountType::Income);
+        let cash = mk_account(&mut store, "CASH", AccountType::Asset);
+        let rev = mk_account(&mut store, "REVENUE", AccountType::Income);
 
         post(&mut store, cash, rev, 5_000);
         let id = store.all_entries()[0].id;
@@ -284,8 +316,8 @@ mod tests {
     #[test]
     fn inv7_amount_near_i64_max_handled_safely() {
         let (_dir, mut store) = setup();
-        let cash = mk_account(&mut store, "CASH",    AccountType::Asset);
-        let rev  = mk_account(&mut store, "REVENUE", AccountType::Income);
+        let cash = mk_account(&mut store, "CASH", AccountType::Asset);
+        let rev = mk_account(&mut store, "REVENUE", AccountType::Income);
 
         // Amount at i64::MAX is technically valid as an Amount (non-zero),
         // but exposure limits should fire if configured.
@@ -303,10 +335,7 @@ mod tests {
     #[test]
     fn inv7b_zero_amount_rejected_by_amount_type() {
         // Amount::new(0) must return None — the type system prevents zero amounts
-        assert!(
-            Amount::new(0).is_none(),
-            "Amount::new(0) must return None"
-        );
+        assert!(Amount::new(0).is_none(), "Amount::new(0) must return None");
     }
 
     #[test]
@@ -325,13 +354,25 @@ mod tests {
     fn inv8_currency_mismatch_rejected() {
         let (_dir, mut store) = setup();
         // USD account
-        let usd_cash = store.create_account(
-            Account::new("USD_CASH", "USD Cash", AccountType::Asset, "USD", "test")
-        ).unwrap();
+        let usd_cash = store
+            .create_account(Account::new(
+                "USD_CASH",
+                "USD Cash",
+                AccountType::Asset,
+                "USD",
+                "test",
+            ))
+            .unwrap();
         // EUR account
-        let eur_rev = store.create_account(
-            Account::new("EUR_REV", "EUR Revenue", AccountType::Income, "EUR", "test")
-        ).unwrap();
+        let eur_rev = store
+            .create_account(Account::new(
+                "EUR_REV",
+                "EUR Revenue",
+                AccountType::Income,
+                "EUR",
+                "test",
+            ))
+            .unwrap();
 
         // Try to post USD amount to EUR account
         let amt = Amount::new(1_000).unwrap();
@@ -346,19 +387,34 @@ mod tests {
     #[test]
     fn inv8b_correct_currency_accepted() {
         let (_dir, mut store) = setup();
-        let eur_cash = store.create_account(
-            Account::new("EUR_CASH", "EUR Cash", AccountType::Asset, "EUR", "test")
-        ).unwrap();
-        let eur_rev = store.create_account(
-            Account::new("EUR_REV", "EUR Revenue", AccountType::Income, "EUR", "test")
-        ).unwrap();
+        let eur_cash = store
+            .create_account(Account::new(
+                "EUR_CASH",
+                "EUR Cash",
+                AccountType::Asset,
+                "EUR",
+                "test",
+            ))
+            .unwrap();
+        let eur_rev = store
+            .create_account(Account::new(
+                "EUR_REV",
+                "EUR Revenue",
+                AccountType::Income,
+                "EUR",
+                "test",
+            ))
+            .unwrap();
 
         let amt = Amount::new(5_000).unwrap();
         let e = JournalEntryBuilder::new("eur-entry", "test")
             .debit(eur_cash, amt, "EUR")
             .credit(eur_rev, amt, "EUR")
             .build();
-        assert!(store.post_entry(e).is_ok(), "matching currency must be accepted");
+        assert!(
+            store.post_entry(e).is_ok(),
+            "matching currency must be accepted"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -372,7 +428,7 @@ mod tests {
         let mut acct = Account::new("CAPPED", "Capped", AccountType::Asset, "USD", "test");
         acct.exposure_limit = Some(10_000); // max $100 per entry
         let capped = store.create_account(acct).unwrap();
-        let rev    = mk_account(&mut store, "REV", AccountType::Income);
+        let rev = mk_account(&mut store, "REV", AccountType::Income);
 
         // Entry exceeding limit must be rejected
         let amt = Amount::new(10_001).unwrap();
@@ -381,7 +437,10 @@ mod tests {
             .credit(rev, amt, "USD")
             .build();
         let result = store.post_entry(e);
-        assert!(result.is_err(), "entry exceeding exposure limit must be rejected");
+        assert!(
+            result.is_err(),
+            "entry exceeding exposure limit must be rejected"
+        );
     }
 
     #[test]
@@ -391,14 +450,17 @@ mod tests {
         let mut acct = Account::new("CAPPED", "Capped", AccountType::Asset, "USD", "test");
         acct.exposure_limit = Some(10_000);
         let capped = store.create_account(acct).unwrap();
-        let rev    = mk_account(&mut store, "REV", AccountType::Income);
+        let rev = mk_account(&mut store, "REV", AccountType::Income);
 
         let amt = Amount::new(9_999).unwrap(); // just under limit
         let e = JournalEntryBuilder::new("within-limit", "test")
             .debit(capped, amt, "USD")
             .credit(rev, amt, "USD")
             .build();
-        assert!(store.post_entry(e).is_ok(), "entry within exposure limit must be accepted");
+        assert!(
+            store.post_entry(e).is_ok(),
+            "entry within exposure limit must be accepted"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -409,7 +471,7 @@ mod tests {
     fn inv10_asset_account_overdraw_rejected() {
         let (_dir, mut store) = setup();
         let cash = mk_account(&mut store, "CASH", AccountType::Asset);
-        let rev  = mk_account(&mut store, "REV",  AccountType::Income);
+        let rev = mk_account(&mut store, "REV", AccountType::Income);
 
         // Deposit $100
         post(&mut store, cash, rev, 10_000);
@@ -422,7 +484,10 @@ mod tests {
             .debit(rev, amt, "USD")
             .build();
         let result = store.post_entry(e);
-        assert!(result.is_err(), "overdrawing an asset account must be rejected");
+        assert!(
+            result.is_err(),
+            "overdrawing an asset account must be rejected"
+        );
         // Balance must be unchanged
         assert_eq!(store.balance(&cash), 10_000);
     }
@@ -431,7 +496,7 @@ mod tests {
     fn inv10b_exactly_zero_balance_allowed() {
         let (_dir, mut store) = setup();
         let cash = mk_account(&mut store, "CASH", AccountType::Asset);
-        let rev  = mk_account(&mut store, "REV",  AccountType::Income);
+        let rev = mk_account(&mut store, "REV", AccountType::Income);
 
         post(&mut store, cash, rev, 5_000);
 
@@ -441,7 +506,10 @@ mod tests {
             .credit(cash, amt, "USD")
             .debit(rev, amt, "USD")
             .build();
-        assert!(store.post_entry(e).is_ok(), "zeroing an asset balance must be allowed");
+        assert!(
+            store.post_entry(e).is_ok(),
+            "zeroing an asset balance must be allowed"
+        );
         assert_eq!(store.balance(&cash), 0);
     }
 
@@ -455,15 +523,18 @@ mod tests {
 
         let (_dir, mut store) = setup();
         let cash = mk_account(&mut store, "CASH", AccountType::Asset);
-        let rev  = mk_account(&mut store, "REV",  AccountType::Income);
+        let rev = mk_account(&mut store, "REV", AccountType::Income);
 
         // Build entry manually with debits != credits (off by 1)
         let e = crate::entry::JournalEntryBuilder::new("unbalanced", "test")
             .debit(cash, Amount::new(1000).unwrap(), "USD")
-            .credit(rev,  Amount::new(999).unwrap(),  "USD")
+            .credit(rev, Amount::new(999).unwrap(), "USD")
             .build();
         let result = store.post_entry(e);
-        assert!(result.is_err(), "off-by-one unbalanced entry must be rejected");
+        assert!(
+            result.is_err(),
+            "off-by-one unbalanced entry must be rejected"
+        );
     }
 
     #[test]
@@ -490,7 +561,7 @@ mod tests {
         let mut acct = Account::new("CLOSED", "Closed", AccountType::Asset, "USD", "test");
         acct.status = AccountStatus::Closed;
         let closed = store.create_account(acct).unwrap();
-        let rev    = mk_account(&mut store, "REV", AccountType::Income);
+        let rev = mk_account(&mut store, "REV", AccountType::Income);
 
         let amt = Amount::new(500).unwrap();
         let e = JournalEntryBuilder::new("post-to-closed", "test")
@@ -498,7 +569,10 @@ mod tests {
             .credit(rev, amt, "USD")
             .build();
         let result = store.post_entry(e);
-        assert!(result.is_err(), "posting to a closed account must be rejected");
+        assert!(
+            result.is_err(),
+            "posting to a closed account must be rejected"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -509,15 +583,15 @@ mod tests {
     fn inv13_global_ledger_equation_holds_after_1000_entries() {
         let (_dir, mut store) = setup();
 
-        let cash     = mk_account(&mut store, "CASH",     AccountType::Asset);
-        let ar       = mk_account(&mut store, "AR",       AccountType::Asset);
-        let revenue  = mk_account(&mut store, "REVENUE",  AccountType::Income);
-        let expense  = mk_account(&mut store, "EXPENSE",  AccountType::Expense);
-        let equity   = mk_account(&mut store, "EQUITY",   AccountType::Equity);
+        let cash = mk_account(&mut store, "CASH", AccountType::Asset);
+        let ar = mk_account(&mut store, "AR", AccountType::Asset);
+        let revenue = mk_account(&mut store, "REVENUE", AccountType::Income);
+        let expense = mk_account(&mut store, "EXPENSE", AccountType::Expense);
+        let equity = mk_account(&mut store, "EQUITY", AccountType::Equity);
 
         // Post varied transactions
         for i in 1i64..=200 {
-            post(&mut store, cash, revenue, i * 100);     // cash in, revenue up
+            post(&mut store, cash, revenue, i * 100); // cash in, revenue up
         }
         for i in 1i64..=100 {
             // Expense payment: debit expense, credit cash
@@ -531,12 +605,14 @@ mod tests {
 
         // Calculate total debits and credits from all entries
         let entries = store.all_entries();
-        let total_debits:  i128 = entries.iter()
+        let total_debits: i128 = entries
+            .iter()
             .flat_map(|e| e.lines.iter())
             .filter(|l| l.dr_cr == DrCr::Debit)
             .map(|l| l.amount.as_i128())
             .sum();
-        let total_credits: i128 = entries.iter()
+        let total_credits: i128 = entries
+            .iter()
             .flat_map(|e| e.lines.iter())
             .filter(|l| l.dr_cr == DrCr::Credit)
             .map(|l| l.amount.as_i128())
@@ -561,7 +637,7 @@ mod tests {
         let (n_entries, final_balance, last_chain_hash) = {
             let mut store = LedgerStore::open(dir.path()).unwrap();
             let cash = mk_account(&mut store, "CASH", AccountType::Asset);
-            let rev  = mk_account(&mut store, "REV",  AccountType::Income);
+            let rev = mk_account(&mut store, "REV", AccountType::Income);
 
             for i in 1i64..=500 {
                 post(&mut store, cash, rev, i * 7);
@@ -575,14 +651,18 @@ mod tests {
 
         // Reopen from WAL
         let store2 = LedgerStore::open(dir.path()).unwrap();
-        assert_eq!(store2.entry_count(), n_entries, "WAL replay: entry count must match");
+        assert_eq!(
+            store2.entry_count(),
+            n_entries,
+            "WAL replay: entry count must match"
+        );
 
         // Re-find cash account and verify balance
-        let cash = store2.all_accounts()
-            .find(|a| a.code == "CASH").unwrap().id;
+        let cash = store2.all_accounts().find(|a| a.code == "CASH").unwrap().id;
         let expected_cash_balance: i128 = (1i128..=500).map(|i| i * 7).sum();
         assert_eq!(
-            store2.balance(&cash), expected_cash_balance,
+            store2.balance(&cash),
+            expected_cash_balance,
             "WAL replay: balance must match"
         );
 
@@ -592,6 +672,9 @@ mod tests {
             replayed_chain_hash, last_chain_hash,
             "WAL replay: chain hash tip must be identical"
         );
-        assert!(store2.verify_chain_integrity().is_ok(), "hash chain must be valid after WAL replay");
+        assert!(
+            store2.verify_chain_integrity().is_ok(),
+            "hash chain must be valid after WAL replay"
+        );
     }
 }

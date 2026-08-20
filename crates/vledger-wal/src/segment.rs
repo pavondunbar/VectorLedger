@@ -62,10 +62,7 @@ impl Segment {
     /// Open an existing segment file for reading (sealed) or appending
     /// (active).
     pub fn open(path: PathBuf, index: u64, max_size: u64, sealed: bool) -> Result<Self, WalError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(!sealed)
-            .open(&path)?;
+        let file = OpenOptions::new().read(true).write(!sealed).open(&path)?;
 
         let metadata = file.metadata()?;
         let write_offset = metadata.len();

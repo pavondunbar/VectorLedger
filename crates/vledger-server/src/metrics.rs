@@ -61,33 +61,33 @@ use tracing::info;
 #[derive(Debug)]
 pub struct Metrics {
     // ── Ledger ────────────────────────────────────────────────────────────
-    pub ledger_entries_total:   AtomicU64,
-    pub ledger_accounts_total:  AtomicU64,
+    pub ledger_entries_total: AtomicU64,
+    pub ledger_accounts_total: AtomicU64,
 
     // ── WAL ───────────────────────────────────────────────────────────────
-    pub wal_segments_total:     AtomicU64,
+    pub wal_segments_total: AtomicU64,
     /// Unix timestamp (ms) of the last WAL fsync.
-    pub wal_last_sync_ms:       AtomicU64,
+    pub wal_last_sync_ms: AtomicU64,
 
     // ── Connections ───────────────────────────────────────────────────────
-    pub connections_active:     AtomicI64,
-    pub connections_total:      AtomicU64,
+    pub connections_active: AtomicI64,
+    pub connections_total: AtomicU64,
 
     // ── Authentication ────────────────────────────────────────────────────
-    pub auth_successes_total:   AtomicU64,
-    pub auth_failures_total:    AtomicU64,
+    pub auth_successes_total: AtomicU64,
+    pub auth_failures_total: AtomicU64,
 
     // ── Queries ───────────────────────────────────────────────────────────
-    pub queries_total:          AtomicU64,
-    pub query_duration_ms_sum:  AtomicU64,
+    pub queries_total: AtomicU64,
+    pub query_duration_ms_sum: AtomicU64,
 
     // ── Security / integrity ──────────────────────────────────────────────
-    pub chain_verify_failures:  AtomicU64,
+    pub chain_verify_failures: AtomicU64,
 
     // ── Operational ───────────────────────────────────────────────────────
     /// Unix timestamp (seconds) of the last successful backup.
-    pub last_backup_unix_secs:  AtomicU64,
-    pub replica_lag_lsn:        AtomicU64,
+    pub last_backup_unix_secs: AtomicU64,
+    pub replica_lag_lsn: AtomicU64,
     pub foureyes_pending_total: AtomicU64,
 
     // ── Startup timestamp ─────────────────────────────────────────────────
@@ -98,51 +98,76 @@ impl Metrics {
     /// Create a new zero-initialised metrics registry.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            ledger_entries_total:   AtomicU64::new(0),
-            ledger_accounts_total:  AtomicU64::new(0),
-            wal_segments_total:     AtomicU64::new(0),
-            wal_last_sync_ms:       AtomicU64::new(0),
-            connections_active:     AtomicI64::new(0),
-            connections_total:      AtomicU64::new(0),
-            auth_successes_total:   AtomicU64::new(0),
-            auth_failures_total:    AtomicU64::new(0),
-            queries_total:          AtomicU64::new(0),
-            query_duration_ms_sum:  AtomicU64::new(0),
-            chain_verify_failures:  AtomicU64::new(0),
-            last_backup_unix_secs:  AtomicU64::new(0),
-            replica_lag_lsn:        AtomicU64::new(0),
+            ledger_entries_total: AtomicU64::new(0),
+            ledger_accounts_total: AtomicU64::new(0),
+            wal_segments_total: AtomicU64::new(0),
+            wal_last_sync_ms: AtomicU64::new(0),
+            connections_active: AtomicI64::new(0),
+            connections_total: AtomicU64::new(0),
+            auth_successes_total: AtomicU64::new(0),
+            auth_failures_total: AtomicU64::new(0),
+            queries_total: AtomicU64::new(0),
+            query_duration_ms_sum: AtomicU64::new(0),
+            chain_verify_failures: AtomicU64::new(0),
+            last_backup_unix_secs: AtomicU64::new(0),
+            replica_lag_lsn: AtomicU64::new(0),
             foureyes_pending_total: AtomicU64::new(0),
-            started_at:             Instant::now(),
+            started_at: Instant::now(),
         })
     }
 
     // ── Convenience increment helpers ─────────────────────────────────────
 
-    pub fn inc_entries(&self)              { self.ledger_entries_total.fetch_add(1, Ordering::Relaxed); }
-    pub fn set_accounts(&self, n: u64)    { self.ledger_accounts_total.store(n, Ordering::Relaxed); }
-    pub fn set_wal_segments(&self, n: u64){ self.wal_segments_total.store(n, Ordering::Relaxed); }
+    pub fn inc_entries(&self) {
+        self.ledger_entries_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn set_accounts(&self, n: u64) {
+        self.ledger_accounts_total.store(n, Ordering::Relaxed);
+    }
+    pub fn set_wal_segments(&self, n: u64) {
+        self.wal_segments_total.store(n, Ordering::Relaxed);
+    }
     pub fn record_wal_sync(&self) {
-        let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         self.wal_last_sync_ms.store(ms, Ordering::Relaxed);
     }
     pub fn conn_open(&self) {
         self.connections_active.fetch_add(1, Ordering::Relaxed);
         self.connections_total.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn conn_close(&self)              { self.connections_active.fetch_add(-1, Ordering::Relaxed); }
-    pub fn inc_auth_success(&self)        { self.auth_successes_total.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_auth_failure(&self)        { self.auth_failures_total.fetch_add(1, Ordering::Relaxed); }
+    pub fn conn_close(&self) {
+        self.connections_active.fetch_add(-1, Ordering::Relaxed);
+    }
+    pub fn inc_auth_success(&self) {
+        self.auth_successes_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_auth_failure(&self) {
+        self.auth_failures_total.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn inc_query(&self, duration_ms: u64) {
         self.queries_total.fetch_add(1, Ordering::Relaxed);
-        self.query_duration_ms_sum.fetch_add(duration_ms, Ordering::Relaxed);
+        self.query_duration_ms_sum
+            .fetch_add(duration_ms, Ordering::Relaxed);
     }
-    pub fn inc_chain_failure(&self)       { self.chain_verify_failures.fetch_add(1, Ordering::Relaxed); }
+    pub fn inc_chain_failure(&self) {
+        self.chain_verify_failures.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn record_backup(&self) {
-        let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         self.last_backup_unix_secs.store(secs, Ordering::Relaxed);
     }
-    pub fn set_replica_lag(&self, lag: u64) { self.replica_lag_lsn.store(lag, Ordering::Relaxed); }
-    pub fn set_foureyes_pending(&self, n: u64) { self.foureyes_pending_total.store(n, Ordering::Relaxed); }
+    pub fn set_replica_lag(&self, lag: u64) {
+        self.replica_lag_lsn.store(lag, Ordering::Relaxed);
+    }
+    pub fn set_foureyes_pending(&self, n: u64) {
+        self.foureyes_pending_total.store(n, Ordering::Relaxed);
+    }
 
     // ── Prometheus text format serialisation ──────────────────────────────
 
@@ -154,10 +179,14 @@ impl Metrics {
             .as_millis() as u64;
 
         let wal_last_sync = self.wal_last_sync_ms.load(Ordering::Relaxed);
-        let wal_lag_ms    = if wal_last_sync == 0 { 0 } else { now_ms.saturating_sub(wal_last_sync) };
+        let wal_lag_ms = if wal_last_sync == 0 {
+            0
+        } else {
+            now_ms.saturating_sub(wal_last_sync)
+        };
 
-        let last_backup   = self.last_backup_unix_secs.load(Ordering::Relaxed);
-        let backup_age    = if last_backup == 0 {
+        let last_backup = self.last_backup_unix_secs.load(Ordering::Relaxed);
+        let backup_age = if last_backup == 0 {
             0u64
         } else {
             SystemTime::now()
@@ -188,19 +217,25 @@ impl Metrics {
         // ── Ledger ────────────────────────────────────────────────────────
         out.push_str("# HELP vledger_ledger_entries_total Total journal entries posted\n");
         out.push_str("# TYPE vledger_ledger_entries_total counter\n");
-        out.push_str(&format!("vledger_ledger_entries_total {}\n",
-            self.ledger_entries_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_ledger_entries_total {}\n",
+            self.ledger_entries_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP vledger_ledger_accounts_total Accounts in chart-of-accounts\n");
         out.push_str("# TYPE vledger_ledger_accounts_total gauge\n");
-        out.push_str(&format!("vledger_ledger_accounts_total {}\n",
-            self.ledger_accounts_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_ledger_accounts_total {}\n",
+            self.ledger_accounts_total.load(Ordering::Relaxed)
+        ));
 
         // ── WAL ───────────────────────────────────────────────────────────
         out.push_str("# HELP vledger_wal_segments_total Number of WAL segment files\n");
         out.push_str("# TYPE vledger_wal_segments_total gauge\n");
-        out.push_str(&format!("vledger_wal_segments_total {}\n",
-            self.wal_segments_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_wal_segments_total {}\n",
+            self.wal_segments_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP vledger_wal_sync_lag_ms Milliseconds since last WAL fsync\n");
         out.push_str("# TYPE vledger_wal_sync_lag_ms gauge\n");
@@ -209,41 +244,57 @@ impl Metrics {
         // ── Connections ───────────────────────────────────────────────────
         out.push_str("# HELP vledger_connections_active Currently open connections\n");
         out.push_str("# TYPE vledger_connections_active gauge\n");
-        out.push_str(&format!("vledger_connections_active {}\n",
-            self.connections_active.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_connections_active {}\n",
+            self.connections_active.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP vledger_connections_total Total connections accepted since start\n");
         out.push_str("# TYPE vledger_connections_total counter\n");
-        out.push_str(&format!("vledger_connections_total {}\n",
-            self.connections_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_connections_total {}\n",
+            self.connections_total.load(Ordering::Relaxed)
+        ));
 
         // ── Auth ──────────────────────────────────────────────────────────
         out.push_str("# HELP vledger_auth_successes_total Successful authentications\n");
         out.push_str("# TYPE vledger_auth_successes_total counter\n");
-        out.push_str(&format!("vledger_auth_successes_total {}\n",
-            self.auth_successes_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_auth_successes_total {}\n",
+            self.auth_successes_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP vledger_auth_failures_total Failed authentication attempts\n");
         out.push_str("# TYPE vledger_auth_failures_total counter\n");
-        out.push_str(&format!("vledger_auth_failures_total {}\n",
-            self.auth_failures_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_auth_failures_total {}\n",
+            self.auth_failures_total.load(Ordering::Relaxed)
+        ));
 
         // ── Queries ───────────────────────────────────────────────────────
         out.push_str("# HELP vledger_queries_total SQL queries executed\n");
         out.push_str("# TYPE vledger_queries_total counter\n");
-        out.push_str(&format!("vledger_queries_total {}\n",
-            self.queries_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_queries_total {}\n",
+            self.queries_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP vledger_query_duration_ms_sum Cumulative query execution time (ms)\n");
         out.push_str("# TYPE vledger_query_duration_ms_sum counter\n");
-        out.push_str(&format!("vledger_query_duration_ms_sum {}\n",
-            self.query_duration_ms_sum.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_query_duration_ms_sum {}\n",
+            self.query_duration_ms_sum.load(Ordering::Relaxed)
+        ));
 
         // ── Security ──────────────────────────────────────────────────────
-        out.push_str("# HELP vledger_chain_verification_failures_total Hash chain integrity failures\n");
+        out.push_str(
+            "# HELP vledger_chain_verification_failures_total Hash chain integrity failures\n",
+        );
         out.push_str("# TYPE vledger_chain_verification_failures_total counter\n");
-        out.push_str(&format!("vledger_chain_verification_failures_total {}\n",
-            self.chain_verify_failures.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_chain_verification_failures_total {}\n",
+            self.chain_verify_failures.load(Ordering::Relaxed)
+        ));
 
         // ── Operational ───────────────────────────────────────────────────
         out.push_str("# HELP vledger_backup_age_seconds Seconds since the last backup\n");
@@ -252,13 +303,17 @@ impl Metrics {
 
         out.push_str("# HELP vledger_replica_lag_lsn Replication lag in WAL records\n");
         out.push_str("# TYPE vledger_replica_lag_lsn gauge\n");
-        out.push_str(&format!("vledger_replica_lag_lsn {}\n",
-            self.replica_lag_lsn.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_replica_lag_lsn {}\n",
+            self.replica_lag_lsn.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP vledger_foureyes_pending_total Four-eyes entries awaiting approval\n");
         out.push_str("# TYPE vledger_foureyes_pending_total gauge\n");
-        out.push_str(&format!("vledger_foureyes_pending_total {}\n",
-            self.foureyes_pending_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "vledger_foureyes_pending_total {}\n",
+            self.foureyes_pending_total.load(Ordering::Relaxed)
+        ));
 
         out
     }
@@ -285,12 +340,12 @@ impl Default for Metrics {
 /// The server shuts down gracefully when `shutdown` is cancelled.
 pub async fn run_metrics_server(
     bind_addr: String,
-    metrics:   Arc<Metrics>,
-    shutdown:  CancellationToken,
+    metrics: Arc<Metrics>,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/metrics", get(handler_metrics))
-        .route("/health",  get(handler_health))
+        .route("/health", get(handler_health))
         .with_state(metrics);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -371,14 +426,16 @@ mod tests {
 
     #[test]
     fn render_format_is_valid_prom_text() {
-        let m      = Metrics::new();
+        let m = Metrics::new();
         let output = m.render();
 
         // Every non-blank, non-comment line must contain a space separating
         // the metric name from its value.
         for line in output.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
             assert!(
                 trimmed.contains(' '),
                 "Metric line must have at least one space: '{trimmed}'"

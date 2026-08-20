@@ -46,7 +46,7 @@ pub struct AuthResponse {
 /// Sent by the primary after verifying the MAC.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthResult {
-    pub ok:    bool,
+    pub ok: bool,
     /// Human-readable reason on failure.
     pub error: Option<String>,
 }
@@ -84,9 +84,9 @@ pub enum ReplicationMessage {
 /// WAL record payload shipped from primary → replica.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRecordMsg {
-    pub lsn:             Lsn,
-    pub segment:         u64,
-    pub record_hex:      String,
+    pub lsn: Lsn,
+    pub segment: u64,
+    pub record_hex: String,
     pub record_hash_hex: String,
 }
 
@@ -94,7 +94,7 @@ pub struct WalRecordMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatMsg {
     pub last_lsn: Lsn,
-    pub ts:       String,
+    pub ts: String,
 }
 
 // ── Acknowledgement (replica → primary) ──────────────────────────────────────
@@ -108,13 +108,20 @@ pub enum AckMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AckPayload { pub lsn: Lsn }
+pub struct AckPayload {
+    pub lsn: Lsn,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeartbeatAckPayload { pub last_lsn: Lsn }
+pub struct HeartbeatAckPayload {
+    pub last_lsn: Lsn,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplicaError { pub lsn: Option<Lsn>, pub message: String }
+pub struct ReplicaError {
+    pub lsn: Option<Lsn>,
+    pub message: String,
+}
 
 // ── Wire encoding helpers ─────────────────────────────────────────────────────
 

@@ -179,4 +179,3 @@ pub struct CheckpointPayload {
     #[serde(default)]
     pub signer_pubkey: Vec<u8>,
 }
-

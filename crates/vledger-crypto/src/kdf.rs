@@ -54,7 +54,10 @@ impl MasterKey {
         let mut okm = [0u8; 32];
         hk.expand(context.as_bytes(), &mut okm)
             .map_err(|e| CryptoError::KdfFailed(e.to_string()))?;
-        Ok(DerivedKey { bytes: okm, context: context.to_string() })
+        Ok(DerivedKey {
+            bytes: okm,
+            context: context.to_string(),
+        })
     }
 
     /// Derive the encryption key for a specific table.

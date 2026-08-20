@@ -25,14 +25,14 @@ pub enum Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Null          => write!(f, "NULL"),
-            Value::Int(n)        => write!(f, "{n}"),
-            Value::BigInt(n)     => write!(f, "{n}"),
-            Value::Text(s)       => write!(f, "{s}"),
-            Value::Bool(b)       => write!(f, "{b}"),
-            Value::Timestamp(s)  => write!(f, "{s}"),
-            Value::Hash(s)       => write!(f, "{s}"),
-            Value::Uuid(s)       => write!(f, "{s}"),
+            Value::Null => write!(f, "NULL"),
+            Value::Int(n) => write!(f, "{n}"),
+            Value::BigInt(n) => write!(f, "{n}"),
+            Value::Text(s) => write!(f, "{s}"),
+            Value::Bool(b) => write!(f, "{b}"),
+            Value::Timestamp(s) => write!(f, "{s}"),
+            Value::Hash(s) => write!(f, "{s}"),
+            Value::Uuid(s) => write!(f, "{s}"),
         }
     }
 }
@@ -46,12 +46,18 @@ pub struct Row {
 
 impl Row {
     pub fn new(columns: Vec<String>, values: Vec<Value>) -> Self {
-        assert_eq!(columns.len(), values.len(), "columns/values length mismatch");
+        assert_eq!(
+            columns.len(),
+            values.len(),
+            "columns/values length mismatch"
+        );
         Self { columns, values }
     }
 
     pub fn get(&self, col: &str) -> Option<&Value> {
-        self.columns.iter().position(|c| c == col)
+        self.columns
+            .iter()
+            .position(|c| c == col)
             .map(|i| &self.values[i])
     }
 }
@@ -135,8 +141,17 @@ impl QueryResult {
 
     pub fn rows(columns: Vec<String>, rows: Vec<Row>, message: impl Into<String>) -> Self {
         let n = rows.len();
-        Self { columns, rows, rows_affected: n, proof: None, message: message.into(),
-               entry_id: None, entry_sequence: None, domain: None, amount_sum: None }
+        Self {
+            columns,
+            rows,
+            rows_affected: n,
+            proof: None,
+            message: message.into(),
+            entry_id: None,
+            entry_sequence: None,
+            domain: None,
+            amount_sum: None,
+        }
     }
 
     pub fn with_proof(mut self, proof: MerkleProof) -> Self {

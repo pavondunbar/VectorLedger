@@ -171,7 +171,7 @@ impl JournalEntry {
         fn write_opt_bytes(buf: &mut Vec<u8>, data: Option<&[u8]>) {
             match data {
                 Some(d) => write_bytes(buf, d),
-                None    => buf.extend_from_slice(&u32::MAX.to_le_bytes()),
+                None => buf.extend_from_slice(&u32::MAX.to_le_bytes()),
             }
         }
 
@@ -181,14 +181,22 @@ impl JournalEntry {
         buf.push(0x01u8);
 
         // ── Fixed-width identity fields ───────────────────────────────────
-        buf.extend_from_slice(self.id.as_bytes());                              // 16 bytes
-        buf.extend_from_slice(&self.sequence.to_le_bytes());                    //  8 bytes
-        buf.push(self.status as u8);                                            //  1 byte
+        buf.extend_from_slice(self.id.as_bytes()); // 16 bytes
+        buf.extend_from_slice(&self.sequence.to_le_bytes()); //  8 bytes
+        buf.push(self.status as u8); //  1 byte
         buf.extend_from_slice(
-            &self.effective_at.timestamp_nanos_opt().unwrap_or(0).to_le_bytes() //  8 bytes
+            &self
+                .effective_at
+                .timestamp_nanos_opt()
+                .unwrap_or(0)
+                .to_le_bytes(), //  8 bytes
         );
         buf.extend_from_slice(
-            &self.posted_at.timestamp_nanos_opt().unwrap_or(0).to_le_bytes()    //  8 bytes
+            &self
+                .posted_at
+                .timestamp_nanos_opt()
+                .unwrap_or(0)
+                .to_le_bytes(), //  8 bytes
         );
 
         // ── Variable-length identity fields (length-prefixed) ─────────────
@@ -201,12 +209,24 @@ impl JournalEntry {
         // 16 bytes each; absent → 16 zero bytes followed by a 0x00 presence flag,
         // present → UUID bytes followed by a 0x01 presence flag.
         match self.reverses_entry_id {
-            Some(id) => { buf.extend_from_slice(id.as_bytes()); buf.push(0x01); }
-            None     => { buf.extend_from_slice(&[0u8; 16]);    buf.push(0x00); }
+            Some(id) => {
+                buf.extend_from_slice(id.as_bytes());
+                buf.push(0x01);
+            }
+            None => {
+                buf.extend_from_slice(&[0u8; 16]);
+                buf.push(0x00);
+            }
         }
         match self.reversed_by_entry_id {
-            Some(id) => { buf.extend_from_slice(id.as_bytes()); buf.push(0x01); }
-            None     => { buf.extend_from_slice(&[0u8; 16]);    buf.push(0x00); }
+            Some(id) => {
+                buf.extend_from_slice(id.as_bytes());
+                buf.push(0x01);
+            }
+            None => {
+                buf.extend_from_slice(&[0u8; 16]);
+                buf.push(0x00);
+            }
         }
 
         // ── Approval metadata (length-prefixed) ───────────────────────────
@@ -215,10 +235,10 @@ impl JournalEntry {
         // ── Journal lines (length-prefixed group count + per-line fields) ─
         buf.extend_from_slice(&(self.lines.len() as u32).to_le_bytes());
         for line in &self.lines {
-            buf.extend_from_slice(line.id.as_bytes());                          // 16 bytes
-            buf.extend_from_slice(line.account_id.as_bytes());                  // 16 bytes
-            buf.extend_from_slice(&line.amount.as_i64().to_le_bytes());         //  8 bytes
-            buf.push(line.dr_cr as u8);                                         //  1 byte
+            buf.extend_from_slice(line.id.as_bytes()); // 16 bytes
+            buf.extend_from_slice(line.account_id.as_bytes()); // 16 bytes
+            buf.extend_from_slice(&line.amount.as_i64().to_le_bytes()); //  8 bytes
+            buf.push(line.dr_cr as u8); //  1 byte
             write_bytes(&mut buf, line.currency_code.as_bytes());
             write_opt_bytes(&mut buf, line.memo.as_deref().map(str::as_bytes));
         }
@@ -313,7 +333,12 @@ impl JournalEntryBuilder {
         }
     }
 
-    pub fn debit(mut self, account_id: AccountId, amount: Amount, currency: impl Into<String>) -> Self {
+    pub fn debit(
+        mut self,
+        account_id: AccountId,
+        amount: Amount,
+        currency: impl Into<String>,
+    ) -> Self {
         self.lines.push(JournalLine {
             id: Uuid::new_v4(),
             account_id,
@@ -325,7 +350,12 @@ impl JournalEntryBuilder {
         self
     }
 
-    pub fn credit(mut self, account_id: AccountId, amount: Amount, currency: impl Into<String>) -> Self {
+    pub fn credit(
+        mut self,
+        account_id: AccountId,
+        amount: Amount,
+        currency: impl Into<String>,
+    ) -> Self {
         self.lines.push(JournalLine {
             id: Uuid::new_v4(),
             account_id,
@@ -463,15 +493,19 @@ mod tests {
         let acct2 = Uuid::new_v4();
 
         let mut e1 = JournalEntryBuilder::new("ab", "c-domain")
-            .debit(acct, amt, "USD").credit(acct2, amt, "USD").build();
+            .debit(acct, amt, "USD")
+            .credit(acct2, amt, "USD")
+            .build();
         e1.sequence = 1;
 
         let mut e2 = JournalEntryBuilder::new("a", "bc-domain")
-            .debit(acct, amt, "USD").credit(acct2, amt, "USD").build();
+            .debit(acct, amt, "USD")
+            .credit(acct2, amt, "USD")
+            .build();
         e2.sequence = 1;
         // Force identical timestamps so only the string fields differ
         e2.effective_at = e1.effective_at;
-        e2.posted_at    = e1.posted_at;
+        e2.posted_at = e1.posted_at;
 
         assert_ne!(
             e1.canonical_bytes(),

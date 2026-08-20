@@ -15,7 +15,7 @@ use crate::record::{ApprovalRecord, ApprovalStatus};
 
 /// Four-eyes approval queue.  Thread-safe — wrap in `Arc` to share.
 pub struct FourEyesQueue {
-    dir:     PathBuf,
+    dir: PathBuf,
     /// In-memory index of all pending records (rebuilt from disk on open).
     pending: Mutex<HashMap<Uuid, ApprovalRecord>>,
     /// Optional shared audit log — when `Some`, submit/approve/reject each
@@ -33,7 +33,11 @@ impl FourEyesQueue {
         Self::load_pending(&dir, &mut pending)?;
 
         info!(dir = %dir.display(), pending = pending.len(), "FourEyesQueue opened");
-        Ok(Self { dir, pending: Mutex::new(pending), audit_log: None })
+        Ok(Self {
+            dir,
+            pending: Mutex::new(pending),
+            audit_log: None,
+        })
     }
 
     /// Open with a shared audit log so every approval action is recorded.
@@ -54,22 +58,22 @@ impl FourEyesQueue {
     /// Returns the `ApprovalRecord` (including its `id`) for tracking.
     pub fn submit(
         &self,
-        entry_bytes:  &[u8],
-        description:  impl Into<String>,
-        domain:       impl Into<String>,
+        entry_bytes: &[u8],
+        description: impl Into<String>,
+        domain: impl Into<String>,
         submitter_id: impl Into<String>,
     ) -> Result<ApprovalRecord, FourEyesError> {
         let record = ApprovalRecord {
-            id:                Uuid::new_v4(),
-            status:            ApprovalStatus::Pending,
-            submitter_id:      submitter_id.into(),
-            approver_id:       None,
-            reject_reason:     None,
-            submitted_at:      Utc::now(),
-            decided_at:        None,
+            id: Uuid::new_v4(),
+            status: ApprovalStatus::Pending,
+            submitter_id: submitter_id.into(),
+            approver_id: None,
+            reject_reason: None,
+            submitted_at: Utc::now(),
+            decided_at: None,
             entry_payload_hex: hex::encode(entry_bytes),
-            description:       description.into(),
-            domain:            domain.into(),
+            description: description.into(),
+            domain: domain.into(),
         };
 
         self.persist_pending(&record)?;
@@ -83,9 +87,9 @@ impl FourEyesQueue {
         if let Some(log) = &self.audit_log {
             let _ = log.append(vledger_audit::AuditEventKind::FourEyesSubmitted {
                 approval_id: record.id,
-                entry_id:    record.id, // best proxy without separate entry_id param
-                submitter:   record.submitter_id.clone(),
-                domain:      record.domain.clone(),
+                entry_id: record.id, // best proxy without separate entry_id param
+                submitter: record.submitter_id.clone(),
+                domain: record.domain.clone(),
             });
         }
 
@@ -110,7 +114,7 @@ impl FourEyesQueue {
         &self,
         approval_id: Uuid,
         approver_id: impl Into<String>,
-        post_fn:     F,
+        post_fn: F,
     ) -> Result<ApprovalRecord, FourEyesError>
     where
         F: FnOnce(&[u8]) -> Result<(), String>,
@@ -138,9 +142,9 @@ impl FourEyesQueue {
 
         post_fn(&entry_bytes).map_err(FourEyesError::PostFailed)?;
 
-        record.status      = ApprovalStatus::Approved;
+        record.status = ApprovalStatus::Approved;
         record.approver_id = Some(approver_id.clone());
-        record.decided_at  = Some(Utc::now());
+        record.decided_at = Some(Utc::now());
 
         self.persist_decided(&record, "approved")?;
         self.remove_pending(approval_id)?;
@@ -163,10 +167,10 @@ impl FourEyesQueue {
         &self,
         approval_id: Uuid,
         approver_id: impl Into<String>,
-        reason:      impl Into<String>,
+        reason: impl Into<String>,
     ) -> Result<ApprovalRecord, FourEyesError> {
         let approver_id = approver_id.into();
-        let reason      = reason.into();
+        let reason = reason.into();
 
         let mut record = self.get_pending(approval_id)?;
 
@@ -174,10 +178,10 @@ impl FourEyesQueue {
             return Err(FourEyesError::SelfApproval(approver_id));
         }
 
-        record.status        = ApprovalStatus::Rejected;
-        record.approver_id   = Some(approver_id.clone());
+        record.status = ApprovalStatus::Rejected;
+        record.approver_id = Some(approver_id.clone());
         record.reject_reason = Some(reason.clone());
-        record.decided_at    = Some(Utc::now());
+        record.decided_at = Some(Utc::now());
 
         self.persist_decided(&record, "rejected")?;
         self.remove_pending(approval_id)?;
@@ -188,7 +192,7 @@ impl FourEyesQueue {
             let _ = log.append(vledger_audit::AuditEventKind::FourEyesRejected {
                 approval_id,
                 approver: approver_id.clone(),
-                reason:   reason.clone(),
+                reason: reason.clone(),
             });
         }
 
@@ -221,7 +225,7 @@ impl FourEyesQueue {
             set_mode_600(&path);
         }
         let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
-        let line  = serde_json::to_string(record)
+        let line = serde_json::to_string(record)
             .map_err(|e| FourEyesError::Serialisation(e.to_string()))?;
         writeln!(f, "{line}")?;
         f.sync_all()?;
@@ -231,18 +235,14 @@ impl FourEyesQueue {
     /// Append a decided record to `approved.jsonl` or `rejected.jsonl`.
     ///
     /// Fix #8: same pre-creation permission pattern as `persist_pending`.
-    fn persist_decided(
-        &self,
-        record: &ApprovalRecord,
-        kind:   &str,
-    ) -> Result<(), FourEyesError> {
+    fn persist_decided(&self, record: &ApprovalRecord, kind: &str) -> Result<(), FourEyesError> {
         let path = self.dir.join(format!("{kind}.jsonl"));
         if !path.exists() {
             std::fs::File::create(&path)?;
             set_mode_600(&path);
         }
         let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
-        let line  = serde_json::to_string(record)
+        let line = serde_json::to_string(record)
             .map_err(|e| FourEyesError::Serialisation(e.to_string()))?;
         writeln!(f, "{line}")?;
         f.sync_all()?;
@@ -256,18 +256,24 @@ impl FourEyesQueue {
     /// group/other users even for the brief window before the atomic rename.
     fn remove_pending(&self, id: Uuid) -> Result<(), FourEyesError> {
         let path = self.dir.join("pending.jsonl");
-        if !path.exists() { return Ok(()); }
+        if !path.exists() {
+            return Ok(());
+        }
 
-        let file   = File::open(&path)?;
+        let file = File::open(&path)?;
         let reader = BufReader::new(file);
         let mut kept = Vec::new();
 
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             match serde_json::from_str::<ApprovalRecord>(&line) {
-                Ok(r) if r.id == id => { debug!(id = %id, "Removing from pending.jsonl"); }
-                Ok(_) | Err(_)      => kept.push(line),
+                Ok(r) if r.id == id => {
+                    debug!(id = %id, "Removing from pending.jsonl");
+                }
+                Ok(_) | Err(_) => kept.push(line),
             }
         }
 
@@ -295,20 +301,26 @@ impl FourEyesQueue {
 
     /// Load all pending records from disk into the in-memory map.
     fn load_pending(
-        dir:     &Path,
+        dir: &Path,
         pending: &mut HashMap<Uuid, ApprovalRecord>,
     ) -> Result<(), FourEyesError> {
         let path = dir.join("pending.jsonl");
-        if !path.exists() { return Ok(()); }
+        if !path.exists() {
+            return Ok(());
+        }
 
-        let file   = File::open(&path)?;
+        let file = File::open(&path)?;
         let reader = BufReader::new(file);
 
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             match serde_json::from_str::<ApprovalRecord>(&line) {
-                Ok(r) => { pending.insert(r.id, r); }
+                Ok(r) => {
+                    pending.insert(r.id, r);
+                }
                 Err(e) => warn!("Skipping malformed pending record: {e}"),
             }
         }
@@ -316,7 +328,11 @@ impl FourEyesQueue {
     }
 
     fn get_pending(&self, id: Uuid) -> Result<ApprovalRecord, FourEyesError> {
-        self.pending.lock().unwrap().get(&id).cloned()
+        self.pending
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
             .ok_or(FourEyesError::NotFound(id))
     }
 
@@ -328,16 +344,20 @@ impl FourEyesQueue {
     fn find_in_decided(
         &self,
         kind: &str,
-        id:   Uuid,
+        id: Uuid,
     ) -> Result<Option<ApprovalRecord>, FourEyesError> {
         let path = self.dir.join(format!("{kind}.jsonl"));
-        if !path.exists() { return Ok(None); }
+        if !path.exists() {
+            return Ok(None);
+        }
 
-        let file   = File::open(&path)?;
+        let file = File::open(&path)?;
         let reader = BufReader::new(file);
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             if let Ok(r) = serde_json::from_str::<ApprovalRecord>(&line) {
                 if r.id == id {
                     return Ok(Some(r));
@@ -346,8 +366,7 @@ impl FourEyesQueue {
         }
         Ok(None)
     }
-}  // impl FourEyesQueue
-
+} // impl FourEyesQueue
 
 // ── File permission helper (Fix #5) ──────────────────────────────────────────
 
@@ -363,10 +382,7 @@ fn set_mode_600(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            path,
-            std::fs::Permissions::from_mode(0o600),
-        );
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     #[cfg(not(unix))]
     {

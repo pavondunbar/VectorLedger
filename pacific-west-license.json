@@ -1,0 +1,16 @@
+{
+  "email": "cfo@pacificwest.com",
+  "expires_at": "2026-09-17",
+  "features": [
+    "pgwire",
+    "replication",
+    "hsm",
+    "compliance_report",
+    "audit_export_unlimited",
+    "multi_node"
+  ],
+  "issued_at": "2026-08-17",
+  "licensee": "Pacific West Bank",
+  "signature": "c31768b64621a19bf35496a89031c842d60b2bfbc1f82175d971da46529ffd9f06b134894083a19f85c2bdf7ef82488215b8e8731a68f1bac4d7e640ce5acb05",
+  "tier": "enterprise"
+}

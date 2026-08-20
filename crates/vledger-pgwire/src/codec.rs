@@ -20,9 +20,7 @@ const MAX_MESSAGE_PAYLOAD: usize = 16 * 1024 * 1024;
 ///
 /// Returns payload bytes (NOT including the 4-byte length field).
 /// Rejects any packet whose declared payload exceeds `MAX_STARTUP_PAYLOAD`.
-pub async fn read_startup<R: AsyncRead + Unpin>(
-    reader: &mut R,
-) -> std::io::Result<Vec<u8>> {
+pub async fn read_startup<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let total_len = u32::from_be_bytes(len_buf) as usize;
@@ -52,9 +50,7 @@ pub async fn read_startup<R: AsyncRead + Unpin>(
 /// Read a regular frontend message `(type_byte, payload)`.
 ///
 /// Rejects any message whose declared payload exceeds `MAX_MESSAGE_PAYLOAD`.
-pub async fn read_message<R: AsyncRead + Unpin>(
-    reader: &mut R,
-) -> std::io::Result<(u8, Vec<u8>)> {
+pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<(u8, Vec<u8>)> {
     let mut hdr = [0u8; 5];
     reader.read_exact(&mut hdr).await?;
     let msg_type = hdr[0];
@@ -70,9 +66,7 @@ pub async fn read_message<R: AsyncRead + Unpin>(
     if payload_len > MAX_MESSAGE_PAYLOAD {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!(
-                "message payload {payload_len} bytes exceeds limit {MAX_MESSAGE_PAYLOAD}"
-            ),
+            format!("message payload {payload_len} bytes exceeds limit {MAX_MESSAGE_PAYLOAD}"),
         ));
     }
     let mut payload = vec![0u8; payload_len];
@@ -83,10 +77,7 @@ pub async fn read_message<R: AsyncRead + Unpin>(
 }
 
 /// Write raw bytes to the stream and flush.
-pub async fn write_all<W: AsyncWrite + Unpin>(
-    writer: &mut W,
-    data: &[u8],
-) -> std::io::Result<()> {
+pub async fn write_all<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -> std::io::Result<()> {
     writer.write_all(data).await?;
     writer.flush().await
 }

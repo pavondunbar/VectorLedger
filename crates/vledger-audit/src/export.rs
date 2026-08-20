@@ -16,7 +16,7 @@ use crate::event::AuditEvent;
 #[derive(Debug, Clone)]
 pub struct TimeRange {
     pub from: DateTime<Utc>,
-    pub to:   DateTime<Utc>,
+    pub to: DateTime<Utc>,
 }
 
 impl TimeRange {
@@ -29,7 +29,7 @@ impl TimeRange {
         use chrono::TimeZone;
         Self {
             from: Utc.timestamp_opt(0, 0).unwrap(),
-            to:   DateTime::<Utc>::MAX_UTC,
+            to: DateTime::<Utc>::MAX_UTC,
         }
     }
 
@@ -52,12 +52,12 @@ pub enum ExportFormat {
 /// JSON (one event per line) into `writer`.
 pub fn export_json<W: Write>(
     log_path: &Path,
-    range:    &TimeRange,
-    writer:   &mut W,
+    range: &TimeRange,
+    writer: &mut W,
 ) -> Result<u64, AuditError> {
     scan_events(log_path, range, |ev| {
-        let line = serde_json::to_string(ev)
-            .map_err(|e| AuditError::Serialisation(e.to_string()))?;
+        let line =
+            serde_json::to_string(ev).map_err(|e| AuditError::Serialisation(e.to_string()))?;
         writeln!(writer, "{line}")?;
         Ok(())
     })
@@ -69,8 +69,8 @@ pub fn export_json<W: Write>(
 /// where `details` is the JSON-encoded event payload.
 pub fn export_csv<W: Write>(
     log_path: &Path,
-    range:    &TimeRange,
-    writer:   &mut W,
+    range: &TimeRange,
+    writer: &mut W,
 ) -> Result<u64, AuditError> {
     // Write header
     writeln!(writer, "sequence,ts,kind,content_hash,chain_hash,details")?;
@@ -86,7 +86,7 @@ pub fn export_csv<W: Write>(
             ev.sequence,
             ev.ts.to_rfc3339(),
             ev.event.name(),
-            &ev.content_hash[..16],  // first 16 hex chars for readability
+            &ev.content_hash[..16], // first 16 hex chars for readability
             &ev.chain_hash[..16],
             details_escaped,
         )?;
@@ -96,11 +96,7 @@ pub fn export_csv<W: Write>(
 
 // ── Internal scanner ──────────────────────────────────────────────────────────
 
-fn scan_events<F>(
-    log_path: &Path,
-    range:    &TimeRange,
-    mut cb:   F,
-) -> Result<u64, AuditError>
+fn scan_events<F>(log_path: &Path, range: &TimeRange, mut cb: F) -> Result<u64, AuditError>
 where
     F: FnMut(&AuditEvent) -> Result<(), AuditError>,
 {
@@ -108,15 +104,17 @@ where
         return Ok(0);
     }
 
-    let file   = File::open(log_path)?;
+    let file = File::open(log_path)?;
     let reader = BufReader::new(file);
     let mut count = 0u64;
 
     for line in reader.lines() {
         let line = line?;
-        if line.trim().is_empty() { continue; }
-        let ev: AuditEvent = serde_json::from_str(&line)
-            .map_err(|e| AuditError::Serialisation(e.to_string()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ev: AuditEvent =
+            serde_json::from_str(&line).map_err(|e| AuditError::Serialisation(e.to_string()))?;
         if range.contains(&ev.ts) {
             cb(&ev)?;
             count += 1;

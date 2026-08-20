@@ -19,11 +19,11 @@
 //!     deleted from T's perspective).
 
 pub mod error;
+pub mod manager;
 pub mod mvcc;
 pub mod tx;
-pub mod manager;
 
 pub use error::TxError;
+pub use manager::TransactionManager;
 pub use mvcc::{RowVersion, Visibility};
 pub use tx::{Transaction, TxState};
-pub use manager::TransactionManager;

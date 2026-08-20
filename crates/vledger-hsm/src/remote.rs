@@ -105,8 +105,12 @@ pub struct RemotePyHsmConfig {
     pub max_retries: u32,
 }
 
-fn default_timeout_ms()   -> u64 { 5_000 }
-fn default_max_retries()  -> u32 { 3 }
+fn default_timeout_ms() -> u64 {
+    5_000
+}
+fn default_max_retries() -> u32 {
+    3
+}
 
 impl RemotePyHsmConfig {
     /// Apply environment variable overrides on top of the deserialized config.
@@ -115,12 +119,22 @@ impl RemotePyHsmConfig {
     /// can override paths at deploy time (e.g. in container env-var injection)
     /// without modifying the config file.
     pub fn apply_env_overrides(&mut self) {
-        if let Ok(v) = std::env::var("PYHSM_ENDPOINT")     { self.endpoint    = v; }
-        if let Ok(v) = std::env::var("PYHSM_CA_CERT")      { self.ca_cert     = v; }
-        if let Ok(v) = std::env::var("PYHSM_CLIENT_CERT")  { self.client_cert = Some(v); }
-        if let Ok(v) = std::env::var("PYHSM_CLIENT_KEY")   { self.client_key  = Some(v); }
-        if let Ok(v) = std::env::var("PYHSM_TIMEOUT_MS")   {
-            if let Ok(ms) = v.parse() { self.timeout_ms = ms; }
+        if let Ok(v) = std::env::var("PYHSM_ENDPOINT") {
+            self.endpoint = v;
+        }
+        if let Ok(v) = std::env::var("PYHSM_CA_CERT") {
+            self.ca_cert = v;
+        }
+        if let Ok(v) = std::env::var("PYHSM_CLIENT_CERT") {
+            self.client_cert = Some(v);
+        }
+        if let Ok(v) = std::env::var("PYHSM_CLIENT_KEY") {
+            self.client_key = Some(v);
+        }
+        if let Ok(v) = std::env::var("PYHSM_TIMEOUT_MS") {
+            if let Ok(ms) = v.parse() {
+                self.timeout_ms = ms;
+            }
         }
     }
 
@@ -129,16 +143,16 @@ impl RemotePyHsmConfig {
     /// Strips the `https://` scheme prefix (required) and splits on `:`.
     /// Returns `(host, port)`.
     pub fn host_port(&self) -> Result<(String, u16), HsmError> {
-        let stripped = self.endpoint
-            .strip_prefix("https://")
-            .ok_or_else(|| HsmError::Config(format!(
+        let stripped = self.endpoint.strip_prefix("https://").ok_or_else(|| {
+            HsmError::Config(format!(
                 "PYHSM endpoint must start with 'https://' — got: {}",
                 self.endpoint
-            )))?;
+            ))
+        })?;
         let (host, port_str) = stripped.rsplit_once(':').unwrap_or((stripped, "8443"));
-        let port: u16 = port_str.parse().map_err(|_| HsmError::Config(format!(
-            "Invalid port in PYHSM endpoint: {port_str}"
-        )))?;
+        let port: u16 = port_str
+            .parse()
+            .map_err(|_| HsmError::Config(format!("Invalid port in PYHSM endpoint: {port_str}")))?;
         Ok((host.to_string(), port))
     }
 }
@@ -175,12 +189,11 @@ impl HsmTransport {
             // Minimal remote config from the endpoint alone; caller must
             // supply full RemotePyHsmConfig for mTLS.
             Self::Remote(RemotePyHsmConfig {
-                endpoint:    addr.to_string(),
-                ca_cert:     std::env::var("PYHSM_CA_CERT")
-                                 .unwrap_or_default(),
+                endpoint: addr.to_string(),
+                ca_cert: std::env::var("PYHSM_CA_CERT").unwrap_or_default(),
                 client_cert: std::env::var("PYHSM_CLIENT_CERT").ok(),
-                client_key:  std::env::var("PYHSM_CLIENT_KEY").ok(),
-                timeout_ms:  default_timeout_ms(),
+                client_key: std::env::var("PYHSM_CLIENT_KEY").ok(),
+                timeout_ms: default_timeout_ms(),
                 max_retries: default_max_retries(),
             })
         } else if addr.contains(':') {
@@ -199,9 +212,9 @@ impl HsmTransport {
     /// Returns a human-readable description for logging.
     pub fn description(&self) -> String {
         match self {
-            Self::LocalSocket(p)  => format!("Unix socket: {}", p.display()),
-            Self::LocalTcp(addr)  => format!("TCP loopback: {addr}"),
-            Self::Remote(cfg)     => format!("Remote mTLS: {}", cfg.endpoint),
+            Self::LocalSocket(p) => format!("Unix socket: {}", p.display()),
+            Self::LocalTcp(addr) => format!("TCP loopback: {addr}"),
+            Self::Remote(cfg) => format!("Remote mTLS: {}", cfg.endpoint),
         }
     }
 }
@@ -218,16 +231,18 @@ impl HsmTransport {
 /// Returns `HsmError::Tls` if any PEM file is missing, malformed, or if
 /// the key does not match the certificate.
 pub fn build_tls_connector(
-    ca_cert_path:      &str,
-    client_cert_path:  Option<&str>,
-    client_key_path:   Option<&str>,
+    ca_cert_path: &str,
+    client_cert_path: Option<&str>,
+    client_key_path: Option<&str>,
 ) -> Result<TlsConnector, HsmError> {
     // ── Root CA ───────────────────────────────────────────────────────────
     let ca_pem = read_pem_file(ca_cert_path)?;
     let mut root_store = rustls::RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut ca_pem.as_slice()) {
         let cert = cert.map_err(|e| HsmError::Tls(format!("CA cert parse error: {e}")))?;
-        root_store.add(cert).map_err(|e| HsmError::Tls(format!("CA cert add error: {e}")))?;
+        root_store
+            .add(cert)
+            .map_err(|e| HsmError::Tls(format!("CA cert add error: {e}")))?;
     }
 
     // ── TLS 1.3 only ──────────────────────────────────────────────────────
@@ -236,7 +251,7 @@ pub fn build_tls_connector(
     let config = if let (Some(cert_path), Some(key_path)) = (client_cert_path, client_key_path) {
         // ── mTLS: load client certificate + key ───────────────────────────
         let cert_pem = read_pem_file(cert_path)?;
-        let key_pem  = read_pem_file(key_path)?;
+        let key_pem = read_pem_file(key_path)?;
 
         let client_certs: Vec<CertificateDer<'static>> =
             rustls_pemfile::certs(&mut cert_pem.as_slice())
@@ -312,9 +327,8 @@ pub fn server_name(host: &str) -> Result<ServerName<'static>, HsmError> {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn read_pem_file(path: &str) -> Result<Vec<u8>, HsmError> {
-    std::fs::read(Path::new(path)).map_err(|e| HsmError::Tls(format!(
-        "Cannot read PEM file '{path}': {e}"
-    )))
+    std::fs::read(Path::new(path))
+        .map_err(|e| HsmError::Tls(format!("Cannot read PEM file '{path}': {e}")))
 }
 
 /// Generate a UUID v4 request ID for replay-attack prevention.

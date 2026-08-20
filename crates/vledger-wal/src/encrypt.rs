@@ -67,13 +67,13 @@ pub type WalKey = [u8; 32];
 ///
 /// Returns the on-disk encrypted blob.
 pub fn encrypt_record(
-    key:           &WalKey,
-    record_bytes:  &[u8],
+    key: &WalKey,
+    record_bytes: &[u8],
     segment_index: u64,
 ) -> Result<Vec<u8>, WalError> {
     let cipher = build_cipher(key);
-    let nonce  = Aes256Gcm::generate_nonce(OsRng);
-    let aad    = segment_index.to_le_bytes();
+    let nonce = Aes256Gcm::generate_nonce(OsRng);
+    let aad = segment_index.to_le_bytes();
 
     let payload = Payload {
         msg: record_bytes,
@@ -103,11 +103,7 @@ pub fn encrypt_record(
 /// Returns the plaintext record bytes on success.
 /// Returns `Err(WalError::Decryption)` if the tag or AAD does not verify —
 /// indicating corruption or a wrong key.
-pub fn decrypt_record(
-    key:           &WalKey,
-    blob:          &[u8],
-    segment_index: u64,
-) -> Result<Vec<u8>, WalError> {
+pub fn decrypt_record(key: &WalKey, blob: &[u8], segment_index: u64) -> Result<Vec<u8>, WalError> {
     if blob.len() < ENC_HEADER_SIZE {
         return Err(WalError::Encryption(format!(
             "encrypted blob too short: {} bytes",
@@ -125,7 +121,7 @@ pub fn decrypt_record(
     }
 
     let nonce_bytes = &blob[4..16];
-    let ct_len      = u32::from_le_bytes(blob[16..20].try_into().unwrap()) as usize;
+    let ct_len = u32::from_le_bytes(blob[16..20].try_into().unwrap()) as usize;
 
     if blob.len() < ENC_HEADER_SIZE + ct_len {
         return Err(WalError::Encryption(format!(
@@ -136,11 +132,14 @@ pub fn decrypt_record(
     }
 
     let ciphertext = &blob[ENC_HEADER_SIZE..ENC_HEADER_SIZE + ct_len];
-    let nonce      = AesNonce::from_slice(nonce_bytes);
-    let aad        = segment_index.to_le_bytes();
+    let nonce = AesNonce::from_slice(nonce_bytes);
+    let aad = segment_index.to_le_bytes();
 
-    let cipher  = build_cipher(key);
-    let payload = Payload { msg: ciphertext, aad: &aad };
+    let cipher = build_cipher(key);
+    let payload = Payload {
+        msg: ciphertext,
+        aad: &aad,
+    };
 
     cipher
         .decrypt(nonce, payload)
@@ -150,8 +149,7 @@ pub fn decrypt_record(
 /// Returns `true` if `bytes` starts with the encrypted record magic.
 #[inline]
 pub fn is_encrypted(bytes: &[u8]) -> bool {
-    bytes.len() >= 4
-        && u32::from_le_bytes(bytes[0..4].try_into().unwrap()) == ENCRYPTED_MAGIC
+    bytes.len() >= 4 && u32::from_le_bytes(bytes[0..4].try_into().unwrap()) == ENCRYPTED_MAGIC
 }
 
 // ── Key derivation ────────────────────────────────────────────────────────────
@@ -161,14 +159,11 @@ pub fn is_encrypted(bytes: &[u8]) -> bool {
 ///
 /// The derivation context is `"vgdb/wal/segment/<index>"` so each segment
 /// gets a unique key.
-pub fn derive_segment_key(
-    master_key:    &[u8; 32],
-    segment_index: u64,
-) -> Result<WalKey, WalError> {
+pub fn derive_segment_key(master_key: &[u8; 32], segment_index: u64) -> Result<WalKey, WalError> {
     use hkdf::Hkdf;
     use sha2::Sha256;
 
-    let hk  = Hkdf::<Sha256>::new(None, master_key);
+    let hk = Hkdf::<Sha256>::new(None, master_key);
     let ctx = format!("vgdb/wal/segment/{segment_index}");
     let mut okm = [0u8; 32];
     hk.expand(ctx.as_bytes(), &mut okm)
@@ -190,26 +185,28 @@ mod tests {
 
     fn test_key() -> WalKey {
         let mut k = [0u8; 32];
-        for (i, b) in k.iter_mut().enumerate() { *b = i as u8; }
+        for (i, b) in k.iter_mut().enumerate() {
+            *b = i as u8;
+        }
         k
     }
 
     #[test]
     fn roundtrip_encrypt_decrypt() {
-        let key      = test_key();
-        let record   = b"WAL record payload for test 123";
-        let segment  = 42u64;
+        let key = test_key();
+        let record = b"WAL record payload for test 123";
+        let segment = 42u64;
 
-        let blob      = encrypt_record(&key, record, segment).unwrap();
+        let blob = encrypt_record(&key, record, segment).unwrap();
         let plaintext = decrypt_record(&key, &blob, segment).unwrap();
         assert_eq!(plaintext, record);
     }
 
     #[test]
     fn wrong_segment_index_fails() {
-        let key     = test_key();
-        let record  = b"financial data";
-        let blob    = encrypt_record(&key, record, 1).unwrap();
+        let key = test_key();
+        let record = b"financial data";
+        let blob = encrypt_record(&key, record, 1).unwrap();
         // Decrypt with wrong segment index → AAD mismatch → GCM tag fail
         assert!(decrypt_record(&key, &blob, 2).is_err());
     }
@@ -226,7 +223,7 @@ mod tests {
 
     #[test]
     fn tampered_ciphertext_fails() {
-        let key   = test_key();
+        let key = test_key();
         let mut blob = encrypt_record(&key, b"data", 0).unwrap();
         // Flip a byte in the ciphertext
         let last = blob.len() - 1;
@@ -236,7 +233,7 @@ mod tests {
 
     #[test]
     fn is_encrypted_detection() {
-        let key  = test_key();
+        let key = test_key();
         let blob = encrypt_record(&key, b"record", 0).unwrap();
         assert!(is_encrypted(&blob));
 

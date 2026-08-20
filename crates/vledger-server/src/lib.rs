@@ -8,10 +8,10 @@ pub mod metrics;
 pub mod protocol;
 pub mod tls;
 
-pub use auth::{Role, UserStore, Session, check_plan_privilege};
+pub use auth::{check_plan_privilege, Role, Session, UserStore};
 pub use config::ServerConfig;
 pub use error::ServerError;
-pub use metrics::{Metrics, run_metrics_server};
+pub use metrics::{run_metrics_server, Metrics};
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -28,21 +28,24 @@ use vledger_ledger::LedgerStore;
 
 #[derive(Debug)]
 struct IpBucket {
-    tokens:       f64,
+    tokens: f64,
     last_checked: Instant,
 }
 
-const RATE_BURST: f64          = 10.0;
+const RATE_BURST: f64 = 10.0;
 const RATE_REFILL_PER_SEC: f64 = 2.0;
-const BUCKET_TTL: Duration   = Duration::from_secs(300);
+const BUCKET_TTL: Duration = Duration::from_secs(300);
 
 impl IpBucket {
     fn new() -> Self {
-        Self { tokens: RATE_BURST, last_checked: Instant::now() }
+        Self {
+            tokens: RATE_BURST,
+            last_checked: Instant::now(),
+        }
     }
 
     fn try_acquire(&mut self) -> bool {
-        let now     = Instant::now();
+        let now = Instant::now();
         let elapsed = now.duration_since(self.last_checked).as_secs_f64();
         self.last_checked = now;
         self.tokens = (self.tokens + elapsed * RATE_REFILL_PER_SEC).min(RATE_BURST);
@@ -59,78 +62,78 @@ impl IpBucket {
 
 /// The VectorLedger server.
 pub struct Server {
-    config:     Arc<ServerConfig>,
-    ledger:     Arc<RwLock<LedgerStore>>,
+    config: Arc<ServerConfig>,
+    ledger: Arc<RwLock<LedgerStore>>,
     user_store: Arc<UserStore>,
     /// Optional WAL shipper — `Some` when this node is a replication primary.
     /// When `Some`, every committed `PostEntry` is shipped to replicas after
     /// the write lock is released.
-    shipper:    Option<Arc<vledger_replication::WalShipper>>,
+    shipper: Option<Arc<vledger_replication::WalShipper>>,
     /// Shared audit log — opened once at startup and threaded into every
     /// connection handler so audit events are written with a single monotonic
     /// sequence.
-    audit_log:  Option<Arc<vledger_audit::AuditLog>>,
+    audit_log: Option<Arc<vledger_audit::AuditLog>>,
 }
 
 impl Server {
     /// Create a server.
     pub fn new(config: ServerConfig, ledger: LedgerStore) -> Self {
-        let catalog_dir = config.catalog_dir.clone()
+        let catalog_dir = config
+            .catalog_dir
+            .clone()
             .unwrap_or_else(|| "./vledger-data/catalog".into());
-        let user_store = UserStore::open(Path::new(&catalog_dir))
-            .unwrap_or_else(|e| {
-                // Log the real error so operators know what failed.
-                tracing::error!(
-                    catalog_dir = %catalog_dir,
-                    "Failed to open user store: {e}. \
-                     Starting with an ephemeral in-memory store — \
-                     all user accounts will be lost on restart. \
-                     Ensure the catalog directory exists and is writable."
-                );
-                let tmp = std::env::temp_dir()
-                    .join(format!("vledger-catalog-{}", std::process::id()));
-                if let Err(mkdir_err) = std::fs::create_dir_all(&tmp) {
-                    // Both the real catalog and the temp fallback failed.
-                    // Fail loudly rather than silently continuing.
-                    panic!(
-                        "Cannot open user store at '{}' ({e}) and cannot create \
+        let user_store = UserStore::open(Path::new(&catalog_dir)).unwrap_or_else(|e| {
+            // Log the real error so operators know what failed.
+            tracing::error!(
+                catalog_dir = %catalog_dir,
+                "Failed to open user store: {e}. \
+                 Starting with an ephemeral in-memory store — \
+                 all user accounts will be lost on restart. \
+                 Ensure the catalog directory exists and is writable."
+            );
+            let tmp = std::env::temp_dir().join(format!("vledger-catalog-{}", std::process::id()));
+            if let Err(mkdir_err) = std::fs::create_dir_all(&tmp) {
+                // Both the real catalog and the temp fallback failed.
+                // Fail loudly rather than silently continuing.
+                panic!(
+                    "Cannot open user store at '{}' ({e}) and cannot create \
                          fallback at '{}' ({mkdir_err}). \
                          Check disk space and directory permissions.",
-                        catalog_dir,
-                        tmp.display()
-                    );
-                }
-                UserStore::open(&tmp).unwrap_or_else(|e2| {
-                    panic!(
-                        "Cannot open user store at '{}' ({e}) and fallback at \
+                    catalog_dir,
+                    tmp.display()
+                );
+            }
+            UserStore::open(&tmp).unwrap_or_else(|e2| {
+                panic!(
+                    "Cannot open user store at '{}' ({e}) and fallback at \
                          '{}' also failed ({e2}). \
                          Check disk space and directory permissions.",
-                        catalog_dir,
-                        tmp.display()
-                    )
-                })
-            });
+                    catalog_dir,
+                    tmp.display()
+                )
+            })
+        });
         Self {
-            config:     Arc::new(config),
-            ledger:     Arc::new(RwLock::new(ledger)),
+            config: Arc::new(config),
+            ledger: Arc::new(RwLock::new(ledger)),
             user_store: Arc::new(user_store),
-            shipper:    None,
-            audit_log:  None,
+            shipper: None,
+            audit_log: None,
         }
     }
 
     /// Create a server with an explicit `UserStore` (useful for testing).
     pub fn with_user_store(
-        config:     ServerConfig,
-        ledger:     LedgerStore,
+        config: ServerConfig,
+        ledger: LedgerStore,
         user_store: UserStore,
     ) -> Self {
         Self {
-            config:     Arc::new(config),
-            ledger:     Arc::new(RwLock::new(ledger)),
+            config: Arc::new(config),
+            ledger: Arc::new(RwLock::new(ledger)),
             user_store: Arc::new(user_store),
-            shipper:    None,
-            audit_log:  None,
+            shipper: None,
+            audit_log: None,
         }
     }
 
@@ -140,16 +143,16 @@ impl Server {
     /// so both listeners operate on the same in-memory state without opening
     /// the data directory twice (which would hit the exclusive lock).
     pub fn new_shared(
-        config:     ServerConfig,
-        ledger:     Arc<RwLock<LedgerStore>>,
+        config: ServerConfig,
+        ledger: Arc<RwLock<LedgerStore>>,
         user_store: Arc<UserStore>,
     ) -> Self {
         Self {
-            config:     Arc::new(config),
+            config: Arc::new(config),
             ledger,
             user_store,
-            shipper:    None,
-            audit_log:  None,
+            shipper: None,
+            audit_log: None,
         }
     }
 
@@ -159,14 +162,14 @@ impl Server {
     /// shipper will receive every committed `PostEntry` record after the
     /// write lock is released.
     pub fn new_shared_with_shipper(
-        config:     ServerConfig,
-        ledger:     Arc<RwLock<LedgerStore>>,
+        config: ServerConfig,
+        ledger: Arc<RwLock<LedgerStore>>,
         user_store: Arc<UserStore>,
-        shipper:    Option<Arc<vledger_replication::WalShipper>>,
-        audit_log:  Option<Arc<vledger_audit::AuditLog>>,
+        shipper: Option<Arc<vledger_replication::WalShipper>>,
+        audit_log: Option<Arc<vledger_audit::AuditLog>>,
     ) -> Self {
         Self {
-            config:     Arc::new(config),
+            config: Arc::new(config),
             ledger,
             user_store,
             shipper,
@@ -208,13 +211,14 @@ impl Server {
             }
         };
 
-        let listener  = TcpListener::bind(&self.config.bind_addr).await
+        let listener = TcpListener::bind(&self.config.bind_addr)
+            .await
             .map_err(|e| ServerError::BindFailed {
-                addr:   self.config.bind_addr.clone(),
+                addr: self.config.bind_addr.clone(),
                 reason: e.to_string(),
             })?;
 
-        let semaphore  = Arc::new(Semaphore::new(self.config.max_connections));
+        let semaphore = Arc::new(Semaphore::new(self.config.max_connections));
         let ip_buckets: Arc<tokio::sync::Mutex<HashMap<IpAddr, IpBucket>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
@@ -278,7 +282,7 @@ impl Server {
         // Page writes are now buffered (no sync_all inside the write lock);
         // this task ensures they are fsynced every group_commit_delay_ms.
         {
-            let pages_dir   = self.ledger.read().await.pages_dir();
+            let pages_dir = self.ledger.read().await.pages_dir();
             let flush_state = self.ledger.read().await.page_flush_state();
             vledger_pages::spawn_page_commit_flusher(
                 pages_dir,
@@ -324,23 +328,26 @@ impl Server {
 
             // Connection-count semaphore.
             let permit = match Arc::clone(&semaphore).try_acquire_owned() {
-                Ok(p)  => p,
+                Ok(p) => p,
                 Err(_) => {
                     warn!(peer = %peer_addr, max_connections = self.config.max_connections,
                           "Connection limit reached — queuing");
                     match Arc::clone(&semaphore).acquire_owned().await {
-                        Ok(p)  => p,
-                        Err(_) => { drop(tcp_stream); break; }
+                        Ok(p) => p,
+                        Err(_) => {
+                            drop(tcp_stream);
+                            break;
+                        }
                     }
                 }
             };
 
-            let acceptor   = acceptor.clone();
-            let ledger     = Arc::clone(&self.ledger);
-            let config     = Arc::clone(&self.config);
+            let acceptor = acceptor.clone();
+            let ledger = Arc::clone(&self.ledger);
+            let config = Arc::clone(&self.config);
             let user_store = Arc::clone(&self.user_store);
-            let shipper    = self.shipper.clone();
-            let audit_log  = self.audit_log.clone();
+            let shipper = self.shipper.clone();
+            let audit_log = self.audit_log.clone();
             let conn_token = shutdown.clone();
 
             tokio::spawn(async move {
@@ -348,9 +355,10 @@ impl Server {
                 match acceptor.accept(tcp_stream).await {
                     Ok(tls_stream) => {
                         handler::handle_connection(
-                            tls_stream, ledger, config, user_store,
-                            shipper, audit_log, peer_addr, conn_token,
-                        ).await;
+                            tls_stream, ledger, config, user_store, shipper, audit_log, peer_addr,
+                            conn_token,
+                        )
+                        .await;
                     }
                     Err(e) => error!(peer = %peer_addr, "TLS handshake failed: {e}"),
                 }
@@ -364,11 +372,11 @@ impl Server {
             max_connections = self.config.max_connections,
             "Waiting for in-flight connections to close…"
         );
-        let _ = semaphore.acquire_many(self.config.max_connections as u32).await;
+        let _ = semaphore
+            .acquire_many(self.config.max_connections as u32)
+            .await;
         info!("All connections closed — shutdown complete");
 
         Ok(())
     }
 }
-
-

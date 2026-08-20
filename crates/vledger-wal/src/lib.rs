@@ -49,19 +49,19 @@
 pub mod encrypt;
 pub mod error;
 pub mod key_rotation;
+pub mod reader;
 pub mod record;
+pub mod recovery;
 pub mod segment;
 pub mod writer;
-pub mod reader;
-pub mod recovery;
 
-pub use encrypt::{encrypt_record, decrypt_record, derive_segment_key, is_encrypted, WalKey};
+pub use encrypt::{decrypt_record, derive_segment_key, encrypt_record, is_encrypted, WalKey};
 pub use error::WalError;
 pub use key_rotation::{rotate_wal_key, KeyRotationResult};
-pub use record::{WalRecord, RecordType};
-pub use writer::{WalWriter, WalSyncMode, FlushState, spawn_group_commit_flusher};
 pub use reader::WalReader;
+pub use record::{RecordType, WalRecord};
 pub use recovery::{recover, recover_verified};
+pub use writer::{spawn_group_commit_flusher, FlushState, WalSyncMode, WalWriter};
 
 /// WAL magic number — spells "VectorLedger" in hex.
 pub const WAL_MAGIC: u32 = 0x56474442;

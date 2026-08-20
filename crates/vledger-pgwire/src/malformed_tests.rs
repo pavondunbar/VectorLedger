@@ -22,8 +22,8 @@
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncWriteExt;
     use crate::messages::FrontendMessage;
+    use tokio::io::AsyncWriteExt;
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -75,16 +75,20 @@ mod tests {
     async fn startup_payload_over_65536_rejected() {
         // Claim 65541 bytes of payload (65537 + 4 for length field)
         let data = startup_packet(65541, b"short");
-        assert!(read_startup_from_bytes(&data).await.is_err(),
-            "startup payload > 65536 must be rejected");
+        assert!(
+            read_startup_from_bytes(&data).await.is_err(),
+            "startup payload > 65536 must be rejected"
+        );
     }
 
     #[tokio::test]
     async fn startup_truncated_payload_rejected() {
         // Declare 20 bytes of payload but only provide 5.
         let data = startup_packet(24, b"short"); // 24 - 4 = 20 declared, 5 actual
-        assert!(read_startup_from_bytes(&data).await.is_err(),
-            "truncated startup payload must be rejected");
+        assert!(
+            read_startup_from_bytes(&data).await.is_err(),
+            "truncated startup payload must be rejected"
+        );
     }
 
     #[tokio::test]
@@ -98,18 +102,22 @@ mod tests {
     async fn startup_exactly_max_payload_accepted() {
         // Exactly 65536 bytes of payload + 4 for length field = 65540.
         let payload = vec![0u8; 65536];
-        let data    = startup_packet(65540, &payload);
-        assert!(read_startup_from_bytes(&data).await.is_ok(),
-            "startup payload of exactly MAX_STARTUP_PAYLOAD must be accepted");
+        let data = startup_packet(65540, &payload);
+        assert!(
+            read_startup_from_bytes(&data).await.is_ok(),
+            "startup payload of exactly MAX_STARTUP_PAYLOAD must be accepted"
+        );
     }
 
     #[tokio::test]
     async fn startup_one_over_max_rejected() {
         // 65537 payload bytes
         let payload = vec![0u8; 65537];
-        let data    = startup_packet(65541, &payload);
-        assert!(read_startup_from_bytes(&data).await.is_err(),
-            "startup payload of MAX+1 must be rejected");
+        let data = startup_packet(65541, &payload);
+        assert!(
+            read_startup_from_bytes(&data).await.is_err(),
+            "startup payload of MAX+1 must be rejected"
+        );
     }
 
     // ── Regular message tests ─────────────────────────────────────────────
@@ -117,8 +125,10 @@ mod tests {
     #[tokio::test]
     async fn regular_msg_len_less_than_4_rejected() {
         let data = regular_msg(b'Q', 3, b"");
-        assert!(read_message_from_bytes(&data).await.is_err(),
-            "message length field < 4 must be rejected");
+        assert!(
+            read_message_from_bytes(&data).await.is_err(),
+            "message length field < 4 must be rejected"
+        );
     }
 
     #[tokio::test]
@@ -132,16 +142,20 @@ mod tests {
         // Claim 16 MiB + 1 byte of payload.
         let oversized_len = (16 * 1024 * 1024 + 1 + 4) as u32;
         let data = regular_msg(b'Q', oversized_len, b"actual");
-        assert!(read_message_from_bytes(&data).await.is_err(),
-            "message payload > 16 MiB must be rejected");
+        assert!(
+            read_message_from_bytes(&data).await.is_err(),
+            "message payload > 16 MiB must be rejected"
+        );
     }
 
     #[tokio::test]
     async fn regular_msg_truncated_payload_rejected() {
         // Declare 50 bytes of payload but send only 5.
         let data = regular_msg(b'Q', 54, b"short");
-        assert!(read_message_from_bytes(&data).await.is_err(),
-            "truncated message payload must be rejected");
+        assert!(
+            read_message_from_bytes(&data).await.is_err(),
+            "truncated message payload must be rejected"
+        );
     }
 
     #[tokio::test]
@@ -176,7 +190,10 @@ mod tests {
         match msg {
             FrontendMessage::Query(sql) => {
                 // The SQL string must end at the first null byte.
-                assert!(!sql.contains('\0'), "null bytes must be stripped from query");
+                assert!(
+                    !sql.contains('\0'),
+                    "null bytes must be stripped from query"
+                );
             }
             _ => {} // Unknown is also acceptable
         }

@@ -1,7 +1,7 @@
 //! In-memory hash index for O(1) point lookups.
 
-use std::collections::HashMap;
 use crate::btree::RowLocation;
+use std::collections::HashMap;
 
 pub struct HashIndex {
     map: HashMap<Vec<u8>, Vec<RowLocation>>,
@@ -9,7 +9,9 @@ pub struct HashIndex {
 
 impl HashIndex {
     pub fn new() -> Self {
-        Self { map: HashMap::new() }
+        Self {
+            map: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, key: Vec<u8>, location: RowLocation) {

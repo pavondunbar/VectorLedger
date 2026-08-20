@@ -16,8 +16,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum LockError {
-    #[error("Data directory is already locked by another process. \
-             Only one vgdb process may open a data directory at a time.")]
+    #[error(
+        "Data directory is already locked by another process. \
+             Only one vgdb process may open a data directory at a time."
+    )]
     AlreadyLocked,
 
     #[error("Failed to create lock file at {path}: {reason}")]
@@ -48,7 +50,7 @@ impl DataDirLock {
             .read(true)
             .open(&lock_path)
             .map_err(|e| LockError::CreateFailed {
-                path:   lock_path.display().to_string(),
+                path: lock_path.display().to_string(),
                 reason: e.to_string(),
             })?;
 
@@ -62,7 +64,10 @@ impl DataDirLock {
             return Err(LockError::AlreadyLocked);
         }
 
-        Ok(Self { path: lock_path, _file: file })
+        Ok(Self {
+            path: lock_path,
+            _file: file,
+        })
     }
 
     /// Path of the lock file.

@@ -41,8 +41,9 @@ use vledger_server::auth::{Role, UserStore};
 use vledger_sql::planner::LogicalPlan;
 
 use crate::codec;
-use crate::messages::{self, FrontendMessage, StartupMessage, FieldDesc,
-                      PROTOCOL_VERSION_3, SSL_REQUEST_CODE};
+use crate::messages::{
+    self, FieldDesc, FrontendMessage, StartupMessage, PROTOCOL_VERSION_3, SSL_REQUEST_CODE,
+};
 
 // ── Timeout constants (Fix #1) ────────────────────────────────────────────────
 
@@ -68,17 +69,20 @@ const PG_BUCKET_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug)]
 struct IpBucket {
-    tokens:       f64,
+    tokens: f64,
     last_checked: Instant,
 }
 
 impl IpBucket {
     fn new() -> Self {
-        Self { tokens: PG_RATE_BURST, last_checked: Instant::now() }
+        Self {
+            tokens: PG_RATE_BURST,
+            last_checked: Instant::now(),
+        }
     }
 
     fn try_acquire(&mut self) -> bool {
-        let now     = Instant::now();
+        let now = Instant::now();
         let elapsed = now.duration_since(self.last_checked).as_secs_f64();
         self.last_checked = now;
         self.tokens = (self.tokens + elapsed * PG_RATE_REFILL_PER_SEC).min(PG_RATE_BURST);
@@ -99,18 +103,18 @@ pub struct PgWireConfig {
     /// TCP address to bind (default `127.0.0.1:5432`).
     pub bind_addr: String,
     /// Database name expected from clients (informational only).
-    pub database:  String,
+    pub database: String,
     /// Whether to attach Merkle proofs to every SELECT response.
     pub attach_proofs: bool,
     /// Path to TLS certificate PEM.  `None` → generate self-signed.
     pub tls_cert_path: Option<String>,
     /// Path to TLS private key PEM.  `None` → generate self-signed.
-    pub tls_key_path:  Option<String>,
+    pub tls_key_path: Option<String>,
     /// Hostname for self-signed certificate CN (default `localhost`).
-    pub tls_hostname:  String,
+    pub tls_hostname: String,
     /// Catalog directory for TLS cert persistence.
     /// `None` → ephemeral cert (not persisted across restarts).
-    pub catalog_dir:   Option<String>,
+    pub catalog_dir: Option<String>,
     /// Maximum concurrent connections (Fix #2).  Default: 64.
     pub max_connections: usize,
 }
@@ -118,13 +122,13 @@ pub struct PgWireConfig {
 impl Default for PgWireConfig {
     fn default() -> Self {
         Self {
-            bind_addr:       "127.0.0.1:5432".into(),
-            database:        "vledger".into(),
-            attach_proofs:   false,
-            tls_cert_path:   None,
-            tls_key_path:    None,
-            tls_hostname:    "localhost".into(),
-            catalog_dir:     None,
+            bind_addr: "127.0.0.1:5432".into(),
+            database: "vledger".into(),
+            attach_proofs: false,
+            tls_cert_path: None,
+            tls_key_path: None,
+            tls_hostname: "localhost".into(),
+            catalog_dir: None,
             max_connections: 64,
         }
     }
@@ -135,8 +139,8 @@ impl Default for PgWireConfig {
 /// PostgreSQL wire-protocol server with mandatory TLS, authentication, and
 /// connection-resource controls.
 pub struct PgWireServer {
-    config:     PgWireConfig,
-    ledger:     Arc<tokio::sync::RwLock<LedgerStore>>,
+    config: PgWireConfig,
+    ledger: Arc<tokio::sync::RwLock<LedgerStore>>,
     user_store: Arc<UserStore>,
 }
 
@@ -149,7 +153,7 @@ impl PgWireServer {
     pub fn new(config: PgWireConfig, ledger: LedgerStore, user_store: Arc<UserStore>) -> Self {
         Self {
             config,
-            ledger:     Arc::new(tokio::sync::RwLock::new(ledger)),
+            ledger: Arc::new(tokio::sync::RwLock::new(ledger)),
             user_store,
         }
     }
@@ -160,11 +164,15 @@ impl PgWireServer {
     /// that both listeners share the same store and avoid the exclusive data
     /// directory lock conflict.
     pub fn new_shared(
-        config:     PgWireConfig,
-        ledger:     Arc<tokio::sync::RwLock<LedgerStore>>,
+        config: PgWireConfig,
+        ledger: Arc<tokio::sync::RwLock<LedgerStore>>,
         user_store: Arc<UserStore>,
     ) -> Self {
-        Self { config, ledger, user_store }
+        Self {
+            config,
+            ledger,
+            user_store,
+        }
     }
 
     /// Start accepting connections.  Runs until `shutdown` is cancelled or the process exits.
@@ -172,8 +180,8 @@ impl PgWireServer {
     /// On shutdown: stops accepting, drains all in-flight connections by waiting
     /// for the semaphore to fully release, then returns.
     pub async fn run(self, shutdown: CancellationToken) -> anyhow::Result<()> {
-        let acceptor   = build_tls_acceptor(&self.config)?;
-        let listener   = TcpListener::bind(&self.config.bind_addr).await?;
+        let acceptor = build_tls_acceptor(&self.config)?;
+        let listener = TcpListener::bind(&self.config.bind_addr).await?;
 
         // Fix #2: connection-count cap.
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.max_connections));
@@ -194,8 +202,8 @@ impl PgWireServer {
             "PgWire server listening"
         );
 
-        let ledger     = self.ledger.clone();
-        let attach     = self.config.attach_proofs;
+        let ledger = self.ledger.clone();
+        let attach = self.config.attach_proofs;
         let user_store = self.user_store.clone();
 
         loop {
@@ -234,23 +242,28 @@ impl PgWireServer {
                         "PgWire connection limit reached — queuing"
                     );
                     match Arc::clone(&semaphore).acquire_owned().await {
-                        Ok(p)  => p,
-                        Err(_) => { drop(stream); break; }
+                        Ok(p) => p,
+                        Err(_) => {
+                            drop(stream);
+                            break;
+                        }
                     }
                 }
             };
 
             debug!(%peer, "PgWire new TCP connection");
 
-            let acceptor   = acceptor.clone();
-            let ledger     = ledger.clone();
+            let acceptor = acceptor.clone();
+            let ledger = ledger.clone();
             let user_store = user_store.clone();
             let conn_token = shutdown.clone();
 
             tokio::spawn(async move {
                 let _permit = permit; // held for full connection lifetime
-                if let Err(e) =
-                    handle_connection_starttls(stream, acceptor, ledger, user_store, attach, peer, conn_token).await
+                if let Err(e) = handle_connection_starttls(
+                    stream, acceptor, ledger, user_store, attach, peer, conn_token,
+                )
+                .await
                 {
                     error!(%peer, "PgWire connection error: {e}");
                 }
@@ -258,9 +271,13 @@ impl PgWireServer {
         }
 
         // Drain in-flight connections.
-        info!(max_connections = self.config.max_connections,
-              "PgWire waiting for in-flight connections to close…");
-        let _ = semaphore.acquire_many(self.config.max_connections as u32).await;
+        info!(
+            max_connections = self.config.max_connections,
+            "PgWire waiting for in-flight connections to close…"
+        );
+        let _ = semaphore
+            .acquire_many(self.config.max_connections as u32)
+            .await;
         info!("PgWire all connections closed — shutdown complete");
 
         Ok(())
@@ -270,17 +287,17 @@ impl PgWireServer {
 // ── TLS acceptor builder ──────────────────────────────────────────────────────
 
 fn build_tls_acceptor(cfg: &PgWireConfig) -> anyhow::Result<TlsAcceptor> {
-    use rustls::ServerConfig as RustlsConfig;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::ServerConfig as RustlsConfig;
     use std::sync::Arc as StdArc;
 
     let (certs, key): (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) =
         match (&cfg.tls_cert_path, &cfg.tls_key_path) {
             (Some(cert_path), Some(key_path)) => {
                 use rustls::pki_types::pem::PemObject;
-                let certs = CertificateDer::pem_file_iter(cert_path)?
-                    .collect::<Result<Vec<_>, _>>()?;
-                let key   = PrivateKeyDer::from_pem_file(key_path)?;
+                let certs =
+                    CertificateDer::pem_file_iter(cert_path)?.collect::<Result<Vec<_>, _>>()?;
+                let key = PrivateKeyDer::from_pem_file(key_path)?;
                 (certs, key)
             }
             _ => {
@@ -288,9 +305,8 @@ fn build_tls_acceptor(cfg: &PgWireConfig) -> anyhow::Result<TlsAcceptor> {
                 let CertifiedKey { cert, key_pair } =
                     generate_simple_self_signed(vec![cfg.tls_hostname.clone()])?;
                 let cert_der = CertificateDer::from(cert.der().to_vec());
-                let key_der  = PrivateKeyDer::Pkcs8(
-                    PrivatePkcs8KeyDer::from(key_pair.serialize_der())
-                );
+                let key_der =
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
                 info!(hostname = %cfg.tls_hostname,
                       "PgWire: generating self-signed TLS certificate");
                 (vec![cert_der], key_der)
@@ -314,13 +330,13 @@ fn build_tls_acceptor(cfg: &PgWireConfig) -> anyhow::Result<TlsAcceptor> {
 // 4. If it is a plain startup message, reject (we require TLS).
 
 async fn handle_connection_starttls(
-    stream:     TcpStream,
-    acceptor:   TlsAcceptor,
-    ledger:     Arc<tokio::sync::RwLock<LedgerStore>>,
+    stream: TcpStream,
+    acceptor: TlsAcceptor,
+    ledger: Arc<tokio::sync::RwLock<LedgerStore>>,
     user_store: Arc<UserStore>,
-    attach:     bool,
-    peer:       std::net::SocketAddr,
-    shutdown:   CancellationToken,
+    attach: bool,
+    peer: std::net::SocketAddr,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -362,7 +378,7 @@ async fn handle_connection_starttls(
         // Perform TLS handshake on the now-unwrapped stream.
         let tcp = plain.into_inner();
         let tls_stream = match acceptor.accept(tcp).await {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 warn!(%peer, "PgWire TLS handshake failed: {e}");
                 return Ok(());
@@ -376,7 +392,8 @@ async fn handle_connection_starttls(
         // but we require TLS so just send an error and close.
         let mut plain_write = plain.into_inner();
         let err = messages::error_response(
-            "FATAL", "28000",
+            "FATAL",
+            "28000",
             "SSL connection is required. Use sslmode=require.",
         );
         let _ = plain_write.write_all(&err).await;
@@ -387,12 +404,12 @@ async fn handle_connection_starttls(
 // ── TLS connection handler ────────────────────────────────────────────────────
 
 async fn handle_connection(
-    stream:        tokio_rustls::server::TlsStream<TcpStream>,
-    ledger:        Arc<tokio::sync::RwLock<LedgerStore>>,
-    user_store:    Arc<UserStore>,
+    stream: tokio_rustls::server::TlsStream<TcpStream>,
+    ledger: Arc<tokio::sync::RwLock<LedgerStore>>,
+    user_store: Arc<UserStore>,
     attach_proofs: bool,
-    peer:          std::net::SocketAddr,
-    shutdown:      CancellationToken,
+    peer: std::net::SocketAddr,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
@@ -421,7 +438,7 @@ async fn handle_connection(
 
     let startup = match StartupMessage::parse(&startup_payload) {
         Some(s) => s,
-        None    => {
+        None => {
             anyhow::bail!("failed to parse startup message");
         }
     };
@@ -449,20 +466,39 @@ async fn handle_connection(
         let real_startup = StartupMessage::parse(&payload2)
             .ok_or_else(|| anyhow::anyhow!("failed to parse post-ssl startup"))?;
         return handle_authenticated(
-            real_startup, reader, write_half, ledger, user_store, attach_proofs, peer, shutdown,
-        ).await;
+            real_startup,
+            reader,
+            write_half,
+            ledger,
+            user_store,
+            attach_proofs,
+            peer,
+            shutdown,
+        )
+        .await;
     }
 
     if startup.protocol_version != PROTOCOL_VERSION_3 {
         let err = messages::error_response(
-            "FATAL", "08P01",
+            "FATAL",
+            "08P01",
             &format!("unsupported protocol version {}", startup.protocol_version),
         );
         codec::write_all(&mut write_half, &err).await?;
         return Ok(());
     }
 
-    handle_authenticated(startup, reader, write_half, ledger, user_store, attach_proofs, peer, shutdown).await
+    handle_authenticated(
+        startup,
+        reader,
+        write_half,
+        ledger,
+        user_store,
+        attach_proofs,
+        peer,
+        shutdown,
+    )
+    .await
 }
 
 /// Authenticate the client then run the query loop.
@@ -470,20 +506,22 @@ async fn handle_connection(
 /// All reads in the auth phase use `AUTH_TIMEOUT`; all reads in the query
 /// loop use `IDLE_TIMEOUT` (Fix #1).
 async fn handle_authenticated<R, W>(
-    startup:       StartupMessage,
-    mut reader:    BufReader<R>,
-    mut writer:    W,
-    ledger:        Arc<tokio::sync::RwLock<LedgerStore>>,
-    user_store:    Arc<UserStore>,
+    startup: StartupMessage,
+    mut reader: BufReader<R>,
+    mut writer: W,
+    ledger: Arc<tokio::sync::RwLock<LedgerStore>>,
+    user_store: Arc<UserStore>,
     attach_proofs: bool,
-    peer:          std::net::SocketAddr,
-    shutdown:      CancellationToken,
+    peer: std::net::SocketAddr,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let username = startup.params.get("user")
+    let username = startup
+        .params
+        .get("user")
         .cloned()
         .unwrap_or_else(|| "vledger".into());
 
@@ -514,7 +552,8 @@ where
         codec::write_all(
             &mut writer,
             &messages::error_response("FATAL", "28P01", "expected PasswordMessage"),
-        ).await?;
+        )
+        .await?;
         return Ok(());
     }
 
@@ -525,13 +564,14 @@ where
         .unwrap_or_default();
 
     let session = match user_store.authenticate(&username, &password) {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => {
             warn!(%peer, %username, "PgWire auth failed: {e}");
             codec::write_all(
                 &mut writer,
                 &messages::error_response("FATAL", "28P01", "password authentication failed"),
-            ).await?;
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -584,16 +624,20 @@ where
                 let _ = codec::write_all(
                     &mut writer,
                     &messages::error_response(
-                        "FATAL", "57P01",
-                        &format!("idle timeout: no request received within {}s",
-                                 IDLE_TIMEOUT.as_secs()),
+                        "FATAL",
+                        "57P01",
+                        &format!(
+                            "idle timeout: no request received within {}s",
+                            IDLE_TIMEOUT.as_secs()
+                        ),
                     ),
-                ).await;
+                )
+                .await;
                 break;
             }
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Ok(Err(e)) => return Err(e.into()),
-            Ok(Ok(m))  => m,
+            Ok(Ok(m)) => m,
         };
 
         let msg = FrontendMessage::parse(msg_type, &payload);
@@ -606,13 +650,16 @@ where
             }
 
             FrontendMessage::Query(sql) => {
-                let responses = execute_query(&sql, &ledger, attach_proofs, role, &mut tx_status).await;
+                let responses =
+                    execute_query(&sql, &ledger, attach_proofs, role, &mut tx_status).await;
                 codec::write_messages(&mut writer, &responses).await?;
             }
 
             FrontendMessage::Parse { query, .. } => {
                 let mut msgs = vec![messages::parse_complete()];
-                if query.trim().is_empty() { msgs.push(messages::no_data()); }
+                if query.trim().is_empty() {
+                    msgs.push(messages::no_data());
+                }
                 codec::write_messages(&mut writer, &msgs).await?;
             }
 
@@ -625,7 +672,8 @@ where
             }
 
             FrontendMessage::Execute { portal } => {
-                let responses = execute_query(&portal, &ledger, attach_proofs, role, &mut tx_status).await;
+                let responses =
+                    execute_query(&portal, &ledger, attach_proofs, role, &mut tx_status).await;
                 codec::write_messages(&mut writer, &responses).await?;
             }
 
@@ -646,15 +694,18 @@ where
 // ── Query execution ───────────────────────────────────────────────────────────
 
 async fn execute_query(
-    sql:            &str,
-    ledger:         &Arc<tokio::sync::RwLock<LedgerStore>>,
+    sql: &str,
+    ledger: &Arc<tokio::sync::RwLock<LedgerStore>>,
     _attach_proofs: bool,
-    role:           Role,
-    tx_status:      &mut u8,
+    role: Role,
+    tx_status: &mut u8,
 ) -> Vec<Vec<u8>> {
     let sql = sql.trim();
     if sql.is_empty() || sql == ";" {
-        return vec![messages::empty_query_response(), messages::ready_for_query(*tx_status)];
+        return vec![
+            messages::empty_query_response(),
+            messages::ready_for_query(*tx_status),
+        ];
     }
 
     let sql_upper = sql.to_uppercase();
@@ -664,51 +715,73 @@ async fn execute_query(
     // VectorLedger entries are individually WAL-atomic. BEGIN/COMMIT/ROLLBACK
     // are accepted for client compatibility and track the connection's
     // transaction status byte (used by psql's prompt and client drivers).
-    if matches!(sql_upper_trimmed,
+    if matches!(
+        sql_upper_trimmed,
         "BEGIN" | "BEGIN TRANSACTION" | "START TRANSACTION" | "BEGIN WORK"
     ) {
         *tx_status = b'T';
-        return vec![messages::command_complete("BEGIN"), messages::ready_for_query(*tx_status)];
+        return vec![
+            messages::command_complete("BEGIN"),
+            messages::ready_for_query(*tx_status),
+        ];
     }
-    if matches!(sql_upper_trimmed,
+    if matches!(
+        sql_upper_trimmed,
         "COMMIT" | "COMMIT TRANSACTION" | "COMMIT WORK" | "END" | "END TRANSACTION" | "END WORK"
     ) {
         *tx_status = b'I';
-        return vec![messages::command_complete("COMMIT"), messages::ready_for_query(*tx_status)];
+        return vec![
+            messages::command_complete("COMMIT"),
+            messages::ready_for_query(*tx_status),
+        ];
     }
-    if matches!(sql_upper_trimmed, "ROLLBACK" | "ROLLBACK TRANSACTION" | "ROLLBACK WORK" | "ABORT")
-        || sql_upper_trimmed.starts_with("ROLLBACK TO")
+    if matches!(
+        sql_upper_trimmed,
+        "ROLLBACK" | "ROLLBACK TRANSACTION" | "ROLLBACK WORK" | "ABORT"
+    ) || sql_upper_trimmed.starts_with("ROLLBACK TO")
         || sql_upper_trimmed.starts_with("ROLLBACK TRANSACTION TO")
     {
         *tx_status = b'I';
-        return vec![messages::command_complete("ROLLBACK"), messages::ready_for_query(*tx_status)];
+        return vec![
+            messages::command_complete("ROLLBACK"),
+            messages::ready_for_query(*tx_status),
+        ];
     }
     if sql_upper_trimmed == "SAVEPOINT" || sql_upper_trimmed.starts_with("SAVEPOINT ") {
-        return vec![messages::command_complete("SAVEPOINT"), messages::ready_for_query(*tx_status)];
+        return vec![
+            messages::command_complete("SAVEPOINT"),
+            messages::ready_for_query(*tx_status),
+        ];
     }
     if sql_upper_trimmed == "RELEASE"
         || sql_upper_trimmed.starts_with("RELEASE ")
         || sql_upper_trimmed.starts_with("RELEASE SAVEPOINT ")
     {
-        return vec![messages::command_complete("RELEASE"), messages::ready_for_query(*tx_status)];
+        return vec![
+            messages::command_complete("RELEASE"),
+            messages::ready_for_query(*tx_status),
+        ];
     }
 
     // Client-compatibility stubs (psql meta-commands).
     if sql_upper.starts_with("SET ") || sql_upper.starts_with("SET\t") {
-        return vec![messages::command_complete("SET"), messages::ready_for_query(*tx_status)];
+        return vec![
+            messages::command_complete("SET"),
+            messages::ready_for_query(*tx_status),
+        ];
     }
     if sql_upper.starts_with("SHOW ") {
         let var = sql[5..].trim().trim_end_matches(';');
         let val = match var.to_uppercase().as_str() {
-            "SERVER_VERSION"    => "15.0",
-            "SERVER_ENCODING"   => "UTF8",
-            "CLIENT_ENCODING"   => "UTF8",
-            "DATESTYLE"         => "ISO, MDY",
-            "TIMEZONE"          => "UTC",
+            "SERVER_VERSION" => "15.0",
+            "SERVER_ENCODING" => "UTF8",
+            "CLIENT_ENCODING" => "UTF8",
+            "DATESTYLE" => "ISO, MDY",
+            "TIMEZONE" => "UTC",
             "INTEGER_DATETIMES" => "on",
-            "IS_SUPERUSER"      => "on",
-            "MAX_CONNECTIONS"   => "200",
-            _                 => "",
+            "IS_SUPERUSER" => "on",
+            "MAX_CONNECTIONS" => "200",
+            _ => "",
         };
         return vec![
             messages::row_description(&[FieldDesc::text(var)]),
@@ -744,7 +817,9 @@ async fn execute_query(
             messages::ready_for_query(*tx_status),
         ];
     }
-    if sql_upper.starts_with("SELECT CURRENT_DATABASE") || sql_upper.starts_with("SELECT CURRENT_CATALOG") {
+    if sql_upper.starts_with("SELECT CURRENT_DATABASE")
+        || sql_upper.starts_with("SELECT CURRENT_CATALOG")
+    {
         return vec![
             messages::row_description(&[FieldDesc::text("current_database".to_string())]),
             messages::data_row(&[Some("vledger".to_string())]),
@@ -772,9 +847,11 @@ async fn execute_query(
     use vledger_sql::{executor::Executor, parser::parse_one, planner::LogicalPlanBuilder};
 
     let stmt = match parse_one(sql) {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => {
-            if *tx_status == b'T' { *tx_status = b'E'; }
+            if *tx_status == b'T' {
+                *tx_status = b'E';
+            }
             return vec![
                 messages::error_response("ERROR", "42601", &format!("syntax error: {e}")),
                 messages::ready_for_query(*tx_status),
@@ -783,9 +860,11 @@ async fn execute_query(
     };
 
     let plan = match LogicalPlanBuilder::plan(stmt) {
-        Ok(p)  => p,
+        Ok(p) => p,
         Err(e) => {
-            if *tx_status == b'T' { *tx_status = b'E'; }
+            if *tx_status == b'T' {
+                *tx_status = b'E';
+            }
             return vec![
                 messages::error_response("ERROR", "42601", &format!("plan error: {e}")),
                 messages::ready_for_query(*tx_status),
@@ -794,7 +873,9 @@ async fn execute_query(
     };
 
     if let Err(e) = check_plan_privilege(role, &plan) {
-        if *tx_status == b'T' { *tx_status = b'E'; }
+        if *tx_status == b'T' {
+            *tx_status = b'E';
+        }
         return vec![
             messages::error_response("ERROR", "42501", &e),
             messages::ready_for_query(*tx_status),
@@ -808,7 +889,9 @@ async fn execute_query(
 
     match result {
         Err(e) => {
-            if *tx_status == b'T' { *tx_status = b'E'; }
+            if *tx_status == b'T' {
+                *tx_status = b'E';
+            }
             vec![
                 messages::error_response("ERROR", "XX000", &e.to_string()),
                 messages::ready_for_query(*tx_status),
@@ -821,7 +904,9 @@ async fn execute_query(
                 // an error response so the client sees it clearly rather than
                 // getting a silent "OK 0".
                 if qr.message.starts_with("INTEGRITY FAILURE") {
-                    if *tx_status == b'T' { *tx_status = b'E'; }
+                    if *tx_status == b'T' {
+                        *tx_status = b'E';
+                    }
                     return vec![
                         messages::error_response("ERROR", "XX000", &qr.message),
                         messages::ready_for_query(*tx_status),
@@ -838,16 +923,22 @@ async fn execute_query(
                 };
                 msgs.push(messages::command_complete(&tag));
             } else {
-                let fields: Vec<FieldDesc> = qr.columns.iter().map(|c| {
-                    if c == "balance" || c == "sequence" || c == "entries_verified" {
-                        FieldDesc::bigint(c.clone())
-                    } else {
-                        FieldDesc::text(c.clone())
-                    }
-                }).collect();
+                let fields: Vec<FieldDesc> = qr
+                    .columns
+                    .iter()
+                    .map(|c| {
+                        if c == "balance" || c == "sequence" || c == "entries_verified" {
+                            FieldDesc::bigint(c.clone())
+                        } else {
+                            FieldDesc::text(c.clone())
+                        }
+                    })
+                    .collect();
                 msgs.push(messages::row_description(&fields));
                 for row in &qr.rows {
-                    let vals: Vec<Option<String>> = qr.columns.iter()
+                    let vals: Vec<Option<String>> = qr
+                        .columns
+                        .iter()
                         .map(|col| row.get(col).map(|v| v.to_string()))
                         .collect();
                     msgs.push(messages::data_row(&vals));
@@ -870,15 +961,23 @@ async fn execute_query(
 fn check_plan_privilege(role: Role, plan: &LogicalPlan) -> Result<(), String> {
     use vledger_sql::planner::LogicalPlan::*;
     match plan {
-        PostEntry(_) if !role.can_insert_ledger() =>
-            Err(format!("role '{role}' cannot post journal entries")),
-        CreateAccount(_) if !role.can_insert_accounts() =>
-            Err(format!("role '{role}' cannot create accounts")),
-        VerifyChain if !role.can_verify() =>
-            Err(format!("role '{role}' cannot run VERIFY_CHAIN")),
-        ScanEntries { .. } | ScanAccounts { .. } | GetBalance { .. }
-        | Join(_) | Aggregate(_) | Window(_) if !role.can_select() =>
-            Err(format!("role '{role}' cannot execute SELECT")),
+        PostEntry(_) if !role.can_insert_ledger() => {
+            Err(format!("role '{role}' cannot post journal entries"))
+        }
+        CreateAccount(_) if !role.can_insert_accounts() => {
+            Err(format!("role '{role}' cannot create accounts"))
+        }
+        VerifyChain if !role.can_verify() => Err(format!("role '{role}' cannot run VERIFY_CHAIN")),
+        ScanEntries { .. }
+        | ScanAccounts { .. }
+        | GetBalance { .. }
+        | Join(_)
+        | Aggregate(_)
+        | Window(_)
+            if !role.can_select() =>
+        {
+            Err(format!("role '{role}' cannot execute SELECT"))
+        }
         _ => Ok(()),
     }
 }
