@@ -104,11 +104,40 @@ pub fn generate(data_dir: &Path, output_path: &Path, opts: GenerateOptions) -> R
     let root_hex      = hash_to_hex(&root);
     let chain_tip     = ledger.chain_tip();
     let chain_tip_hex = hash_to_hex(chain_tip);
+    let first_sequence = entries.first().map(|e| e.sequence).unwrap_or(0);
+    let last_sequence  = entries.last().map(|e| e.sequence).unwrap_or(0);
     eprintln!(" done.");
 
-    // ── Sign: root_bytes || chain_tip_bytes ───────────────────────────────
-    let mut sign_payload = root.to_vec();
+    // ── Sign: canonical commitment bytes ──────────────────────────────────
+    // The signed payload binds ALL metadata fields so that the tenant name,
+    // description, period, entry count, and root cannot be altered after
+    // signing without invalidating the signature.
+    //
+    // Canonical format (deterministic, no JSON whitespace variation):
+    //   merkle_root || chain_tip || entry_count_le8
+    //   || tenant_len_le4 || tenant_bytes
+    //   || description_len_le4 || description_bytes
+    //   || period_start_len_le4 || period_start_bytes
+    //   || period_end_len_le4 || period_end_bytes
+    //   || first_sequence_le8 || last_sequence_le8
+    let mut sign_payload = Vec::new();
+    sign_payload.extend_from_slice(&root);
     sign_payload.extend_from_slice(chain_tip);
+    sign_payload.extend_from_slice(&(entry_count as u64).to_le_bytes());
+    let tenant_bytes = opts.tenant.as_deref().unwrap_or("").as_bytes();
+    sign_payload.extend_from_slice(&(tenant_bytes.len() as u32).to_le_bytes());
+    sign_payload.extend_from_slice(tenant_bytes);
+    let desc_bytes = opts.description.as_deref().unwrap_or("").as_bytes();
+    sign_payload.extend_from_slice(&(desc_bytes.len() as u32).to_le_bytes());
+    sign_payload.extend_from_slice(desc_bytes);
+    let ps_bytes = opts.period_start.as_deref().unwrap_or("").as_bytes();
+    sign_payload.extend_from_slice(&(ps_bytes.len() as u32).to_le_bytes());
+    sign_payload.extend_from_slice(ps_bytes);
+    let pe_bytes = opts.period_end.as_deref().unwrap_or("").as_bytes();
+    sign_payload.extend_from_slice(&(pe_bytes.len() as u32).to_le_bytes());
+    sign_payload.extend_from_slice(pe_bytes);
+    sign_payload.extend_from_slice(&first_sequence.to_le_bytes());
+    sign_payload.extend_from_slice(&last_sequence.to_le_bytes());
 
     let (root_signature_hex, signing_pubkey_hex) = match ledger.sign_bytes(&sign_payload) {
         Some((sig, pubkey)) => (hex::encode(sig), hex::encode(pubkey)),
@@ -130,12 +159,14 @@ pub fn generate(data_dir: &Path, output_path: &Path, opts: GenerateOptions) -> R
             "generated_at":      generated_at,
             "vledger_version":   env!("CARGO_PKG_VERSION"),
             "entry_count":       entry_count,
+            "first_sequence":    first_sequence,
+            "last_sequence":     last_sequence,
             "chain_tip":         chain_tip_hex,
             "merkle_root":       root_hex,
             "root_signature":    root_signature_hex,
             "signing_pubkey":    signing_pubkey_hex,
             "algorithm":         "BLAKE3 + Ed25519",
-            // Optional business metadata — present only when provided.
+            // Business metadata — all included in the signed payload above.
             "tenant":       opts.tenant.as_deref().unwrap_or(""),
             "description":  opts.description.as_deref().unwrap_or(""),
             "period_start": opts.period_start.as_deref().unwrap_or(""),
@@ -349,13 +380,35 @@ pub fn verify(file: &Path) -> Result<VerifyReport> {
 
         match (root_bytes, tip_bytes, pubkey_bytes, sig_bytes) {
             (Some(root), Some(tip), Some(pubkey), Some(sig)) => {
-                let mut payload = root.to_vec();
+                // Reconstruct the canonical signed payload — must match generate().
+                let entry_count_val = meta["entry_count"].as_u64().unwrap_or(0);
+                let first_seq       = meta["first_sequence"].as_u64().unwrap_or(0);
+                let last_seq        = meta["last_sequence"].as_u64().unwrap_or(0);
+                let tenant          = meta["tenant"].as_str().unwrap_or("").as_bytes();
+                let description     = meta["description"].as_str().unwrap_or("").as_bytes();
+                let period_start    = meta["period_start"].as_str().unwrap_or("").as_bytes();
+                let period_end      = meta["period_end"].as_str().unwrap_or("").as_bytes();
+
+                let mut payload = Vec::new();
+                payload.extend_from_slice(&root);
                 payload.extend_from_slice(&tip);
+                payload.extend_from_slice(&entry_count_val.to_le_bytes());
+                payload.extend_from_slice(&(tenant.len() as u32).to_le_bytes());
+                payload.extend_from_slice(tenant);
+                payload.extend_from_slice(&(description.len() as u32).to_le_bytes());
+                payload.extend_from_slice(description);
+                payload.extend_from_slice(&(period_start.len() as u32).to_le_bytes());
+                payload.extend_from_slice(period_start);
+                payload.extend_from_slice(&(period_end.len() as u32).to_le_bytes());
+                payload.extend_from_slice(period_end);
+                payload.extend_from_slice(&first_seq.to_le_bytes());
+                payload.extend_from_slice(&last_seq.to_le_bytes());
+
                 match DbVerifyingKey::from_bytes(&pubkey) {
                     Ok(vk) => match vk.verify(&payload, &sig) {
                         Ok(())  => sig_status = SigStatus::Valid,
                         Err(_)  => {
-                            errors.push("Root signature verification FAILED".into());
+                            errors.push("Root signature verification FAILED — commitment may have been altered".into());
                             sig_status = SigStatus::Invalid;
                         }
                     },
@@ -554,6 +607,13 @@ pub fn verify(file: &Path) -> Result<VerifyReport> {
         vledger_version: meta["vledger_version"].as_str().unwrap_or("?").to_string(),
         format_version:  meta["format_version"].as_u64().unwrap_or(0),
         passed,
+        tenant:         meta["tenant"].as_str().unwrap_or("").to_string(),
+        description:    meta["description"].as_str().unwrap_or("").to_string(),
+        period_start:   meta["period_start"].as_str().unwrap_or("").to_string(),
+        period_end:     meta["period_end"].as_str().unwrap_or("").to_string(),
+        first_sequence: meta["first_sequence"].as_u64().unwrap_or(0),
+        last_sequence:  meta["last_sequence"].as_u64().unwrap_or(0),
+        signing_pubkey: meta["signing_pubkey"].as_str().unwrap_or("").to_string(),
     })
 }
 
@@ -578,4 +638,12 @@ pub struct VerifyReport {
     pub vledger_version:  String,
     pub format_version:   u64,
     pub passed:           bool,
+    // Business metadata — used to display in AUTHENTICITY VERIFIED block
+    pub tenant:           String,
+    pub description:      String,
+    pub period_start:     String,
+    pub period_end:       String,
+    pub first_sequence:   u64,
+    pub last_sequence:    u64,
+    pub signing_pubkey:   String,
 }

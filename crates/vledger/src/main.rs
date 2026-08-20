@@ -3071,9 +3071,32 @@ async fn cmd_verify_audit_package(file: &std::path::Path) -> Result<()> {
     println!();
 
     if report.passed {
-        println!("✓ VERIFIED — {} entries, all checks passed.", report.entry_count);
+        println!("✓ INTEGRITY VERIFIED — {} entries, all checks passed.", report.entry_count);
         if !report.root_hex.is_empty() {
             println!("  Merkle root : {}", &report.root_hex[..report.root_hex.len().min(32)]);
+        }
+        match report.sig_status {
+            audit_package::SigStatus::Valid => {
+                println!();
+                println!("✓ AUTHENTICITY VERIFIED");
+                println!("  Tenant      : {}", report.tenant);
+                println!("  Period      : {} → {}", report.period_start, report.period_end);
+                println!("  Entries     : {} (seq {} → {})",
+                    report.entry_count, report.first_sequence, report.last_sequence);
+                println!("  Signing key : {}", &report.signing_pubkey[..report.signing_pubkey.len().min(32)]);
+                println!("  All metadata fields are cryptographically bound to the signature.");
+            }
+            audit_package::SigStatus::Absent => {
+                println!();
+                println!("⚠  AUTHENTICITY NOT VERIFIED");
+                println!("   Root signature is absent — the commitment was generated without a");
+                println!("   database signing key.  Integrity of the data is confirmed, but the");
+                println!("   origin of the commitment cannot be cryptographically authenticated.");
+                println!("   In production, run `vledger init` to generate a signing key.");
+            }
+            audit_package::SigStatus::Invalid => {
+                // Already added to errors above, handled in the failed branch.
+            }
         }
     } else {
         println!("✗ VERIFICATION FAILED — {} error(s):", report.errors.len());
