@@ -167,9 +167,19 @@ impl WalReceiver {
         R: tokio::io::AsyncRead + Unpin,
         W: tokio::io::AsyncWrite + Unpin,
     {
+        // Use ack_timeout_ms as the per-step handshake timeout — a stalled
+        // primary that never sends the challenge or auth result would otherwise
+        // block the replica indefinitely, preventing reconnect.
+        let timeout = tokio::time::Duration::from_millis(self.config.ack_timeout_ms);
+
         // Read challenge.
         let mut line = String::new();
-        let n = reader.read_line(&mut line).await
+        let n = tokio::time::timeout(timeout, reader.read_line(&mut line))
+            .await
+            .map_err(|_| ReplicationError::AuthFailed(
+                format!("timeout ({} ms) waiting for handshake challenge from primary",
+                        self.config.ack_timeout_ms)
+            ))?
             .map_err(|e| ReplicationError::AuthFailed(format!("read challenge: {e}")))?;
         if n == 0 {
             return Err(ReplicationError::AuthFailed("primary closed during handshake".into()));
@@ -191,7 +201,12 @@ impl WalReceiver {
 
         // Read result.
         let mut line = String::new();
-        let n = reader.read_line(&mut line).await
+        let n = tokio::time::timeout(timeout, reader.read_line(&mut line))
+            .await
+            .map_err(|_| ReplicationError::AuthFailed(
+                format!("timeout ({} ms) waiting for auth result from primary",
+                        self.config.ack_timeout_ms)
+            ))?
             .map_err(|e| ReplicationError::AuthFailed(format!("read auth result: {e}")))?;
         if n == 0 {
             return Err(ReplicationError::AuthFailed("primary closed after MAC".into()));

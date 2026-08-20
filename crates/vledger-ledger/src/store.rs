@@ -227,11 +227,17 @@ impl LedgerStore {
 
     /// Create a purely in-memory ledger (for tests and self-test command).
     /// No WAL, no page store — state is lost when dropped.
-    pub fn new_in_memory() -> Self {
-        // Use a temp directory that will be cleaned up automatically
+    /// Create a purely in-memory ledger (for tests and self-test command).
+    /// No WAL, no page store — state is lost when dropped.
+    ///
+    /// Returns `Err` if the temp directory cannot be created or the ledger
+    /// cannot be opened (e.g. filesystem full or read-only `/tmp`).
+    #[cfg(any(test, feature = "self-test"))]
+    pub fn new_in_memory() -> Result<Self, LedgerError> {
         let tmp = std::env::temp_dir().join(format!("vledger-mem-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).expect("cannot create tmp dir for in-memory ledger");
-        Self::open(&tmp).expect("cannot open in-memory ledger")
+        std::fs::create_dir_all(&tmp)
+            .map_err(|e| LedgerError::Io(e))?;
+        Self::open(&tmp)
     }
 
     // ── Signing key loader ────────────────────────────────────────────────
@@ -651,7 +657,10 @@ impl LedgerStore {
             }
 
             for (account_id, &delta) in &net_debit_delta {
-                let acct = self.accounts.get(account_id).unwrap(); // existence checked above
+                let acct = match self.accounts.get(account_id) {
+                    Some(a) => a,
+                    None => return Err(LedgerError::AccountNotFound(account_id.to_string())),
+                };
 
                 // ── Exposure-limit check (aggregate debits) ───────────────
                 // The limit is compared against the SUM of all debit lines

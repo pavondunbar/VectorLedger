@@ -78,11 +78,37 @@ impl Server {
         let catalog_dir = config.catalog_dir.clone()
             .unwrap_or_else(|| "./vledger-data/catalog".into());
         let user_store = UserStore::open(Path::new(&catalog_dir))
-            .unwrap_or_else(|_| {
+            .unwrap_or_else(|e| {
+                // Log the real error so operators know what failed.
+                tracing::error!(
+                    catalog_dir = %catalog_dir,
+                    "Failed to open user store: {e}. \
+                     Starting with an ephemeral in-memory store — \
+                     all user accounts will be lost on restart. \
+                     Ensure the catalog directory exists and is writable."
+                );
                 let tmp = std::env::temp_dir()
                     .join(format!("vledger-catalog-{}", std::process::id()));
-                let _ = std::fs::create_dir_all(&tmp);
-                UserStore::open(&tmp).expect("cannot create temp user store")
+                if let Err(mkdir_err) = std::fs::create_dir_all(&tmp) {
+                    // Both the real catalog and the temp fallback failed.
+                    // Fail loudly rather than silently continuing.
+                    panic!(
+                        "Cannot open user store at '{}' ({e}) and cannot create \
+                         fallback at '{}' ({mkdir_err}). \
+                         Check disk space and directory permissions.",
+                        catalog_dir,
+                        tmp.display()
+                    );
+                }
+                UserStore::open(&tmp).unwrap_or_else(|e2| {
+                    panic!(
+                        "Cannot open user store at '{}' ({e}) and fallback at \
+                         '{}' also failed ({e2}). \
+                         Check disk space and directory permissions.",
+                        catalog_dir,
+                        tmp.display()
+                    )
+                })
             });
         Self {
             config:     Arc::new(config),

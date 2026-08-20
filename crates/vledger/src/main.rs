@@ -787,13 +787,24 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
             }
             Err(e) => {
                 tracing::warn!("Failed to open audit log at startup: {e}");
-                // Fall back to a fresh log at a temp path so the server
-                // can still start; events will be lost but won't panic.
                 let tmp = std::env::temp_dir().join("vledger-audit-fallback.log");
-                std::sync::Arc::new(
-                    vledger_audit::AuditLog::open(&tmp)
-                        .expect("cannot open fallback audit log")
-                )
+                match vledger_audit::AuditLog::open(&tmp) {
+                    Ok(fallback) => {
+                        tracing::warn!(
+                            path = %tmp.display(),
+                            "Using fallback audit log — events will be lost on restart. \
+                             Fix the primary audit log path before production use."
+                        );
+                        std::sync::Arc::new(fallback)
+                    }
+                    Err(e2) => {
+                        anyhow::bail!(
+                            "Cannot open audit log ({e}) and fallback at {} also failed ({e2}). \
+                             Ensure the audit directory exists and is writable.",
+                            tmp.display()
+                        );
+                    }
+                }
             }
         }
     };
@@ -847,14 +858,24 @@ async fn cmd_start(data_dir: &PathBuf, bind: &str, pgwire: bool, with_proofs: bo
         tokio::spawn(async move {
             let ctrl_c = tokio::signal::ctrl_c();
             #[cfg(unix)]
-            let mut sigterm = {
+            {
                 use tokio::signal::unix::{signal, SignalKind};
-                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler")
-            };
-            #[cfg(unix)]
-            tokio::select! {
-                _ = ctrl_c                  => tracing::info!("CTRL-C received — shutting down"),
-                _ = sigterm.recv()          => tracing::info!("SIGTERM received — shutting down"),
+                match signal(SignalKind::terminate()) {
+                    Ok(mut sigterm) => {
+                        tokio::select! {
+                            _ = ctrl_c         => tracing::info!("CTRL-C received — shutting down"),
+                            _ = sigterm.recv() => tracing::info!("SIGTERM received — shutting down"),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to install SIGTERM handler: {e}. \
+                             SIGTERM will be ignored — only CTRL-C will trigger graceful shutdown."
+                        );
+                        ctrl_c.await.ok();
+                        tracing::info!("CTRL-C received — shutting down");
+                    }
+                }
             }
             #[cfg(not(unix))]
             { ctrl_c.await.ok(); tracing::info!("CTRL-C received — shutting down"); }
