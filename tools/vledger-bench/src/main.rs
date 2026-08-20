@@ -1,28 +1,32 @@
 //! vledger-bench — TPS benchmark for VectorLedger
 //!
-//! Connects to a running vledger server, authenticates, then hammers it with
-//! SQL transactions from N concurrent clients and reports throughput and
-//! latency percentiles.
+//! Connects to a running vledger server, authenticates, then runs a
+//! configurable mixed INSERT/SELECT workload with N concurrent clients
+//! and reports TPS, latency percentiles, and a structured JSON report
+//! suitable for publishing as server-class benchmark numbers.
 //!
 //! ## Usage
 //!
 //! ```bash
 //! # Start the server first:
-//! #   export VectorLedger_MASTER_KEY=$(openssl rand -hex 32)
-//! #   vledger init --key-source env
-//! #   vledger start
+//! #   vledger start --data-dir ./vledger-data --pgwire
 //!
-//! # Run with defaults (10 clients, 1000 txns each, INSERT workload):
-//! cargo run --release --package vledger-bench
+//! # Run with defaults (10 clients, 1000 txns each, mixed workload):
+//! cargo run --release --package vledger-bench -- \
+//!     --username admin --password <pw>
 //!
-//! # Run with custom options:
+//! # Full benchmark with JSON report:
 //! cargo run --release --package vledger-bench -- \
 //!     --clients 50 \
 //!     --transactions 5000 \
 //!     --workload mixed \
 //!     --server 127.0.0.1:5433 \
 //!     --username admin \
-//!     --password secret
+//!     --password secret \
+//!     --instance-type "AWS c7g.xlarge" \
+//!     --storage-type "EBS gp3" \
+//!     --wal-sync-mode group_commit \
+//!     --report ./benchmark-results.json
 //! ```
 
 use std::sync::Arc;
@@ -39,11 +43,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug, Clone)]
-#[command(
-    name = "vledger-bench",
-    about = "TPS benchmark tool for VectorLedger",
-    long_about = None,
-)]
+#[command(name = "vledger-bench", about = "TPS benchmark tool for VectorLedger")]
 struct Cli {
     /// Server address to benchmark against.
     #[arg(long, default_value = "127.0.0.1:5433")]
@@ -65,24 +65,36 @@ struct Cli {
     #[arg(short, long, default_value_t = 1000)]
     transactions: usize,
 
-    /// Workload type.
-    ///
-    /// insert — INSERT only (write-heavy)
-    /// select — SELECT only (read-heavy)
-    /// mixed  — 70% INSERT, 30% SELECT
-    #[arg(short, long, default_value = "insert")]
+    /// Workload type: insert | select | mixed (70% INSERT / 30% SELECT)
+    #[arg(short, long, default_value = "mixed")]
     workload: String,
 
     /// Warm-up transactions per client (not counted in results).
     #[arg(long, default_value_t = 50)]
     warmup: usize,
 
-    /// Print every individual latency sample (useful for debugging; noisy at scale).
+    /// Instance type label for the report (e.g. "AWS c7g.xlarge").
+    #[arg(long, default_value = "unknown")]
+    instance_type: String,
+
+    /// Storage type label for the report (e.g. "EBS gp3", "local NVMe").
+    #[arg(long, default_value = "unknown")]
+    storage_type: String,
+
+    /// WAL sync mode used by the server (for report metadata).
+    #[arg(long, default_value = "group_commit")]
+    wal_sync_mode: String,
+
+    /// Write a structured JSON report to this file.
+    #[arg(long)]
+    report: Option<std::path::PathBuf>,
+
+    /// Print every individual latency sample (noisy at scale).
     #[arg(long)]
     verbose: bool,
 }
 
-// ── TLS helper — accepts self-signed certs (dev default) ─────────────────────
+// ── TLS helper — accepts self-signed certs (loopback dev default) ─────────────
 
 #[derive(Debug)]
 struct AcceptAnyCert;
@@ -98,25 +110,20 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyCert 
     ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error> {
         Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
     }
-
     fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &tokio_rustls::rustls::pki_types::CertificateDer,
-        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+        &self, _: &[u8],
+        _: &tokio_rustls::rustls::pki_types::CertificateDer,
+        _: &tokio_rustls::rustls::DigitallySignedStruct,
     ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
-
     fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &tokio_rustls::rustls::pki_types::CertificateDer,
-        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+        &self, _: &[u8],
+        _: &tokio_rustls::rustls::pki_types::CertificateDer,
+        _: &tokio_rustls::rustls::DigitallySignedStruct,
     ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
-
     fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
         vec![
             tokio_rustls::rustls::SignatureScheme::ED25519,
@@ -135,25 +142,24 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyCert 
 // ── Per-client result ─────────────────────────────────────────────────────────
 
 struct ClientResult {
-    latencies_us: Vec<u64>,   // per-txn latency in microseconds
+    latencies_us: Vec<u64>,
     errors:       usize,
 }
 
 // ── Single-client worker ──────────────────────────────────────────────────────
 
 async fn run_client(
-    cli:      Arc<Cli>,
-    tls_cfg:  Arc<ClientConfig>,
-    barrier:  Arc<Barrier>,
+    cli:       Arc<Cli>,
+    tls_cfg:   Arc<ClientConfig>,
+    barrier:   Arc<Barrier>,
     client_id: usize,
 ) -> ClientResult {
     let mut latencies = Vec::with_capacity(cli.transactions);
     let mut errors    = 0usize;
 
-    // ── Connect ───────────────────────────────────────────────────────────
-    let addr       = &cli.server;
-    let host_part  = addr.split(':').next().unwrap_or("127.0.0.1");
-    let port: u16  = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
+    let addr      = &cli.server;
+    let host_part = addr.split(':').next().unwrap_or("127.0.0.1");
+    let port: u16 = addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(5433);
 
     let tcp = match tokio::net::TcpStream::connect((host_part, port)).await {
         Ok(s)  => s,
@@ -164,8 +170,13 @@ async fn run_client(
     };
 
     let connector   = TlsConnector::from(tls_cfg);
-    let server_name = ServerName::try_from(host_part.to_string())
-        .expect("invalid server hostname");
+    let server_name = match ServerName::try_from(host_part.to_string()) {
+        Ok(n)  => n,
+        Err(e) => {
+            eprintln!("[client {client_id}] Invalid server name: {e}");
+            return ClientResult { latencies_us: vec![], errors: cli.transactions };
+        }
+    };
     let tls = match connector.connect(server_name, tcp).await {
         Ok(s)  => s,
         Err(e) => {
@@ -177,7 +188,7 @@ async fn run_client(
     let (read_half, mut write_half) = tokio::io::split(tls);
     let mut lines = BufReader::new(read_half).lines();
 
-    // ── Authenticate ──────────────────────────────────────────────────────
+    // Authenticate
     let auth = serde_json::json!({
         "auth": { "username": cli.username, "password": cli.password }
     });
@@ -188,34 +199,29 @@ async fn run_client(
         Ok(Some(l)) => l,
         _ => return ClientResult { latencies_us: vec![], errors: cli.transactions },
     };
-    let auth_resp: serde_json::Value = match serde_json::from_str(&auth_line) {
-        Ok(v) => v,
-        Err(_) => return ClientResult { latencies_us: vec![], errors: cli.transactions },
-    };
+    let auth_resp: serde_json::Value = serde_json::from_str(&auth_line).unwrap_or_default();
     if !auth_resp["ok"].as_bool().unwrap_or(false) {
-        eprintln!(
-            "[client {client_id}] Auth failed: {}",
-            auth_resp["error"].as_str().unwrap_or("unknown")
-        );
+        eprintln!("[client {client_id}] Auth failed: {}",
+            auth_resp["error"].as_str().unwrap_or("unknown"));
         return ClientResult { latencies_us: vec![], errors: cli.transactions };
     }
     let token = auth_resp["token"].as_str().unwrap_or("").to_string();
 
-    // ── Warm-up ───────────────────────────────────────────────────────────
-    // First, ensure the debit and credit accounts exist for this client.
-    for (acct_id, acct_type) in [
-        (format!("acct-debit-{client_id}"),  "asset"),
-        (format!("acct-credit-{client_id}"), "income"),
+    // Ensure benchmark accounts exist for this client
+    for (code, acct_type) in [
+        (format!("bench-debit-{client_id}"),  "asset"),
+        (format!("bench-credit-{client_id}"), "income"),
     ] {
         let sql = format!(
             "INSERT INTO accounts (code, name, account_type, currency, domain) \
-             VALUES ('{acct_id}', '{acct_id}', '{acct_type}', 'USD', 'benchmark')"
+             VALUES ('{code}', '{code}', '{acct_type}', 'USD', 'benchmark')"
         );
         let req = serde_json::json!({ "sql": sql, "token": token });
         let _ = write_half.write_all(format!("{req}\n").as_bytes()).await;
         let _ = lines.next_line().await; // ignore duplicate-key errors
     }
 
+    // Warm-up (not counted in results)
     for i in 0..cli.warmup {
         let sql = make_sql(&cli.workload, client_id, i);
         let req = serde_json::json!({ "sql": sql, "token": token });
@@ -223,10 +229,10 @@ async fn run_client(
         let _ = lines.next_line().await;
     }
 
-    // ── Wait for all clients to finish warm-up before starting the clock ──
+    // Synchronise — all clients start their measured window simultaneously
     barrier.wait().await;
 
-    // ── Measured transactions ─────────────────────────────────────────────
+    // Measured transactions
     for i in 0..cli.transactions {
         let sql = make_sql(&cli.workload, client_id, cli.warmup + i);
         let req = serde_json::json!({ "sql": sql, "token": token });
@@ -242,18 +248,12 @@ async fn run_client(
         };
         let elapsed_us = t0.elapsed().as_micros() as u64;
 
-        let resp: serde_json::Value = match serde_json::from_str(&resp_line) {
-            Ok(v) => v,
-            Err(_) => { errors += 1; continue; }
-        };
-
+        let resp: serde_json::Value = serde_json::from_str(&resp_line).unwrap_or_default();
         if !resp["ok"].as_bool().unwrap_or(false) {
             errors += 1;
             if cli.verbose {
-                eprintln!(
-                    "[client {client_id}] txn {i} error: {}",
-                    resp["error"].as_str().unwrap_or("?")
-                );
+                eprintln!("[client {client_id}] txn {i} error: {}",
+                    resp["error"].as_str().unwrap_or("?"));
             }
         } else {
             latencies.push(elapsed_us);
@@ -269,30 +269,27 @@ async fn run_client(
 // ── SQL workload generator ────────────────────────────────────────────────────
 
 fn make_sql(workload: &str, client_id: usize, seq: usize) -> String {
-    // Use a simple counter as the unique key.
-    let unique_id = client_id * 1_000_000 + seq;
-
+    let unique_id = client_id * 10_000_000 + seq;
     match workload {
-        "select" => {
-            "SELECT * FROM ledger LIMIT 10".to_string()
-        }
+        "select" => "SELECT * FROM ledger LIMIT 10".to_string(),
         "mixed" => {
             if seq % 10 < 7 {
                 format!(
-                    "INSERT INTO ledger (description, debit_account, credit_account, amount, currency) \
-                     VALUES ('bench-{unique_id}', 'acct-debit-{client_id}', 'acct-credit-{client_id}', 100, 'USD')"
+                    "INSERT INTO ledger \
+                     (description, debit_account, credit_account, amount, currency, domain) \
+                     VALUES ('bench-{unique_id}', 'bench-debit-{client_id}', \
+                             'bench-credit-{client_id}', 1000, 'USD', 'benchmark')"
                 )
             } else {
                 "SELECT * FROM ledger LIMIT 10".to_string()
             }
         }
-        // "insert" and default
-        _ => {
-            format!(
-                "INSERT INTO ledger (description, debit_account, credit_account, amount, currency) \
-                 VALUES ('bench-{unique_id}', 'acct-debit-{client_id}', 'acct-credit-{client_id}', 100, 'USD')"
-            )
-        }
+        _ => format!(
+            "INSERT INTO ledger \
+             (description, debit_account, credit_account, amount, currency, domain) \
+             VALUES ('bench-{unique_id}', 'bench-debit-{client_id}', \
+                     'bench-credit-{client_id}', 1000, 'USD', 'benchmark')"
+        ),
     }
 }
 
@@ -306,9 +303,9 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
 
 fn print_histogram(sorted: &[u64]) {
     if sorted.is_empty() { return; }
-    let min   = *sorted.first().unwrap();
-    let max   = *sorted.last().unwrap();
-    let range = (max - min).max(1);
+    let min     = *sorted.first().unwrap();
+    let max     = *sorted.last().unwrap();
+    let range   = (max - min).max(1);
     let buckets = 10usize;
     let width   = range / buckets as u64 + 1;
 
@@ -317,7 +314,9 @@ fn print_histogram(sorted: &[u64]) {
         let lo    = min + b as u64 * width;
         let hi    = lo + width;
         let count = sorted.iter().filter(|&&v| v >= lo && v < hi).count();
-        let bar   = "#".repeat((count * 40 / sorted.len().max(1)).max(if count > 0 { 1 } else { 0 }));
+        let bar   = "#".repeat(
+            (count * 40 / sorted.len().max(1)).max(if count > 0 { 1 } else { 0 })
+        );
         println!("  {:>7}–{:<7} | {:<40} {}", lo, hi, bar, count);
     }
 }
@@ -326,23 +325,24 @@ fn print_histogram(sorted: &[u64]) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .ok();
+    rustls::crypto::aws_lc_rs::default_provider().install_default().ok();
 
     let cli = Arc::new(Cli::parse());
 
     println!("── VectorLedger TPS Benchmark ───────────────────");
-    println!("  Server      : {}", cli.server);
-    println!("  Clients     : {}", cli.clients);
-    println!("  Txns/client : {}", cli.transactions);
-    println!("  Workload    : {}", cli.workload);
-    println!("  Warm-up     : {} txns/client", cli.warmup);
+    println!("  Server        : {}", cli.server);
+    println!("  Clients       : {}", cli.clients);
+    println!("  Txns/client   : {}", cli.transactions);
+    println!("  Total txns    : {}", cli.clients * cli.transactions);
+    println!("  Workload      : {}", cli.workload);
+    println!("  Warm-up       : {} txns/client", cli.warmup);
+    println!("  Instance type : {}", cli.instance_type);
+    println!("  Storage       : {}", cli.storage_type);
+    println!("  WAL sync mode : {}", cli.wal_sync_mode);
     println!("──────────────────────────────────────────────────");
 
     let total_txns = cli.clients * cli.transactions;
 
-    // Build TLS config (accept self-signed for dev)
     let tls_cfg = Arc::new(
         ClientConfig::builder()
             .dangerous()
@@ -350,72 +350,120 @@ async fn main() -> Result<()> {
             .with_no_client_auth()
     );
 
-    // Barrier ensures all clients start their measured window simultaneously
     let barrier = Arc::new(Barrier::new(cli.clients));
 
-    // Spawn all client tasks
+    print!("  Connecting and warming up {} clients... ", cli.clients);
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+
     let wall_start = Instant::now();
     let mut handles = Vec::with_capacity(cli.clients);
     for id in 0..cli.clients {
-        let cli_c     = Arc::clone(&cli);
-        let tls_c     = Arc::clone(&tls_cfg);
-        let barrier_c = Arc::clone(&barrier);
-        handles.push(tokio::spawn(async move {
-            run_client(cli_c, tls_c, barrier_c, id).await
-        }));
+        handles.push(tokio::spawn(run_client(
+            Arc::clone(&cli),
+            Arc::clone(&tls_cfg),
+            Arc::clone(&barrier),
+            id,
+        )));
     }
 
-    // Collect results
     let mut all_latencies: Vec<u64> = Vec::with_capacity(total_txns);
     let mut total_errors = 0usize;
     for handle in handles {
         match handle.await {
-            Ok(r) => {
-                all_latencies.extend_from_slice(&r.latencies_us);
-                total_errors += r.errors;
-            }
+            Ok(r)  => { all_latencies.extend_from_slice(&r.latencies_us); total_errors += r.errors; }
             Err(e) => eprintln!("Client task panicked: {e}"),
         }
     }
 
     let wall_elapsed = wall_start.elapsed();
     let successful   = all_latencies.len();
-
-    // Sort for percentiles
     all_latencies.sort_unstable();
 
-    // Compute stats
-    let tps = successful as f64 / wall_elapsed.as_secs_f64();
-    let avg = if successful > 0 {
-        all_latencies.iter().sum::<u64>() / successful as u64
-    } else { 0 };
+    let tps     = successful as f64 / wall_elapsed.as_secs_f64();
+    let avg_us  = if successful > 0 { all_latencies.iter().sum::<u64>() / successful as u64 } else { 0 };
+    let min_us  = all_latencies.first().copied().unwrap_or(0);
+    let max_us  = all_latencies.last().copied().unwrap_or(0);
+    let p50_us  = percentile(&all_latencies, 50.0);
+    let p90_us  = percentile(&all_latencies, 90.0);
+    let p95_us  = percentile(&all_latencies, 95.0);
+    let p99_us  = percentile(&all_latencies, 99.0);
+    let p999_us = percentile(&all_latencies, 99.9);
 
-    println!("\n── Results ──────────────────────────────────────");
-    println!("  Wall time   : {:.3} s", wall_elapsed.as_secs_f64());
-    println!("  Successful  : {successful} / {total_txns}");
-    println!("  Errors      : {total_errors}");
-    println!("  TPS         : {tps:.1}  transactions/second");
+    println!("done.\n");
+    println!("── Results ──────────────────────────────────────");
+    println!("  Wall time     : {:.3} s", wall_elapsed.as_secs_f64());
+    println!("  Successful    : {successful} / {total_txns}");
+    println!("  Errors        : {total_errors}");
+    println!("  TPS           : {tps:.1}");
     println!();
-    println!("  Latency (µs):");
-    println!("    min  : {}", all_latencies.first().copied().unwrap_or(0));
-    println!("    avg  : {avg}");
-    println!("    p50  : {}", percentile(&all_latencies, 50.0));
-    println!("    p90  : {}", percentile(&all_latencies, 90.0));
-    println!("    p95  : {}", percentile(&all_latencies, 95.0));
-    println!("    p99  : {}", percentile(&all_latencies, 99.0));
-    println!("    max  : {}", all_latencies.last().copied().unwrap_or(0));
+    println!("  Latency       µs          ms");
+    println!("    min  : {:>10}   {:>8.3}", min_us,  min_us  as f64 / 1000.0);
+    println!("    avg  : {:>10}   {:>8.3}", avg_us,  avg_us  as f64 / 1000.0);
+    println!("    p50  : {:>10}   {:>8.3}", p50_us,  p50_us  as f64 / 1000.0);
+    println!("    p90  : {:>10}   {:>8.3}", p90_us,  p90_us  as f64 / 1000.0);
+    println!("    p95  : {:>10}   {:>8.3}", p95_us,  p95_us  as f64 / 1000.0);
+    println!("    p99  : {:>10}   {:>8.3}", p99_us,  p99_us  as f64 / 1000.0);
+    println!("    p99.9: {:>10}   {:>8.3}", p999_us, p999_us as f64 / 1000.0);
+    println!("    max  : {:>10}   {:>8.3}", max_us,  max_us  as f64 / 1000.0);
 
     print_histogram(&all_latencies);
 
-    println!("\n── Interpretation ───────────────────────────────");
-    println!("  TPS < 1,000        — expected for a single dev node on a laptop");
-    println!("  TPS 1,000–10,000   — good for a production single node");
-    println!("  TPS > 10,000       — excellent; likely bottlenecked by client");
-    println!("  p99 latency        — the number your SLA should be written against");
-    println!("  errors > 0         — check server logs; likely auth or schema mismatch");
-    println!("──────────────────────────────────────────────────\n");
+    // ── Structured JSON report ────────────────────────────────────────────
+    if let Some(ref report_path) = cli.report {
+        let report = serde_json::json!({
+            "benchmark": {
+                "run_at":                   chrono::Utc::now().to_rfc3339(),
+                "server":                   cli.server,
+                "clients":                  cli.clients,
+                "transactions_per_client":  cli.transactions,
+                "total_transactions":       total_txns,
+                "workload":                 cli.workload,
+                "warmup_per_client":        cli.warmup,
+            },
+            "environment": {
+                "instance_type":  cli.instance_type,
+                "storage_type":   cli.storage_type,
+                "wal_sync_mode":  cli.wal_sync_mode,
+                "os":             std::env::consts::OS,
+                "arch":           std::env::consts::ARCH,
+            },
+            "results": {
+                "wall_time_s": wall_elapsed.as_secs_f64(),
+                "tps":         tps,
+                "successful":  successful,
+                "errors":      total_errors,
+                "latency_us":  {
+                    "min":   min_us,
+                    "avg":   avg_us,
+                    "p50":   p50_us,
+                    "p90":   p90_us,
+                    "p95":   p95_us,
+                    "p99":   p99_us,
+                    "p99_9": p999_us,
+                    "max":   max_us,
+                },
+                "latency_ms": {
+                    "min":   min_us  as f64 / 1000.0,
+                    "avg":   avg_us  as f64 / 1000.0,
+                    "p50":   p50_us  as f64 / 1000.0,
+                    "p90":   p90_us  as f64 / 1000.0,
+                    "p95":   p95_us  as f64 / 1000.0,
+                    "p99":   p99_us  as f64 / 1000.0,
+                    "p99_9": p999_us as f64 / 1000.0,
+                    "max":   max_us  as f64 / 1000.0,
+                },
+            },
+        });
 
+        let json_str = serde_json::to_string_pretty(&report)?;
+        std::fs::write(report_path, &json_str)?;
+        println!("\n  Report written : {}", report_path.display());
+    }
+
+    println!("\n──────────────────────────────────────────────────");
     if total_errors > 0 {
+        eprintln!("  ⚠  {total_errors} error(s) — check server logs");
         std::process::exit(1);
     }
     Ok(())
