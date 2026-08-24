@@ -103,7 +103,9 @@ jobs:
           PLATFORM="${{ matrix.platform }}"
           ARCHIVE="vledger-${VERSION}-${PLATFORM}.tar.gz"
           cp target/${{ matrix.target }}/release/vledger ./vledger
-          tar -czf "${ARCHIVE}" vledger
+          # --no-xattrs prevents macOS extended attributes (e.g. com.apple.provenance)
+          # from being embedded in the archive, which causes spurious tar warnings on Linux.
+          tar --no-xattrs -czf "${ARCHIVE}" vledger
           rm -f vledger
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
