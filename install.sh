@@ -563,6 +563,12 @@ main() {
     bold "  Full setup guide:"
     bold "  https://github.com/${REPO}#quick-start"
     bold ""
+
+    # Clean up temp directory explicitly and disarm the trap so it does not
+    # fire again in the outer shell after main() returns (which would trigger
+    # "tmpdir: unbound variable" under set -u when piped via curl | bash).
+    rm -rf "$tmpdir"
+    trap - EXIT
 }
 
 main "$@"
