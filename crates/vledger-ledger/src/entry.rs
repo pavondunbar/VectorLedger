@@ -41,6 +41,12 @@ pub enum EntryStatus {
     PendingApproval,
     /// Entry was rejected during four-eyes review.
     Rejected,
+    /// Entry is pending external settlement (e.g. awaiting payment clearance).
+    Pending,
+    /// Entry has been fully settled.
+    Settled,
+    /// Entry settlement failed (e.g. payment returned, wire rejected).
+    Failed,
 }
 
 /// A single line in a journal entry.

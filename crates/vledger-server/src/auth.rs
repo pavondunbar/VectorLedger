@@ -572,6 +572,16 @@ impl UserStore {
             .collect()
     }
 
+    /// Return the `domain_filter` for a user, if set.
+    /// `None` means the user can access all domains.
+    pub fn domain_filter(&self, username: &str) -> Option<String> {
+        self.users
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(username)
+            .and_then(|u| u.domain_filter.clone())
+    }
+
     /// Delete a user.
     ///
     /// All active sessions for `username` are immediately revoked before the

@@ -43,4 +43,4 @@ pub use currency::Currency;
 pub use entry::{EntryStatus, JournalEntry, JournalEntryBuilder, JournalLine};
 pub use error::LedgerError;
 pub use lockfile::{DataDirLock, LockError};
-pub use store::{LedgerStore, ReversalEvent};
+pub use store::{LedgerStore, ReconciliationDiscrepancy, ReversalEvent, SettlementEvent};

@@ -81,6 +81,10 @@ pub struct Account {
     pub created_at: DateTime<Utc>,
     /// Domain / legal entity this account belongs to.
     pub domain: String,
+    /// Whether this account is under a legal hold.
+    /// When true, no new entries, reversals, or settlements are permitted
+    /// until the hold is explicitly lifted by an admin.
+    pub legal_hold: bool,
 }
 
 impl Account {
@@ -105,6 +109,7 @@ impl Account {
             parent_id: None,
             created_at: Utc::now(),
             domain: domain.into(),
+            legal_hold: false,
         }
     }
 

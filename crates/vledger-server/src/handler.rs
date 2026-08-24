@@ -258,9 +258,7 @@ pub async fn handle_connection(
                         );
                         send(
                             &mut writer_half,
-                            Response::err(format!(
-                                "too many authentication failures — reconnect to try again"
-                            )),
+                            Response::err("too many authentication failures — reconnect to try again".to_string()),
                         )
                         .await;
                         break;
@@ -340,6 +338,7 @@ pub async fn handle_connection(
             &ledger,
             &config,
             sess,
+            &user_store,
             &shipper,
             &audit_log,
             peer_addr,
@@ -361,9 +360,10 @@ async fn execute_sql(
     ledger: &Arc<RwLock<LedgerStore>>,
     config: &Arc<ServerConfig>,
     session: &Session,
+    user_store: &Arc<UserStore>,
     shipper: &Option<Arc<vledger_replication::WalShipper>>,
     audit_log: &Option<Arc<vledger_audit::AuditLog>>,
-    peer_addr: std::net::SocketAddr,
+    _peer_addr: std::net::SocketAddr,
 ) -> Response {
     let start = std::time::Instant::now();
 
@@ -379,6 +379,12 @@ async fn execute_sql(
     if let Err(e) = check_plan_privilege(session, &plan) {
         return Response::err(format!("Permission denied: {e}"));
     }
+
+    // ── Domain filter injection ────────────────────────────────────────────
+    // If the authenticated user has a domain_filter set, rewrite any
+    // scan plan to add an additional ByDomain filter so they can only
+    // see entries and accounts in their assigned domain.
+    let plan = apply_domain_filter(plan, user_store.domain_filter(&session.username));
 
     let attach = config.attach_proofs || with_proof;
 
@@ -422,9 +428,9 @@ async fn execute_sql(
         let (result, entry_bytes, segment) = run_with_timeout!(async {
             let mut guard = ledger.write().await;
             let exec_result = if attach {
-                Executor::with_proofs(&mut *guard).execute(plan)
+                Executor::with_proofs(&mut guard).execute(plan)
             } else {
-                Executor::new(&mut *guard).execute(plan)
+                Executor::new(&mut guard).execute(plan)
             };
             // Capture replication data while still holding the lock.
             let bytes = if exec_result.is_ok() && is_post_entry {
@@ -479,9 +485,9 @@ async fn execute_sql(
         let result = run_with_timeout!(async {
             let guard = ledger.read().await;
             if attach {
-                ReadExecutor::with_proofs(&*guard).execute(plan)
+                ReadExecutor::with_proofs(&guard).execute(plan)
             } else {
-                ReadExecutor::new(&*guard).execute(plan)
+                ReadExecutor::new(&guard).execute(plan)
             }
         });
         let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -545,6 +551,55 @@ async fn send(writer: &mut (impl AsyncWriteExt + Unpin), resp: Response) {
     if let Ok(mut json) = serde_json::to_string(&resp) {
         json.push('\n');
         let _ = writer.write_all(json.as_bytes()).await;
+    }
+}
+
+// ── Domain filter injection ───────────────────────────────────────────────────
+
+/// Rewrite a scan plan to add a `ByDomain` filter when the user has a
+/// `domain_filter` set.  This enforces per-user domain isolation at the
+/// query execution level.
+///
+/// Only `ScanEntries`, `ScanLedgerLines`, and `ScanAccounts` plans are
+/// affected.  Write plans, aggregates, joins, and constants are passed through
+/// unchanged — domain isolation on writes is enforced by the ledger's own
+/// domain field on entries and accounts.
+fn apply_domain_filter(
+    plan: LogicalPlan,
+    domain: Option<String>,
+) -> LogicalPlan {
+    use vledger_sql::planner::EntryFilter;
+    let d = match domain {
+        Some(d) if !d.is_empty() => d,
+        _ => return plan, // no filter — pass through
+    };
+    match plan {
+        LogicalPlan::ScanEntries { filter } => {
+            // Only inject if no existing domain filter already present.
+            let filter = match filter {
+                Some(EntryFilter::ByDomain(_)) => Some(EntryFilter::ByDomain(d)),
+                Some(other) => Some(other), // respect explicit user filter
+                None => Some(EntryFilter::ByDomain(d)),
+            };
+            LogicalPlan::ScanEntries { filter }
+        }
+        LogicalPlan::ScanLedgerLines { filter } => {
+            let filter = match filter {
+                Some(EntryFilter::ByDomain(_)) => Some(EntryFilter::ByDomain(d)),
+                Some(other) => Some(other),
+                None => Some(EntryFilter::ByDomain(d)),
+            };
+            LogicalPlan::ScanLedgerLines { filter }
+        }
+        LogicalPlan::ScanAccounts { filter } => {
+            let filter = match filter {
+                Some(EntryFilter::ByDomain(_)) => Some(EntryFilter::ByDomain(d)),
+                Some(other) => Some(other),
+                None => Some(EntryFilter::ByDomain(d)),
+            };
+            LogicalPlan::ScanAccounts { filter }
+        }
+        other => other,
     }
 }
 

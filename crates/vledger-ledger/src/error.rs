@@ -67,6 +67,17 @@ pub enum LedgerError {
     #[error("Four-eyes control violation: entry requires a second approver")]
     FourEyesRequired,
 
+    #[error("Account {0} is under a legal hold — no entries, reversals, or settlements permitted")]
+    AccountUnderLegalHold(String),
+
+    #[error("Currency precision violation: {currency} requires amounts in minor units (precision={precision}), got {amount} which exceeds maximum {max_minor_units}")]
+    PrecisionViolation {
+        currency: String,
+        precision: u8,
+        amount: i64,
+        max_minor_units: i64,
+    },
+
     #[error("Serialization error: {0}")]
     Serialization(String),
 

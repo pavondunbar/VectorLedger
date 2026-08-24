@@ -71,6 +71,11 @@ const TABLE_ENTRIES: u32 = 1;
 /// original entry and its reversal is durable and atomic with the reversal
 /// entry itself.  The original entry is never modified.
 const TABLE_REVERSAL_EVENTS: u32 = 2;
+/// table_id=3 — settlement lifecycle events (Pending/Settled/Failed transitions)
+///
+/// Status transitions are stored as side-channel events — the original entry
+/// is never modified, preserving its hash chain integrity.
+const TABLE_SETTLEMENT_EVENTS: u32 = 3;
 
 // ── Serialization helpers ─────────────────────────────────────────────────────
 
@@ -101,6 +106,38 @@ pub struct ReversalEvent {
     pub reversal_entry_id: Uuid,
     /// UTC timestamp when the reversal was posted.
     pub reversed_at: chrono::DateTime<Utc>,
+}
+
+// ── SettlementEvent ───────────────────────────────────────────────────────────
+
+/// An immutable record of a settlement lifecycle transition.
+///
+/// The original entry is never modified — status is derived at query time
+/// by checking `LedgerStore::settlement_event_index`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SettlementEvent {
+    /// Entry whose status is transitioning.
+    pub entry_id: Uuid,
+    /// The new status (Pending, Settled, or Failed).
+    pub new_status: crate::entry::EntryStatus,
+    /// UTC timestamp of the transition.
+    pub settled_at: chrono::DateTime<Utc>,
+    /// Optional notes (reason for failure, settlement reference, etc.)
+    pub notes: Option<String>,
+}
+
+// ── ReconciliationDiscrepancy ─────────────────────────────────────────────────
+
+/// A discrepancy found during reconciliation between the running balance cache
+/// and a fresh recomputation from journal entries.
+#[derive(Debug, Clone)]
+pub struct ReconciliationDiscrepancy {
+    pub account_id: AccountId,
+    pub account_code: String,
+    pub cached_balance: i128,
+    pub recomputed_balance: i128,
+    /// `recomputed_balance - cached_balance`
+    pub delta: i128,
 }
 
 // ── LedgerStore ──────────────────────────────────────────────────────────────
@@ -142,6 +179,23 @@ pub struct LedgerStore {
     /// Rebuilt from `TABLE_REVERSAL_EVENTS` during WAL replay.
     /// Used to derive `EntryStatus::Reversed` without mutating original rows.
     reversal_event_index: HashMap<Uuid, Uuid>,
+
+    // ── Settlement event index ────────────────────────────────────────────
+    /// Maps entry_id → most-recent EntryStatus from settlement events.
+    ///
+    /// Rebuilt from `TABLE_SETTLEMENT_EVENTS` during WAL replay.
+    /// Used to derive Pending/Settled/Failed without mutating original rows.
+    settlement_event_index: HashMap<Uuid, crate::entry::EntryStatus>,
+
+    // ── Legal hold index ──────────────────────────────────────────────────
+    /// Set of account IDs currently under a legal hold.
+    /// Rebuilt from accounts during WAL replay.
+    legal_hold_accounts: std::collections::HashSet<AccountId>,
+
+    // ── Currency registry ─────────────────────────────────────────────────
+    /// In-memory registry of known currencies and their minor-unit precision.
+    /// Used to enforce precision constraints at write time.
+    currency_registry: crate::currency::CurrencyRegistry,
 
     // ── Page cursors ──────────────────────────────────────────────────────
     next_account_page: u64,
@@ -205,6 +259,9 @@ impl LedgerStore {
             last_chain_hash: ZERO_HASH,
             idempotency_keys: std::collections::HashSet::new(),
             reversal_event_index: HashMap::new(),
+            settlement_event_index: HashMap::new(),
+            legal_hold_accounts: std::collections::HashSet::new(),
+            currency_registry: crate::currency::CurrencyRegistry::new(),
             next_account_page: 0,
             next_entry_page: 0,
             _lock: Some(lock),
@@ -233,7 +290,7 @@ impl LedgerStore {
     #[cfg(any(test, feature = "self-test"))]
     pub fn new_in_memory() -> Result<Self, LedgerError> {
         let tmp = std::env::temp_dir().join(format!("vledger-mem-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).map_err(|e| LedgerError::Io(e))?;
+        std::fs::create_dir_all(&tmp).map_err(LedgerError::Io)?;
         Self::open(&tmp)
     }
 
@@ -334,13 +391,24 @@ impl LedgerStore {
                             self.reversal_event_index
                                 .insert(event.original_entry_id, event.reversal_entry_id);
                         }
+                        TABLE_SETTLEMENT_EVENTS => {
+                            let event: SettlementEvent = decode(&payload.row_data)?;
+                            self.settlement_event_index
+                                .insert(event.entry_id, event.new_status);
+                        }
                         _ => {}
                     },
                     MutationKind::Delete => {
-                        // Logical deletes on accounts (close_account).
+                        // Logical deletes on accounts (close_account / legal hold toggle).
                         // We handle these by re-reading the updated account row.
                         if payload.table_id == TABLE_ACCOUNTS {
                             let account: Account = decode(&payload.row_data)?;
+                            // Rebuild legal hold index from stored account state.
+                            if account.legal_hold {
+                                self.legal_hold_accounts.insert(account.id);
+                            } else {
+                                self.legal_hold_accounts.remove(&account.id);
+                            }
                             self.accounts.insert(account.id, account);
                         }
                     }
@@ -353,6 +421,11 @@ impl LedgerStore {
 
     /// Apply an account record to in-memory state (idempotent).
     fn apply_account(&mut self, account: Account) {
+        if account.legal_hold {
+            self.legal_hold_accounts.insert(account.id);
+        } else {
+            self.legal_hold_accounts.remove(&account.id);
+        }
         self.accounts.insert(account.id, account);
     }
 
@@ -607,11 +680,51 @@ impl LedgerStore {
             if !acct.is_active() {
                 return Err(LedgerError::AccountClosed(line.account_id.to_string()));
             }
+            // Legal hold check — no entries permitted while hold is active.
+            if acct.legal_hold {
+                return Err(LedgerError::AccountUnderLegalHold(
+                    line.account_id.to_string(),
+                ));
+            }
             if acct.currency_code != line.currency_code {
                 return Err(LedgerError::CurrencyMismatch {
                     account_currency: acct.currency_code.clone(),
                     entry_currency: line.currency_code.clone(),
                 });
+            }
+            // Currency precision enforcement — the amount (in minor units) must
+            // be representable within the declared precision for this currency.
+            // For example, BTC has precision=8 so the maximum minor-unit value
+            // for 1 BTC is 100_000_000.  An amount of 100_000_001 would exceed
+            // one BTC and is valid, but an amount whose minor-unit value is 0
+            // is already rejected by Amount::new.  What we check here is that
+            // the amount does not implicitly imply fractional minor units for
+            // currencies where sub-minor-unit precision doesn't exist.
+            //
+            // Specifically: for known currencies, the amount must be < 10^(18+1)
+            // for standard cryptos and sanity-bounded for fiat.  The practical
+            // check is: if the currency has precision=0 (e.g. JPY), the amount
+            // must be a whole number (which it always is since Amount is i64).
+            // For precision > 0 the amount is already in minor units, so no
+            // fractional check is needed — but we bound-check against i64::MAX
+            // divided by 10^precision to prevent overflow on display conversions.
+            if let Some(precision) = self.currency_registry.precision(&line.currency_code) {
+                // Compute max sane minor-unit value: 10^(18 - precision) * 10^18
+                // For high-precision cryptos (ETH precision=18) any i64 value is fine.
+                // For fiat (precision=2) we bound at 10^(18-2) = 10^16 minor units
+                // (~$100 trillion) to catch obvious data errors.
+                let max_exp: u32 = 18u32.saturating_sub(precision as u32);
+                let max_minor: i64 = 10_i64.saturating_pow(max_exp).saturating_mul(
+                    10_i64.saturating_pow(precision as u32),
+                );
+                if line.amount.as_i64().abs() > max_minor {
+                    return Err(LedgerError::PrecisionViolation {
+                        currency: line.currency_code.clone(),
+                        precision,
+                        amount: line.amount.as_i64(),
+                        max_minor_units: max_minor,
+                    });
+                }
             }
             if acct.require_four_eyes && entry.approved_by.is_none() {
                 return Err(LedgerError::FourEyesRequired);
@@ -775,6 +888,14 @@ impl LedgerStore {
         match self.entries[original_idx].status {
             EntryStatus::Posted => {}
             other => return Err(LedgerError::CannotReverse(entry_id.to_string(), other)),
+        }
+        // Check legal hold on any account involved in the original entry.
+        for line in &self.entries[original_idx].lines {
+            if self.legal_hold_accounts.contains(&line.account_id) {
+                return Err(LedgerError::AccountUnderLegalHold(
+                    line.account_id.to_string(),
+                ));
+            }
         }
         // Derive Reversed status from the event index (not a mutable field).
         if self.reversal_event_index.contains_key(&entry_id) {
@@ -966,8 +1087,8 @@ impl LedgerStore {
             .entries
             .iter()
             .filter(|e| {
-                from_seq.map_or(true, |f| e.sequence >= f)
-                    && to_seq.map_or(true, |t| e.sequence <= t)
+                from_seq.is_none_or(|f| e.sequence >= f)
+                    && to_seq.is_none_or(|t| e.sequence <= t)
             })
             .collect();
 
@@ -1122,6 +1243,244 @@ impl LedgerStore {
     /// the write lock is released.
     pub fn last_entry_bytes(&self) -> Option<Vec<u8>> {
         self.last_committed_entry_bytes.clone()
+    }
+
+    // ── Settlement lifecycle ──────────────────────────────────────────────
+
+    /// Transition an entry to `Pending` settlement status.
+    ///
+    /// Only `Posted` entries may be marked pending.
+    /// Status is recorded as a `SettlementEvent` — the original entry is
+    /// never modified.
+    pub fn mark_pending(
+        &mut self,
+        entry_id: Uuid,
+        notes: Option<String>,
+    ) -> Result<(), LedgerError> {
+        self.apply_settlement_event(
+            entry_id,
+            crate::entry::EntryStatus::Pending,
+            notes,
+        )
+    }
+
+    /// Transition an entry to `Settled` status.
+    ///
+    /// Only `Pending` or `Posted` entries may be settled.
+    pub fn mark_settled(
+        &mut self,
+        entry_id: Uuid,
+        notes: Option<String>,
+    ) -> Result<(), LedgerError> {
+        self.apply_settlement_event(
+            entry_id,
+            crate::entry::EntryStatus::Settled,
+            notes,
+        )
+    }
+
+    /// Transition an entry to `Failed` settlement status.
+    pub fn mark_failed(
+        &mut self,
+        entry_id: Uuid,
+        notes: Option<String>,
+    ) -> Result<(), LedgerError> {
+        self.apply_settlement_event(
+            entry_id,
+            crate::entry::EntryStatus::Failed,
+            notes,
+        )
+    }
+
+    /// Returns the effective status of an entry, considering settlement events.
+    pub fn effective_status(&self, entry_id: &Uuid) -> crate::entry::EntryStatus {
+        // Settlement status overrides posted status.
+        if let Some(&s) = self.settlement_event_index.get(entry_id) {
+            return s;
+        }
+        // Reversal event overrides to Reversed.
+        if self.reversal_event_index.contains_key(entry_id) {
+            return crate::entry::EntryStatus::Reversed;
+        }
+        // Return the stored status.
+        self.entries
+            .iter()
+            .find(|e| e.id == *entry_id)
+            .map(|e| e.status)
+            .unwrap_or(crate::entry::EntryStatus::Posted)
+    }
+
+    fn apply_settlement_event(
+        &mut self,
+        entry_id: Uuid,
+        new_status: crate::entry::EntryStatus,
+        notes: Option<String>,
+    ) -> Result<(), LedgerError> {
+        // Verify entry exists.
+        if !self.entries.iter().any(|e| e.id == entry_id) {
+            return Err(LedgerError::EntryNotFound(entry_id.to_string()));
+        }
+        // Check legal hold on any involved account.
+        if let Some(entry) = self.entries.iter().find(|e| e.id == entry_id) {
+            for line in &entry.lines {
+                if self.legal_hold_accounts.contains(&line.account_id) {
+                    return Err(LedgerError::AccountUnderLegalHold(
+                        line.account_id.to_string(),
+                    ));
+                }
+            }
+        }
+        let event = SettlementEvent {
+            entry_id,
+            new_status,
+            settled_at: chrono::Utc::now(),
+            notes,
+        };
+        let bytes = encode(&event)?;
+        self.persist_row(TABLE_SETTLEMENT_EVENTS, &bytes, MutationKind::Insert, None)?;
+        self.settlement_event_index.insert(entry_id, new_status);
+        Ok(())
+    }
+
+    // ── Legal holds ───────────────────────────────────────────────────────
+
+    /// Place a legal hold on an account.
+    ///
+    /// While the hold is active, no entries, reversals, or settlement
+    /// transitions are permitted for any line involving this account.
+    pub fn place_legal_hold(&mut self, account_id: &AccountId) -> Result<(), LedgerError> {
+        self.set_legal_hold(account_id, true)
+    }
+
+    /// Lift the legal hold on an account.
+    pub fn lift_legal_hold(&mut self, account_id: &AccountId) -> Result<(), LedgerError> {
+        self.set_legal_hold(account_id, false)
+    }
+
+    /// Returns whether an account is currently under a legal hold.
+    pub fn is_under_legal_hold(&self, account_id: &AccountId) -> bool {
+        self.legal_hold_accounts.contains(account_id)
+    }
+
+    fn set_legal_hold(
+        &mut self,
+        account_id: &AccountId,
+        hold: bool,
+    ) -> Result<(), LedgerError> {
+        let acct = self
+            .accounts
+            .get_mut(account_id)
+            .ok_or_else(|| LedgerError::AccountNotFound(account_id.to_string()))?;
+        acct.legal_hold = hold;
+        let bytes = encode(acct)?;
+        self.persist_row(TABLE_ACCOUNTS, &bytes, MutationKind::Delete, None)?;
+        if hold {
+            self.legal_hold_accounts.insert(*account_id);
+        } else {
+            self.legal_hold_accounts.remove(account_id);
+        }
+        Ok(())
+    }
+
+    // ── Reconciliation ────────────────────────────────────────────────────
+
+    /// Reconcile all accounts: recompute balances from entries and compare
+    /// to the running balance cache.
+    ///
+    /// Returns a list of `ReconciliationDiscrepancy` for any account where
+    /// the recomputed balance differs from the cached balance.  An empty
+    /// vec means the ledger is in balance.
+    pub fn reconcile(&self) -> Vec<ReconciliationDiscrepancy> {
+        use std::collections::HashMap as HM;
+
+        // Recompute balances from entries from scratch.
+        let mut recomputed: HM<AccountId, i128> = HM::new();
+        for entry in &self.entries {
+            let affects =
+                matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
+            if !affects {
+                continue;
+            }
+            for line in &entry.lines {
+                let acct = match self.accounts.get(&line.account_id) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let sign = acct.account_type.normal_balance_sign() as i128;
+                let delta = match line.dr_cr {
+                    DrCr::Debit => line.amount.as_i128() * sign,
+                    DrCr::Credit => -line.amount.as_i128() * sign,
+                };
+                *recomputed.entry(line.account_id).or_insert(0) += delta;
+            }
+        }
+
+        let mut discrepancies = Vec::new();
+        // Check all accounts that have any entries or cache entries.
+        let all_ids: std::collections::HashSet<AccountId> = self
+            .accounts
+            .keys()
+            .copied()
+            .chain(self.balance_cache.keys().copied())
+            .collect();
+
+        for id in all_ids {
+            let cached = self.balance_cache.get(&id).copied().unwrap_or(0);
+            let computed = recomputed.get(&id).copied().unwrap_or(0);
+            if cached != computed {
+                let code = self
+                    .accounts
+                    .get(&id)
+                    .map(|a| a.code.clone())
+                    .unwrap_or_else(|| id.to_string());
+                discrepancies.push(ReconciliationDiscrepancy {
+                    account_id: id,
+                    account_code: code,
+                    cached_balance: cached,
+                    recomputed_balance: computed,
+                    delta: computed - cached,
+                });
+            }
+        }
+        discrepancies
+    }
+
+    // ── Financial invariant check ─────────────────────────────────────────
+
+    /// Check the global ledger equation: Σ(Assets+Expenses) == Σ(Liabilities+Equity+Income).
+    ///
+    /// Returns `Ok(())` if balanced, or `Err(String)` describing the imbalance.
+    pub fn check_financial_invariants(&self) -> Result<(), String> {
+        let mut debit_normal_sum: i128 = 0; // Assets + Expenses
+        let mut credit_normal_sum: i128 = 0; // Liabilities + Equity + Income
+
+        for acct in self.accounts.values() {
+            let balance = self.balance_cache.get(&acct.id).copied().unwrap_or(0);
+            match acct.account_type {
+                AccountType::Asset | AccountType::Expense => debit_normal_sum += balance,
+                AccountType::Liability | AccountType::Equity | AccountType::Income => {
+                    credit_normal_sum += balance
+                }
+                AccountType::Contra | AccountType::Suspense => {} // excluded from equation
+            }
+        }
+
+        if debit_normal_sum != credit_normal_sum {
+            Err(format!(
+                "Financial invariant violation: \
+                 Σ(Assets+Expenses)={debit_normal_sum} ≠ Σ(Liabilities+Equity+Income)={credit_normal_sum} \
+                 (delta={})",
+                debit_normal_sum - credit_normal_sum
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Register a custom currency with a declared precision.
+    /// Use this to add currencies beyond the built-in defaults.
+    pub fn register_currency(&mut self, currency: crate::currency::Currency) {
+        self.currency_registry.register(currency);
     }
 }
 

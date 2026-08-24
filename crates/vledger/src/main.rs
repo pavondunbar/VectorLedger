@@ -410,6 +410,59 @@ enum Commands {
         #[arg(short = 'f', long)]
         file: PathBuf,
     },
+
+    /// Reconcile all accounts: recompute balances from journal entries and
+    /// compare against the running balance cache.
+    /// Exits non-zero if any discrepancy is found.
+    #[command(name = "reconcile")]
+    Reconcile {
+        /// Output format: text (default) or json.
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Write output to this file instead of stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Transition a journal entry through the settlement lifecycle.
+    /// Status transitions: Posted → Pending → Settled | Failed
+    #[command(name = "settle")]
+    Settle {
+        /// Entry ID (UUID) to transition.
+        #[arg(long)]
+        entry_id: String,
+        /// New status: pending, settled, or failed.
+        #[arg(long)]
+        status: String,
+        /// Optional notes (e.g. settlement reference, failure reason).
+        #[arg(long)]
+        notes: Option<String>,
+    },
+
+    /// Manage data retention policies.
+    /// Policies are stored in <data-dir>/catalog/retention_policy.json.
+    #[command(name = "retention", subcommand_required = true)]
+    Retention {
+        #[command(subcommand)]
+        action: RetentionAction,
+    },
+
+    /// Manage legal holds on accounts.
+    /// A legal hold prevents any new entries, reversals, or settlement
+    /// transitions involving the held account.
+    #[command(name = "hold", subcommand_required = true)]
+    Hold {
+        #[command(subcommand)]
+        action: HoldAction,
+    },
+
+    /// Manage accounting rule versions.
+    /// Rule versions are stored in <data-dir>/catalog/accounting_rules.json.
+    #[command(name = "rules", subcommand_required = true)]
+    Rules {
+        #[command(subcommand)]
+        action: RulesAction,
+    },
 }
 
 /// Sub-actions for `vledger user`.
@@ -456,6 +509,73 @@ enum UserAction {
         #[arg(short, long)]
         username: String,
     },
+}
+
+/// Sub-actions for `vledger retention`.
+#[derive(Subcommand)]
+enum RetentionAction {
+    /// Show the current retention policy.
+    #[command(name = "show")]
+    Show,
+    /// Set the default retention period in days (0 = keep forever).
+    #[command(name = "set")]
+    Set {
+        /// Default retention in days (0 = keep forever).
+        #[arg(long)]
+        days: u64,
+        /// Apply this retention to a specific domain only (optional).
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// Clear retention policy (revert to keep-forever).
+    #[command(name = "clear")]
+    Clear,
+}
+
+/// Sub-actions for `vledger hold`.
+#[derive(Subcommand)]
+enum HoldAction {
+    /// Place a legal hold on an account.
+    #[command(name = "place")]
+    Place {
+        /// Account code or UUID to place the hold on.
+        #[arg(long)]
+        account: String,
+    },
+    /// Lift the legal hold on an account.
+    #[command(name = "lift")]
+    Lift {
+        /// Account code or UUID to lift the hold from.
+        #[arg(long)]
+        account: String,
+    },
+    /// List all accounts currently under a legal hold.
+    #[command(name = "list")]
+    List,
+}
+
+/// Sub-actions for `vledger rules`.
+#[derive(Subcommand)]
+enum RulesAction {
+    /// Show the current accounting rules version.
+    #[command(name = "show")]
+    Show,
+    /// Record a new accounting rules version with a description.
+    #[command(name = "set")]
+    Set {
+        /// Version string, e.g. "2026-Q3" or "v2".
+        #[arg(long)]
+        version: String,
+        /// Human-readable description of what changed.
+        #[arg(long)]
+        description: String,
+        /// Effective date (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        effective_date: Option<String>,
+    },
+    /// List all recorded rule versions.
+    #[command(name = "history")]
+    History,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -658,6 +778,15 @@ async fn main() -> Result<()> {
             output,
         } => cmd_audit_proof(&cli.data_dir, &commitment, sequence, output.as_deref()).await,
         Commands::VerifyAuditPackage { file } => cmd_verify_audit_package(&file).await,
+        Commands::Reconcile { format, output } => {
+            cmd_reconcile(&cli.data_dir, &format, output.as_deref()).await
+        }
+        Commands::Settle { entry_id, status, notes } => {
+            cmd_settle(&cli.data_dir, &entry_id, &status, notes).await
+        }
+        Commands::Retention { action } => cmd_retention(&cli.data_dir, action).await,
+        Commands::Hold { action } => cmd_hold(&cli.data_dir, action).await,
+        Commands::Rules { action } => cmd_rules(&cli.data_dir, action).await,
     }
 }
 
@@ -1131,9 +1260,87 @@ async fn cmd_start(
         });
     }
 
+    // ── Background: scheduled VERIFY_CHAIN (Feature #35) ─────────────────
+    // Runs verify_chain_integrity() every hour in the background.
+    // Any failure is logged as an error and written to the audit log.
+    {
+        let ledger_bg = std::sync::Arc::clone(&ledger);
+        let audit_bg = Some(std::sync::Arc::clone(&audit_log));
+        let tok = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let guard = ledger_bg.read().await;
+                        match guard.verify_chain_integrity() {
+                            Ok(()) => {
+                                let n = guard.entry_count();
+                                tracing::info!(entries = n, "Scheduled VERIFY_CHAIN: OK");
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "SCHEDULED VERIFY_CHAIN FAILED — INTEGRITY VIOLATION");
+                                if let Some(ref log) = audit_bg {
+                                    let _ = log.append(
+                                        vledger_audit::AuditEventKind::QueryExecuted {
+                                            sql: format!("INTEGRITY_ALERT: {e}"),
+                                            caller_id: "verify-chain-scheduler".into(),
+                                            rows_affected: 0,
+                                            duration_ms: 0,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ = tok.cancelled() => break,
+                }
+            }
+        });
+    }
+
+    // ── Background: financial invariant monitor (Feature #36) ─────────────
+    // Checks assets==liabilities+equity every 15 minutes.
+    // Logs an error and writes to audit log if the invariant is violated.
+    {
+        let ledger_inv = std::sync::Arc::clone(&ledger);
+        let audit_inv = Some(std::sync::Arc::clone(&audit_log));
+        let tok = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(900));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let guard = ledger_inv.read().await;
+                        if let Err(msg) = guard.check_financial_invariants() {
+                            tracing::error!(
+                                "FINANCIAL INVARIANT VIOLATION: {msg}"
+                            );
+                            if let Some(ref log) = audit_inv {
+                                let _ = log.append(
+                                    vledger_audit::AuditEventKind::QueryExecuted {
+                                        sql: format!("INVARIANT_ALERT: {msg}"),
+                                        caller_id: "invariant-monitor".into(),
+                                        rows_affected: 0,
+                                        duration_ms: 0,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    _ = tok.cancelled() => break,
+                }
+            }
+        });
+    }
+
     vledger_server::Server::new_shared_with_shipper(
         config_with_catalog,
-        ledger,
+        ledger.clone(),
         user_store,
         // Wire the WAL shipper when replication.json is present.
         if data_dir.join("replication.json").exists() {
@@ -1943,7 +2150,7 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction, ca_cert: Option<&str>)
         UserAction::List => {
             let mut users = store.list_users();
             users.sort_by(|a, b| a.0.cmp(&b.0));
-            println!("{:<20} {:<12} {}", "USERNAME", "ROLE", "ENABLED");
+            println!("{:<20} {:<12} ENABLED", "USERNAME", "ROLE");
             println!("{}", "-".repeat(40));
             for (name, role, enabled) in users {
                 println!("{:<20} {:<12} {}", name, role, enabled);
@@ -2154,7 +2361,7 @@ async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>)
                         .collect();
                     println!(
                         "{:<20} {:<12} {}",
-                        v.get(0).map(|s| s.as_str()).unwrap_or(""),
+                        v.first().map(|s| s.as_str()).unwrap_or(""),
                         v.get(1).map(|s| s.as_str()).unwrap_or(""),
                         v.get(2).map(|s| s.as_str()).unwrap_or("")
                     );
@@ -3658,5 +3865,374 @@ async fn cmd_verify_audit_package(file: &std::path::Path) -> Result<()> {
         anyhow::bail!("Audit package verification failed");
     }
 
+    Ok(())
+}
+
+
+// ── reconcile ─────────────────────────────────────────────────────────────────
+
+async fn cmd_reconcile(
+    data_dir: &PathBuf,
+    format: &str,
+    output: Option<&std::path::Path>,
+) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!("Not initialised at: {}", data_dir.display());
+    }
+
+    let ledger = vledger_ledger::LedgerStore::open(data_dir)
+        .context("Failed to open ledger")?;
+
+    let discrepancies = ledger.reconcile();
+
+    let text_out: String = if discrepancies.is_empty() {
+        "── VectorLedger Reconciliation ─────────────────\n  ✓  All accounts reconcile.  Balance cache matches journal entries.\n──────────────────────────────────────────────────\n".to_string()
+    } else {
+        let mut s = format!(
+            "── VectorLedger Reconciliation ─────────────────\n  ✗  {} discrepanc{} found:\n\n",
+            discrepancies.len(),
+            if discrepancies.len() == 1 { "y" } else { "ies" }
+        );
+        for d in &discrepancies {
+            s.push_str(&format!(
+                "  Account  : {} ({})\n  Cached   : {}\n  Computed : {}\n  Delta    : {}\n\n",
+                d.account_code, d.account_id, d.cached_balance, d.recomputed_balance, d.delta
+            ));
+        }
+        s.push_str("──────────────────────────────────────────────────\n");
+        s
+    };
+
+    let json_out = serde_json::json!({
+        "reconciled": discrepancies.is_empty(),
+        "discrepancy_count": discrepancies.len(),
+        "discrepancies": discrepancies.iter().map(|d| serde_json::json!({
+            "account_id": d.account_id.to_string(),
+            "account_code": d.account_code,
+            "cached_balance": d.cached_balance,
+            "recomputed_balance": d.recomputed_balance,
+            "delta": d.delta,
+        })).collect::<Vec<_>>(),
+    });
+
+    let content = if format == "json" {
+        serde_json::to_string_pretty(&json_out)? + "\n"
+    } else {
+        text_out
+    };
+
+    match output {
+        Some(p) => std::fs::write(p, &content)
+            .with_context(|| format!("Cannot write to {}", p.display()))?,
+        None => print!("{content}"),
+    }
+
+    if !discrepancies.is_empty() {
+        anyhow::bail!("{} reconciliation discrepanc{} found", discrepancies.len(),
+            if discrepancies.len() == 1 { "y" } else { "ies" });
+    }
+    Ok(())
+}
+
+// ── settle ────────────────────────────────────────────────────────────────────
+
+async fn cmd_settle(
+    data_dir: &PathBuf,
+    entry_id_str: &str,
+    status_str: &str,
+    notes: Option<String>,
+) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!("Not initialised at: {}", data_dir.display());
+    }
+
+    let entry_id = uuid::Uuid::parse_str(entry_id_str)
+        .with_context(|| format!("Invalid entry UUID: {entry_id_str}"))?;
+
+    let mut ledger = vledger_ledger::LedgerStore::open(data_dir)
+        .context("Failed to open ledger")?;
+
+    match status_str.to_lowercase().as_str() {
+        "pending" => ledger.mark_pending(entry_id, notes)
+            .context("Failed to mark entry as pending")?,
+        "settled" => ledger.mark_settled(entry_id, notes)
+            .context("Failed to mark entry as settled")?,
+        "failed" => ledger.mark_failed(entry_id, notes)
+            .context("Failed to mark entry as failed")?,
+        other => anyhow::bail!(
+            "Unknown status '{other}'. Valid values: pending, settled, failed"
+        ),
+    }
+
+    let effective = ledger.effective_status(&entry_id);
+    println!("── Settlement Lifecycle ─────────────────────────");
+    println!("  Entry ID : {entry_id}");
+    println!("  Status   : {effective:?}");
+    println!("──────────────────────────────────────────────────");
+    Ok(())
+}
+
+// ── retention ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RetentionPolicy {
+    /// Default retention in days (0 = keep forever).
+    pub default_days: u64,
+    /// Per-domain overrides: domain → days (0 = keep forever).
+    pub domain_overrides: std::collections::HashMap<String, u64>,
+    /// UTC timestamp when this policy was last updated.
+    pub updated_at: String,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self {
+            default_days: 0,
+            domain_overrides: std::collections::HashMap::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+impl RetentionPolicy {
+    fn path(data_dir: &std::path::Path) -> std::path::PathBuf {
+        data_dir.join("catalog").join("retention_policy.json")
+    }
+
+    fn load(data_dir: &std::path::Path) -> anyhow::Result<Self> {
+        let p = Self::path(data_dir);
+        if !p.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(&p)?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    fn save(&self, data_dir: &std::path::Path) -> anyhow::Result<()> {
+        let p = Self::path(data_dir);
+        std::fs::write(&p, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+}
+
+async fn cmd_retention(data_dir: &PathBuf, action: RetentionAction) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!("Not initialised at: {}", data_dir.display());
+    }
+    match action {
+        RetentionAction::Show => {
+            let policy = RetentionPolicy::load(data_dir)?;
+            println!("── Retention Policy ─────────────────────────────");
+            if policy.default_days == 0 {
+                println!("  Default    : keep forever");
+            } else {
+                println!("  Default    : {} days", policy.default_days);
+            }
+            if policy.domain_overrides.is_empty() {
+                println!("  Overrides  : none");
+            } else {
+                println!("  Overrides  :");
+                let mut overrides: Vec<_> = policy.domain_overrides.iter().collect();
+                overrides.sort_by_key(|(k, _)| k.as_str());
+                for (domain, days) in overrides {
+                    if *days == 0 {
+                        println!("    {domain} → keep forever");
+                    } else {
+                        println!("    {domain} → {days} days");
+                    }
+                }
+            }
+            println!("  Updated    : {}", policy.updated_at);
+            println!("──────────────────────────────────────────────────");
+        }
+        RetentionAction::Set { days, domain } => {
+            let mut policy = RetentionPolicy::load(data_dir)?;
+            policy.updated_at = chrono::Utc::now().to_rfc3339();
+            match domain {
+                Some(d) => {
+                    policy.domain_overrides.insert(d.clone(), days);
+                    let desc = if days == 0 { "keep forever".to_string() } else { format!("{days} days") };
+                    println!("  Set retention for domain '{d}': {desc}");
+                }
+                None => {
+                    policy.default_days = days;
+                    let desc = if days == 0 { "keep forever".to_string() } else { format!("{days} days") };
+                    println!("  Set default retention: {desc}");
+                }
+            }
+            policy.save(data_dir)?;
+            println!("  Saved to: {}", RetentionPolicy::path(data_dir).display());
+        }
+        RetentionAction::Clear => {
+            let policy = RetentionPolicy::default();
+            policy.save(data_dir)?;
+            println!("  Retention policy cleared (keep forever).");
+        }
+    }
+    Ok(())
+}
+
+// ── hold ──────────────────────────────────────────────────────────────────────
+
+async fn cmd_hold(data_dir: &PathBuf, action: HoldAction) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!("Not initialised at: {}", data_dir.display());
+    }
+
+    let mut ledger = vledger_ledger::LedgerStore::open(data_dir)
+        .context("Failed to open ledger")?;
+
+    match action {
+        HoldAction::Place { account } => {
+            let id = resolve_account_id(&ledger, &account)?;
+            ledger.place_legal_hold(&id)
+                .context("Failed to place legal hold")?;
+            println!("── Legal Hold Placed ────────────────────────────");
+            println!("  Account : {account} ({id})");
+            println!("  Status  : HOLD ACTIVE — no entries permitted");
+            println!("──────────────────────────────────────────────────");
+        }
+        HoldAction::Lift { account } => {
+            let id = resolve_account_id(&ledger, &account)?;
+            ledger.lift_legal_hold(&id)
+                .context("Failed to lift legal hold")?;
+            println!("── Legal Hold Lifted ────────────────────────────");
+            println!("  Account : {account} ({id})");
+            println!("  Status  : hold removed — entries permitted");
+            println!("──────────────────────────────────────────────────");
+        }
+        HoldAction::List => {
+            println!("── Accounts Under Legal Hold ────────────────────");
+            let mut found = 0usize;
+            for acct in ledger.all_accounts() {
+                if ledger.is_under_legal_hold(&acct.id) {
+                    println!("  {} ({}) — domain: {}", acct.code, acct.id, acct.domain);
+                    found += 1;
+                }
+            }
+            if found == 0 {
+                println!("  No accounts are currently under a legal hold.");
+            }
+            println!("──────────────────────────────────────────────────");
+        }
+    }
+    Ok(())
+}
+
+/// Resolve an account code or UUID string to an AccountId.
+fn resolve_account_id(
+    ledger: &vledger_ledger::LedgerStore,
+    account_ref: &str,
+) -> Result<vledger_ledger::AccountId> {
+    if let Ok(id) = uuid::Uuid::parse_str(account_ref) {
+        if ledger.get_account(&id).is_some() {
+            return Ok(id);
+        }
+    }
+    ledger
+        .all_accounts()
+        .find(|a| a.code == account_ref)
+        .map(|a| a.id)
+        .ok_or_else(|| anyhow::anyhow!("Account '{}' not found", account_ref))
+}
+
+// ── rules ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct AccountingRuleVersion {
+    pub version: String,
+    pub description: String,
+    pub effective_date: String,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+struct AccountingRules {
+    pub current_version: Option<String>,
+    pub history: Vec<AccountingRuleVersion>,
+}
+
+impl AccountingRules {
+    fn path(data_dir: &std::path::Path) -> std::path::PathBuf {
+        data_dir.join("catalog").join("accounting_rules.json")
+    }
+
+    fn load(data_dir: &std::path::Path) -> anyhow::Result<Self> {
+        let p = Self::path(data_dir);
+        if !p.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(&p)?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    fn save(&self, data_dir: &std::path::Path) -> anyhow::Result<()> {
+        let p = Self::path(data_dir);
+        std::fs::write(&p, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+}
+
+async fn cmd_rules(data_dir: &PathBuf, action: RulesAction) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!("Not initialised at: {}", data_dir.display());
+    }
+    match action {
+        RulesAction::Show => {
+            let rules = AccountingRules::load(data_dir)?;
+            println!("── Accounting Rules ─────────────────────────────");
+            match &rules.current_version {
+                Some(v) => {
+                    println!("  Current version : {v}");
+                    if let Some(entry) = rules.history.iter().rev().find(|e| &e.version == v) {
+                        println!("  Description     : {}", entry.description);
+                        println!("  Effective date  : {}", entry.effective_date);
+                        println!("  Recorded at     : {}", entry.recorded_at);
+                    }
+                }
+                None => println!("  No accounting rules version recorded."),
+            }
+            println!("──────────────────────────────────────────────────");
+        }
+        RulesAction::Set { version, description, effective_date } => {
+            let mut rules = AccountingRules::load(data_dir)?;
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let entry = AccountingRuleVersion {
+                version: version.clone(),
+                description,
+                effective_date: effective_date.unwrap_or_else(|| today.clone()),
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+            };
+            rules.current_version = Some(version.clone());
+            rules.history.push(entry);
+            rules.save(data_dir)?;
+            println!("── Accounting Rules Updated ─────────────────────");
+            println!("  Version : {version}");
+            println!("  Saved to: {}", AccountingRules::path(data_dir).display());
+            println!("──────────────────────────────────────────────────");
+        }
+        RulesAction::History => {
+            let rules = AccountingRules::load(data_dir)?;
+            println!("── Accounting Rules History ─────────────────────");
+            if rules.history.is_empty() {
+                println!("  No rule versions recorded.");
+            } else {
+                for (i, entry) in rules.history.iter().enumerate().rev() {
+                    let marker = if rules.current_version.as_deref() == Some(&entry.version) {
+                        " ← current"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  [{}] {} — {}{}", i + 1, entry.version,
+                        entry.effective_date, marker
+                    );
+                    println!("       {}", entry.description);
+                    println!("       recorded: {}", entry.recorded_at);
+                }
+            }
+            println!("──────────────────────────────────────────────────");
+        }
+    }
     Ok(())
 }
