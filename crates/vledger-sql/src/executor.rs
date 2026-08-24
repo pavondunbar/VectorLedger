@@ -123,6 +123,7 @@ impl<'a> ReadExecutor<'a> {
                 Some(EntryFilter::ByStatus(s)) => {
                     format!("{:?}", e.status).to_lowercase() == s.to_lowercase()
                 }
+                Some(EntryFilter::ByDrCr(_)) => true, // not applicable to ledger; filter ignored
                 Some(EntryFilter::Limit(_)) => true,
             })
             .collect();
@@ -250,6 +251,7 @@ impl<'a> ReadExecutor<'a> {
                 Some(EntryFilter::ByStatus(s)) => {
                     format!("{:?}", e.status).to_lowercase() == s.to_lowercase()
                 }
+                Some(EntryFilter::ByDrCr(_)) => true, // dr_cr filter applied at line level below
                 Some(EntryFilter::Limit(_)) => true,
             })
             .collect();
@@ -272,9 +274,18 @@ impl<'a> ReadExecutor<'a> {
                     vledger_ledger::entry::DrCr::Debit => "Debit",
                     vledger_ledger::entry::DrCr::Credit => "Credit",
                 };
-                // Format amount as decimal with 2 decimal places.
-                // Amounts are stored in minor units (cents), so divide by 100.
-                let amount_display = format!("{:.2}", line.amount.as_i64() as f64 / 100.0);
+
+                // Apply dr_cr filter at line level.
+                if let Some(EntryFilter::ByDrCr(wanted)) = &filter {
+                    if !dr_cr_str.eq_ignore_ascii_case(wanted) {
+                        continue;
+                    }
+                }
+
+                // Amount stored as BigInt (minor units / cents) so that
+                // aggregate functions (SUM, AVG, MIN, MAX) work correctly.
+                // The REPL renderer formats it as a decimal for display.
+                let amount_minor = line.amount.as_i64();
 
                 rows.push(Row::new(
                     cols.clone(),
@@ -286,7 +297,7 @@ impl<'a> ReadExecutor<'a> {
                         Value::Text(entry.domain.clone()),
                         Value::Uuid(line.account_id.to_string()),
                         Value::Text(dr_cr_str.to_string()),
-                        Value::Text(amount_display),
+                        Value::BigInt(amount_minor as i128),
                         Value::Text(line.currency_code.clone()),
                         Value::Text(format!("{:?}", entry.status)),
                     ],

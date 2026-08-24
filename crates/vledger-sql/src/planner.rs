@@ -219,6 +219,7 @@ pub enum EntryFilter {
     ByExternalRef(String),
     ByDomain(String),
     ByStatus(String),
+    ByDrCr(String),
     Limit(usize),
 }
 
@@ -268,6 +269,24 @@ impl LogicalPlanBuilder {
                                 )
                             })?;
                             return Ok(LogicalPlan::VerifyEntry { sequence });
+                        }
+                        "VERSION" => {
+                            return Ok(LogicalPlan::Constant {
+                                col: "version".into(),
+                                val: "PostgreSQL 15.0 (VectorLedger 1.0.0)".into(),
+                            });
+                        }
+                        "CURRENT_USER" => {
+                            return Ok(LogicalPlan::Constant {
+                                col: "current_user".into(),
+                                val: "vledger".into(),
+                            });
+                        }
+                        "CURRENT_DATABASE" => {
+                            return Ok(LogicalPlan::Constant {
+                                col: "current_database".into(),
+                                val: "vledger".into(),
+                            });
                         }
                         #[cfg(test)]
                         "TAMPER_ENTRY" => {
@@ -360,7 +379,7 @@ impl LogicalPlanBuilder {
                         partition_by: ws
                             .partition_by
                             .iter()
-                            .map(|e| expr_to_col_name(e))
+                            .map(expr_to_col_name)
                             .collect(),
                         order_by: ws
                             .order_by
@@ -377,7 +396,7 @@ impl LogicalPlanBuilder {
         if !agg_exprs.is_empty() {
             let group_by = match &body.group_by {
                 GroupByExpr::Expressions(exprs, _) => {
-                    exprs.iter().map(|e| expr_to_col_name(e)).collect()
+                    exprs.iter().map(expr_to_col_name).collect()
                 }
                 _ => vec![],
             };
@@ -692,6 +711,7 @@ fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, S
             }
             (TABLE_LEDGER | TABLE_LEDGER_LINES, "domain") => Ok(EntryFilter::ByDomain(val)),
             (TABLE_LEDGER | TABLE_LEDGER_LINES, "status") => Ok(EntryFilter::ByStatus(val)),
+            (TABLE_LEDGER_LINES, "dr_cr") => Ok(EntryFilter::ByDrCr(val)),
             (TABLE_ACCOUNTS, "code") => Ok(EntryFilter::ByDomain(format!("__account_code:{val}"))),
             (TABLE_ACCOUNTS, "domain") => Ok(EntryFilter::ByDomain(val)),
             (TABLE_ACCOUNTS, "currency") => {
@@ -752,7 +772,7 @@ fn collect_aggregate_exprs(items: &[SelectItem]) -> Vec<AggExpr> {
                 _ => continue,
             };
             // Skip functions that have a OVER clause — those are windows.
-            if matches!(f.over, Some(_)) {
+            if f.over.is_some() {
                 continue;
             }
             let col = match &f.args {
