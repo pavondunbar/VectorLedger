@@ -123,7 +123,7 @@ impl LicenseStore {
                 eprintln!(
                     "⚠  License error: {e}\n   \
                      Falling back to Free tier. \
-                     Fix license.json or contact support@vectorguardlabs.com"
+                     Fix license.json or contact pavon@vectorguardlabs.com"
                 );
                 Self::free()
             }
@@ -244,7 +244,7 @@ impl LicenseStore {
         if !self.is_signed {
             println!(
                 "  License    : Free tier — \
-                 upgrade at https://vectorguardlabs.com/pricing"
+                 upgrade at https://vledger.vectorguardlabs.com"
             );
         } else {
             let days = self.days_remaining().unwrap_or(0);
@@ -255,7 +255,7 @@ impl LicenseStore {
             if days < 30 {
                 println!(
                     "  ⚠  License expires in {days} days — \
-                     renew at https://vectorguardlabs.com/renew"
+                     renew at https://vledger.vectorguardlabs.com"
                 );
             }
         }

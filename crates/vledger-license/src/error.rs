@@ -20,7 +20,7 @@ pub enum LicenseError {
 
     #[error(
         "Feature '{feature}' is not available on your {tier} license.\n\
-         Upgrade at https://vectorguardlabs.com/pricing"
+         Upgrade at https://vledger.vectorguardlabs.com or contact pavon@vectorguardlabs.com"
     )]
     FeatureNotEntitled { feature: Feature, tier: String },
 
