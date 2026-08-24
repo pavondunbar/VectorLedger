@@ -463,7 +463,7 @@ main() {
     local tmpdir=""
     tmpdir=$(mktemp -d)
 
-    trap 'rm -rf "$tmpdir"' EXIT
+    trap 'rm -rf "${tmpdir:-}"' EXIT
 
     local archive="${tmpdir}/${asset_name}"
     local checksum_file="${tmpdir}/${checksum_name}"
