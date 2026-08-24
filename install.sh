@@ -561,7 +561,7 @@ main() {
 
     bold ""
     bold "  Full setup guide:"
-    bold "  https://github.com/${REPO}#quick-start"
+    bold "  https://vledger.vectorguardlabs.com/docs.html#quick-start"
     bold ""
 
     # Clean up temp directory explicitly and disarm the trap so it does not
