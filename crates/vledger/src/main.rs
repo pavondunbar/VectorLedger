@@ -411,8 +411,24 @@ enum Commands {
         file: PathBuf,
     },
 
-    /// Reconcile all accounts: recompute balances from journal entries and
-    /// compare against the running balance cache.
+    /// Seed the database with randomly generated journal entries for testing.
+    /// Generates realistic double-entry transactions with random amounts,
+    /// accounts, currencies, and descriptions. Does not require a running server.
+    #[command(name = "seed")]
+    Seed {
+        /// Number of journal entries to generate.
+        #[arg(long, default_value_t = 10_000)]
+        entries: u64,
+        /// Number of accounts to create (entries are distributed across them).
+        #[arg(long, default_value_t = 20)]
+        accounts: u64,
+        /// Random seed for reproducible datasets (default: random).
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Print progress every N entries (0 = silent).
+        #[arg(long, default_value_t = 100_000)]
+        progress: u64,
+    },
     /// Exits non-zero if any discrepancy is found.
     #[command(name = "reconcile")]
     Reconcile {
@@ -778,6 +794,9 @@ async fn main() -> Result<()> {
             output,
         } => cmd_audit_proof(&cli.data_dir, &commitment, sequence, output.as_deref()).await,
         Commands::VerifyAuditPackage { file } => cmd_verify_audit_package(&file).await,
+        Commands::Seed { entries, accounts, seed, progress } => {
+            cmd_seed(&cli.data_dir, entries, accounts, seed, progress).await
+        }
         Commands::Reconcile { format, output } => {
             cmd_reconcile(&cli.data_dir, &format, output.as_deref()).await
         }
@@ -4234,5 +4253,205 @@ async fn cmd_rules(data_dir: &PathBuf, action: RulesAction) -> Result<()> {
             println!("──────────────────────────────────────────────────");
         }
     }
+    Ok(())
+}
+
+
+// ── seed ──────────────────────────────────────────────────────────────────────
+
+async fn cmd_seed(
+    data_dir: &PathBuf,
+    entry_count: u64,
+    account_count: u64,
+    seed: Option<u64>,
+    progress_interval: u64,
+) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!(
+            "Data directory not found — run `vledger init` first."
+        );
+    }
+
+    // ── Simple deterministic PRNG (xorshift64) ────────────────────────────
+    struct Rng { x: u64 }
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self { x: if seed == 0 { 0xdeadbeef_cafebabe } else { seed } }
+        }
+        fn next(&mut self) -> u64 {
+            self.x ^= self.x << 13;
+            self.x ^= self.x >> 7;
+            self.x ^= self.x << 17;
+            self.x
+        }
+        fn range(&mut self, lo: u64, hi: u64) -> u64 {
+            lo + self.next() % (hi - lo)
+        }
+    }
+
+    let rng_seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+    });
+
+    let mut rng = Rng::new(rng_seed);
+
+    println!("── VectorLedger Seed ────────────────────────────");
+    println!("  Entries  : {entry_count}");
+    println!("  Accounts : {account_count}");
+    println!("  RNG seed : {rng_seed}");
+    println!("  Data dir : {}", data_dir.display());
+    println!("─────────────────────────────────────────────────");
+
+    let mut ledger = vledger_ledger::LedgerStore::open(data_dir)
+        .context("Failed to open ledger")?;
+
+    // ── Account types, currencies, and description templates ─────────────
+    let account_types = [
+        (vledger_ledger::AccountType::Asset,     "ASSET"),
+        (vledger_ledger::AccountType::Liability, "LIAB"),
+        (vledger_ledger::AccountType::Income,    "INC"),
+        (vledger_ledger::AccountType::Expense,   "EXP"),
+        (vledger_ledger::AccountType::Equity,    "EQ"),
+    ];
+    let currencies = ["USD", "EUR", "GBP", "USD", "USD"]; // weighted toward USD
+    let domains    = ["main", "main", "main", "fx", "ops"];
+    let descriptions = [
+        "Customer payment",
+        "Vendor invoice",
+        "Payroll disbursement",
+        "Wire transfer",
+        "FX conversion",
+        "Interest income",
+        "Service fee",
+        "Loan repayment",
+        "Dividend payment",
+        "Tax provision",
+        "Refund issued",
+        "Capital contribution",
+        "Asset purchase",
+        "Depreciation",
+        "Operating expense",
+    ];
+
+    // ── Create accounts ───────────────────────────────────────────────────
+    // Check how many already exist — only create what's missing.
+    let existing: Vec<_> = ledger.all_accounts().map(|a| a.id).collect();
+    let need = account_count as usize;
+
+    let mut account_ids: Vec<uuid::Uuid> = existing.clone();
+
+    if account_ids.len() < need {
+        let to_create = need - account_ids.len();
+        eprint!("  Creating {} accounts...", to_create);
+        for i in 0..to_create {
+            let type_idx  = rng.range(0, account_types.len() as u64) as usize;
+            let curr_idx  = rng.range(0, currencies.len() as u64)    as usize;
+            let dom_idx   = rng.range(0, domains.len() as u64)        as usize;
+            let (atype, prefix) = &account_types[type_idx];
+            let code = format!("{prefix}-{:04}", account_ids.len() + i + 1);
+            let name = format!("{} Account #{}", prefix, account_ids.len() + i + 1);
+            let acct = vledger_ledger::Account::new(
+                &code,
+                &name,
+                *atype,
+                currencies[curr_idx],
+                domains[dom_idx],
+            );
+            match ledger.create_account(acct) {
+                Ok(id) => account_ids.push(id),
+                Err(e) => eprintln!("\n  Warning: could not create account: {e}"),
+            }
+        }
+        eprintln!(" done.");
+    }
+
+    if account_ids.len() < 2 {
+        anyhow::bail!("Need at least 2 accounts to post entries. Increase --accounts.");
+    }
+
+    // ── Post entries ──────────────────────────────────────────────────────
+    let start = std::time::Instant::now();
+    let mut posted = 0u64;
+    let mut errors = 0u64;
+
+    for i in 0..entry_count {
+        // Pick two different accounts.
+        let n = account_ids.len() as u64;
+        let debit_idx  = rng.range(0, n) as usize;
+        let mut credit_idx = rng.range(0, n - 1) as usize;
+        if credit_idx >= debit_idx { credit_idx += 1; }
+
+        let debit_id  = account_ids[debit_idx];
+        let credit_id = account_ids[credit_idx];
+
+        // Random amount: $1.00 – $99,999.99 in cents (100 – 9_999_999)
+        let amount_minor = rng.range(100, 9_999_999);
+        let amount = match vledger_ledger::Amount::new(amount_minor as i64) {
+            Some(a) => a,
+            None    => continue,
+        };
+
+        // Pick a currency that matches both accounts — use USD as safe fallback.
+        let debit_acct  = ledger.get_account(&debit_id);
+        let credit_acct = ledger.get_account(&credit_id);
+        let currency = match (debit_acct, credit_acct) {
+            (Some(d), Some(c)) if d.currency_code == c.currency_code => {
+                d.currency_code.clone()
+            }
+            _ => "USD".to_string(),
+        };
+
+        let desc_idx  = rng.range(0, descriptions.len() as u64) as usize;
+        let dom_idx   = rng.range(0, domains.len() as u64)       as usize;
+        let description = format!("{} #{}", descriptions[desc_idx], i + 1);
+
+        let entry = vledger_ledger::JournalEntryBuilder::new(&description, domains[dom_idx])
+            .debit(debit_id, amount, &currency)
+            .credit(credit_id, amount, &currency)
+            .build();
+
+        match ledger.post_entry(entry) {
+            Ok(_)  => posted += 1,
+            Err(_) => {
+                errors += 1;
+                // Currency mismatch or non-negative balance violation —
+                // skip silently and continue seeding.
+            }
+        }
+
+        if progress_interval > 0 && (i + 1) % progress_interval == 0 {
+            let elapsed = start.elapsed().as_secs_f64();
+            let tps = posted as f64 / elapsed;
+            println!(
+                "  {}/{} entries posted  ({:.0} TPS)",
+                posted, entry_count, tps
+            );
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let tps = posted as f64 / elapsed.as_secs_f64();
+
+    println!();
+    println!("── Seed Complete ─────────────────────────────────");
+    println!("  Posted   : {posted}");
+    if errors > 0 {
+        println!("  Skipped  : {errors}  (currency mismatch / balance constraint)");
+    }
+    println!("  Accounts : {}", account_ids.len());
+    println!("  Elapsed  : {:.2}s", elapsed.as_secs_f64());
+    println!("  TPS      : {tps:.0}");
+    println!("──────────────────────────────────────────────────");
+    println!();
+    println!("  Next steps:");
+    println!("  vledger verify --data-dir {}", data_dir.display());
+    println!(
+        "  vledger audit-package --data-dir {} --output audit.json",
+        data_dir.display()
+    );
+
     Ok(())
 }
