@@ -4372,20 +4372,46 @@ async fn cmd_seed(
         anyhow::bail!("Need at least 2 accounts to post entries. Increase --accounts.");
     }
 
+    // ── Build per-currency account index ─────────────────────────────────
+    // Group account indices by currency so we always pick matching pairs,
+    // eliminating currency-mismatch skips entirely.
+    let mut by_currency: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, id) in account_ids.iter().enumerate() {
+        if let Some(acct) = ledger.get_account(id) {
+            by_currency
+                .entry(acct.currency_code.clone())
+                .or_default()
+                .push(idx);
+        }
+    }
+    // Only keep currencies with at least 2 accounts.
+    let viable: Vec<(String, Vec<usize>)> = by_currency
+        .into_iter()
+        .filter(|(_, ids)| ids.len() >= 2)
+        .collect();
+
+    if viable.is_empty() {
+        anyhow::bail!(
+            "No currency has 2 or more accounts. \
+             Increase --accounts so at least one currency has 2 accounts."
+        );
+    }
+
     // ── Post entries ──────────────────────────────────────────────────────
     let start = std::time::Instant::now();
     let mut posted = 0u64;
     let mut errors = 0u64;
 
     for i in 0..entry_count {
-        // Pick two different accounts.
-        let n = account_ids.len() as u64;
-        let debit_idx  = rng.range(0, n) as usize;
-        let mut credit_idx = rng.range(0, n - 1) as usize;
-        if credit_idx >= debit_idx { credit_idx += 1; }
-
-        let debit_id  = account_ids[debit_idx];
-        let credit_id = account_ids[credit_idx];
+        // Pick a currency group that has ≥ 2 accounts, then pick two
+        // distinct accounts from it — guarantees currency always matches.
+        let (currency, pool) = &viable[rng.range(0, viable.len() as u64) as usize];
+        let a = rng.range(0, pool.len() as u64) as usize;
+        let mut b = rng.range(0, (pool.len() - 1) as u64) as usize;
+        if b >= a { b += 1; }
+        let debit_id  = account_ids[pool[a]];
+        let credit_id = account_ids[pool[b]];
 
         // Random amount: $1.00 – $99,999.99 in cents (100 – 9_999_999)
         let amount_minor = rng.range(100, 9_999_999);
@@ -4394,23 +4420,13 @@ async fn cmd_seed(
             None    => continue,
         };
 
-        // Pick a currency that matches both accounts — use USD as safe fallback.
-        let debit_acct  = ledger.get_account(&debit_id);
-        let credit_acct = ledger.get_account(&credit_id);
-        let currency = match (debit_acct, credit_acct) {
-            (Some(d), Some(c)) if d.currency_code == c.currency_code => {
-                d.currency_code.clone()
-            }
-            _ => "USD".to_string(),
-        };
-
         let desc_idx  = rng.range(0, descriptions.len() as u64) as usize;
         let dom_idx   = rng.range(0, domains.len() as u64)       as usize;
         let description = format!("{} #{}", descriptions[desc_idx], i + 1);
 
         let entry = vledger_ledger::JournalEntryBuilder::new(&description, domains[dom_idx])
-            .debit(debit_id, amount, &currency)
-            .credit(credit_id, amount, &currency)
+            .debit(debit_id, amount, currency.as_str())
+            .credit(credit_id, amount, currency.as_str())
             .build();
 
         match ledger.post_entry(entry) {
