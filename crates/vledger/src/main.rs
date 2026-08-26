@@ -2055,7 +2055,7 @@ fn cmd_license(data_dir: &PathBuf) -> Result<()> {
         }
     } else {
         println!("  Status     : No license file found — running on Free tier");
-        println!("  Upgrade    : https://vectorguardlabs.com/pricing");
+        println!("  Upgrade    : https://vledger.vectorguardlabs.com");
     }
     println!("──────────────────────────────────────────────────");
 
@@ -2079,8 +2079,8 @@ fn cmd_license(data_dir: &PathBuf) -> Result<()> {
     if !license.is_signed {
         println!(
             "  Place a signed license.json in your data directory to unlock\n  \
-             paid features. Contact sales@vectorguardlabs.com or visit\n  \
-             https://vectorguardlabs.com/pricing"
+             paid features. Contact pavon@vectorguardlabs.com or visit\n  \
+             https://vledger.vectorguardlabs.com"
         );
     }
 
@@ -3029,7 +3029,7 @@ async fn cmd_audit_export(
                     eprintln!(
                         "⚠  Your {} license limits audit export to the last {} days. \
                          Clamping --from to {}.\n   \
-                         Upgrade at https://vectorguardlabs.com/pricing",
+                         Upgrade at https://vledger.vectorguardlabs.com",
                         license.tier,
                         days,
                         earliest.format("%Y-%m-%dT%H:%M:%SZ"),
