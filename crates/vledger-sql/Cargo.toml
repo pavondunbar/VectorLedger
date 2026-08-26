@@ -7,6 +7,9 @@ authors.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 
+[features]
+self-test = ["vledger-ledger/self-test"]
+
 [dependencies]
 vledger-crypto  = { workspace = true }
 vledger-ledger  = { workspace = true }
@@ -22,3 +25,4 @@ uuid            = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+vledger-ledger = { path = "../vledger-ledger", features = ["self-test"] }

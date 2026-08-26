@@ -157,6 +157,20 @@ pub struct LedgerStore {
     entries: Vec<JournalEntry>,
     account_entry_index: HashMap<AccountId, Vec<usize>>,
 
+    // ── Query indexes — O(1) / O(k) filtered scans ────────────────────────
+    /// Maps domain name → sorted list of entry positions in `entries`.
+    /// Built during WAL replay and updated on every `post_entry`.
+    /// Turns `WHERE domain = 'x'` from O(n) scan to O(k) where k = matches.
+    domain_index: HashMap<String, Vec<usize>>,
+
+    /// Maps sequence number → entry position in `entries`.
+    /// Turns `WHERE sequence = n` from O(n) scan to O(1).
+    sequence_index: HashMap<u64, usize>,
+
+    /// Maps status string (e.g. "Posted") → list of entry positions.
+    /// Turns `WHERE status = 'Posted'` from O(n) scan to O(k).
+    status_index: HashMap<String, Vec<usize>>,
+
     // ── Running balance cache — O(1) balance lookup ───────────────────────
     /// Stores the signed running balance for every account.
     ///
@@ -254,6 +268,9 @@ impl LedgerStore {
             accounts: HashMap::new(),
             entries: Vec::new(),
             account_entry_index: HashMap::new(),
+            domain_index: HashMap::new(),
+            sequence_index: HashMap::new(),
+            status_index: HashMap::new(),
             balance_cache: HashMap::new(),
             next_sequence: AtomicU64::new(1),
             last_chain_hash: ZERO_HASH,
@@ -446,6 +463,24 @@ impl LedgerStore {
         // Only Posted and Reversal entries affect balances — skip others.
         let affects_balance = matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
         let idx = self.entries.len();
+
+        // ── Query indexes — updated before entries.push() so idx is correct ──
+        // domain_index: maps domain → [entry positions]
+        self.domain_index
+            .entry(entry.domain.clone())
+            .or_default()
+            .push(idx);
+
+        // sequence_index: maps sequence → entry position (unique)
+        self.sequence_index.insert(entry.sequence, idx);
+
+        // status_index: maps status string → [entry positions]
+        let status_key = format!("{:?}", entry.status).to_lowercase();
+        self.status_index
+            .entry(status_key)
+            .or_default()
+            .push(idx);
+
         for line in &entry.lines {
             self.account_entry_index
                 .entry(line.account_id)
@@ -1048,6 +1083,45 @@ impl LedgerStore {
     /// Current BLAKE3 hash chain tip.
     pub fn chain_tip(&self) -> &Hash {
         &self.last_chain_hash
+    }
+
+    // ── Query index accessors ─────────────────────────────────────────────
+
+    /// Return all entries whose domain matches `domain`.
+    ///
+    /// O(k) where k = number of matching entries — avoids a full O(n) scan.
+    /// Returns an empty slice when the domain has no entries.
+    pub fn entries_by_domain(&self, domain: &str) -> Vec<&JournalEntry> {
+        match self.domain_index.get(domain) {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|&i| self.entries.get(i))
+                .collect(),
+            None => vec![],
+        }
+    }
+
+    /// Return all entries whose status matches `status` (case-insensitive).
+    ///
+    /// O(k) — avoids a full O(n) scan.
+    pub fn entries_by_status(&self, status: &str) -> Vec<&JournalEntry> {
+        let key = status.to_lowercase();
+        match self.status_index.get(&key) {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|&i| self.entries.get(i))
+                .collect(),
+            None => vec![],
+        }
+    }
+
+    /// Return the position of an entry in the internal `entries` slice by
+    /// sequence number, or `None` if not found.
+    ///
+    /// O(1) hash lookup — used by the executor to avoid a linear scan for
+    /// `WHERE sequence = n` queries.
+    pub fn entry_position_by_sequence(&self, seq: u64) -> Option<usize> {
+        self.sequence_index.get(&seq).copied()
     }
 
     /// Verify the entire hash chain from first to last entry.
