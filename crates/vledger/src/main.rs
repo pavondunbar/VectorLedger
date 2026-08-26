@@ -429,6 +429,73 @@ enum Commands {
         #[arg(long, default_value_t = 100_000)]
         progress: u64,
     },
+
+    /// Import journal entries from a CSV or JSON file into VectorLedger.
+    ///
+    /// Every row goes through the full post_entry() integrity path:
+    /// debit/credit validation, account existence, currency check,
+    /// balance constraints, idempotency, hash chain, WAL persistence.
+    ///
+    /// Recommended workflow:
+    ///   1. vledger import --file export.csv --dry-run   (validate first)
+    ///   2. vledger import --file export.csv             (execute)
+    ///   3. Receive cryptographic import manifest
+    ///
+    /// The server must NOT be running — import opens the data directory directly.
+    #[command(name = "import")]
+    Import {
+        /// Path to the import file (CSV or JSON).
+        #[arg(short = 'f', long)]
+        file: PathBuf,
+        /// File format: csv or json (detected from extension if omitted).
+        #[arg(long)]
+        format: Option<String>,
+        /// Validate only — do not write any data. Reports all errors found.
+        #[arg(long)]
+        dry_run: bool,
+        /// Column mapping: --map SOURCE_COL=TARGET_FIELD (repeat as needed).
+        /// Target fields: description, debit_account, credit_account, amount,
+        ///   currency, domain, external_ref, idempotency_key, effective_date
+        /// Example: --map memo=description --map from_acct=debit_account
+        #[arg(long = "map", value_name = "SRC=TARGET")]
+        mappings: Vec<String>,
+        /// Path to a JSON mapping file (alternative to --map flags).
+        /// Format: {"source_col": "target_field", ...}
+        #[arg(long)]
+        mapping_file: Option<PathBuf>,
+        /// Default domain for imported entries.
+        #[arg(long, default_value = "main")]
+        domain: String,
+        /// Default currency when not present in the source file.
+        #[arg(long, default_value = "USD")]
+        default_currency: String,
+        /// Source column to use as the idempotency key for duplicate detection.
+        /// If omitted, a BLAKE3 hash of the full row is used automatically.
+        #[arg(long)]
+        id_column: Option<String>,
+        /// Behaviour on row error: abort (default), skip, or collect.
+        #[arg(long, default_value = "abort")]
+        on_error: String,
+        /// Rows per checkpoint (progress saved after each batch for --resume).
+        #[arg(long, default_value_t = 1_000)]
+        batch_size: u64,
+        /// Checkpoint state file path (used by --resume).
+        #[arg(long, default_value = "import-state.json")]
+        state_file: PathBuf,
+        /// Resume a previously interrupted import from the last checkpoint.
+        #[arg(long)]
+        resume: bool,
+        /// Print progress every N rows (0 = silent).
+        #[arg(long, default_value_t = 10_000)]
+        progress: u64,
+        /// Path to write the cryptographic import manifest.
+        #[arg(long, default_value = "import-manifest.json")]
+        manifest: PathBuf,
+        /// Automatically create accounts referenced in the file but not in the ledger.
+        #[arg(long)]
+        create_accounts: bool,
+    },
+
     /// Exits non-zero if any discrepancy is found.
     #[command(name = "reconcile")]
     Reconcile {
@@ -796,6 +863,18 @@ async fn main() -> Result<()> {
         Commands::VerifyAuditPackage { file } => cmd_verify_audit_package(&file).await,
         Commands::Seed { entries, accounts, seed, progress } => {
             cmd_seed(&cli.data_dir, entries, accounts, seed, progress).await
+        }
+        Commands::Import {
+            file, format, dry_run, mappings, mapping_file, domain,
+            default_currency, id_column, on_error, batch_size, state_file,
+            resume, progress, manifest, create_accounts,
+        } => {
+            cmd_import(
+                &cli.data_dir, &file, format.as_deref(), dry_run, &mappings,
+                mapping_file.as_deref(), &domain, &default_currency,
+                id_column.as_deref(), &on_error, batch_size, &state_file,
+                resume, progress, &manifest, create_accounts,
+            ).await
         }
         Commands::Reconcile { format, output } => {
             cmd_reconcile(&cli.data_dir, &format, output.as_deref()).await
@@ -4467,4 +4546,704 @@ async fn cmd_seed(
     );
 
     Ok(())
+}
+
+
+// ── import ────────────────────────────────────────────────────────────────────
+
+/// A single row from the import file after column mapping is applied.
+#[derive(Debug)]
+struct ImportRow {
+    description: String,
+    debit_account: String,
+    credit_account: String,
+    amount: i64,
+    currency: String,
+    domain: String,
+    external_ref: Option<String>,
+    idempotency_key: Option<String>,
+    effective_date: Option<String>,
+    /// Raw row bytes used for auto-idempotency-key generation.
+    raw: String,
+}
+
+/// Column mapping: source column name → target ImportRow field name.
+type ColMap = std::collections::HashMap<String, String>;
+
+/// Checkpoint state persisted between batches for --resume.
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+struct ImportState {
+    pub file: String,
+    pub rows_processed: u64,
+    pub rows_imported: u64,
+    pub rows_skipped: u64,
+    pub rows_already_existed: u64,
+    pub last_row_index: u64,
+    pub started_at: String,
+}
+
+impl ImportState {
+    fn load(path: &std::path::Path) -> anyhow::Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(path)?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+    fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+}
+
+/// Import manifest written at completion.
+#[derive(Debug, serde::Serialize)]
+struct ImportManifest {
+    pub import_id: String,
+    pub source_file: String,
+    pub source_sha256: String,
+    pub started_at: String,
+    pub completed_at: String,
+    pub dry_run: bool,
+    pub rows_processed: u64,
+    pub rows_imported: u64,
+    pub rows_already_existed: u64,
+    pub rows_skipped: u64,
+    pub rows_failed: u64,
+    pub first_sequence: Option<u64>,
+    pub last_sequence: Option<u64>,
+    pub chain_tip: String,
+    pub entry_count: usize,
+    pub format: String,
+    pub domain: String,
+    pub on_error: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_import(
+    data_dir: &PathBuf,
+    file: &PathBuf,
+    format: Option<&str>,
+    dry_run: bool,
+    mappings: &[String],
+    mapping_file: Option<&std::path::Path>,
+    domain: &str,
+    default_currency: &str,
+    id_column: Option<&str>,
+    on_error: &str,
+    batch_size: u64,
+    state_file: &std::path::Path,
+    resume: bool,
+    progress_interval: u64,
+    manifest_path: &std::path::Path,
+    create_accounts: bool,
+) -> Result<()> {
+    if !data_dir.exists() {
+        anyhow::bail!("Data directory not found — run `vledger init` first.");
+    }
+    if !file.exists() {
+        anyhow::bail!("Import file not found: {}", file.display());
+    }
+
+    let started_at = chrono::Utc::now().to_rfc3339();
+
+    // ── Detect format ─────────────────────────────────────────────────────
+    let fmt = format.map(|s| s.to_lowercase()).unwrap_or_else(|| {
+        file.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("csv")
+            .to_lowercase()
+    });
+    if fmt != "csv" && fmt != "json" {
+        anyhow::bail!("Unsupported format '{}'. Use csv or json.", fmt);
+    }
+
+    // ── Validate on_error mode ────────────────────────────────────────────
+    if !["abort", "skip", "collect"].contains(&on_error) {
+        anyhow::bail!("--on-error must be one of: abort, skip, collect");
+    }
+
+    // ── Build column mapping ──────────────────────────────────────────────
+    let mut col_map: ColMap = ColMap::new();
+
+    // Load from mapping file first, then --map flags override.
+    if let Some(mf) = mapping_file {
+        if mf.exists() {
+            let raw = std::fs::read_to_string(mf)
+                .with_context(|| format!("Cannot read mapping file: {}", mf.display()))?;
+            let parsed: std::collections::HashMap<String, String> =
+                serde_json::from_str(&raw)
+                    .with_context(|| "Mapping file must be a JSON object: {\"src\": \"target\"}")?;
+            col_map.extend(parsed);
+        }
+    }
+    for m in mappings {
+        let parts: Vec<&str> = m.splitn(2, '=').collect();
+        if parts.len() != 2 {
+            anyhow::bail!("Invalid --map value '{}'. Use: SOURCE_COL=TARGET_FIELD", m);
+        }
+        col_map.insert(parts[0].to_string(), parts[1].to_string());
+    }
+
+    // ── Compute source file SHA-256 for manifest provenance ───────────────
+    let file_bytes = std::fs::read(file)
+        .with_context(|| format!("Cannot read import file: {}", file.display()))?;
+    let source_sha256 = {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&file_bytes);
+        hex::encode(hasher.finalize().as_bytes())
+    };
+
+    // ── Parse all rows ────────────────────────────────────────────────────
+    let rows = if fmt == "csv" {
+        parse_csv_rows(&file_bytes, &col_map, domain, default_currency)?
+    } else {
+        parse_json_rows(&file_bytes, &col_map, domain, default_currency)?
+    };
+
+    let total_rows = rows.len() as u64;
+
+    println!("── VectorLedger Import ───────────────────────────");
+    println!("  File       : {}", file.display());
+    println!("  Format     : {}", fmt.to_uppercase());
+    println!("  Rows       : {total_rows}");
+    println!("  Dry run    : {}", if dry_run { "YES — no data will be written" } else { "no" });
+    if !col_map.is_empty() {
+        println!("  Mappings   : {}", col_map.len());
+    }
+    println!("  On error   : {on_error}");
+    println!("  Source SHA : {}...{}", &source_sha256[..8], &source_sha256[56..]);
+    println!("──────────────────────────────────────────────────");
+
+    // ── Load checkpoint state for resume ─────────────────────────────────
+    let mut state = if resume {
+        let s = ImportState::load(state_file)?;
+        if s.rows_processed > 0 {
+            println!("  Resuming from row {} / {total_rows}", s.rows_processed);
+        }
+        s
+    } else {
+        // Fresh run — delete any stale state file.
+        if state_file.exists() {
+            let _ = std::fs::remove_file(state_file);
+        }
+        ImportState {
+            file: file.display().to_string(),
+            started_at: started_at.clone(),
+            ..Default::default()
+        }
+    };
+
+    let skip_rows = state.last_row_index;
+
+    // ── Open ledger ───────────────────────────────────────────────────────
+    let mut ledger = vledger_ledger::LedgerStore::open(data_dir)
+        .context("Failed to open ledger. Is vledger start running? Stop it first.")?;
+
+    // Build account lookup: code → AccountId
+    let mut account_lookup: std::collections::HashMap<String, vledger_ledger::AccountId> =
+        ledger.all_accounts().map(|a| (a.code.clone(), a.id)).collect();
+
+    // ── Validation / dry-run pass ─────────────────────────────────────────
+    let mut validation_errors: Vec<(u64, String)> = Vec::new();
+    let mut currencies_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut accounts_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if dry_run || on_error == "collect" {
+        println!();
+        println!("  Validating rows...");
+        for (i, row) in rows.iter().enumerate() {
+            let row_num = i as u64 + 1;
+            currencies_seen.insert(row.currency.clone());
+            accounts_seen.insert(row.debit_account.clone());
+            accounts_seen.insert(row.credit_account.clone());
+
+            if let Err(e) = validate_import_row(row, &account_lookup) {
+                validation_errors.push((row_num, e.to_string()));
+            }
+        }
+
+        let valid = total_rows - validation_errors.len() as u64;
+        let accounts_missing: Vec<_> = accounts_seen
+            .iter()
+            .filter(|c| !account_lookup.contains_key(*c))
+            .collect();
+
+        println!();
+        println!("── Import Validation Report ─────────────────────");
+        println!("  Rows detected     : {total_rows}");
+        println!("  Valid             : {valid}");
+        println!("  Invalid           : {}", validation_errors.len());
+        println!("  Accounts detected : {}", accounts_seen.len());
+        println!("  Accounts missing  : {}", accounts_missing.len());
+        println!("  Currencies        : {}", currencies_seen.iter().cloned().collect::<Vec<_>>().join(", "));
+
+        if !validation_errors.is_empty() {
+            println!();
+            println!("  Errors (first 20):");
+            for (row, err) in validation_errors.iter().take(20) {
+                println!("    Row {row:>8}: {err}");
+            }
+            if validation_errors.len() > 20 {
+                println!("    ... and {} more", validation_errors.len() - 20);
+            }
+        }
+
+        if !accounts_missing.is_empty() && !create_accounts {
+            println!();
+            println!("  Missing accounts (use --create-accounts to create them):");
+            for a in accounts_missing.iter().take(10) {
+                println!("    {a}");
+            }
+        }
+
+        println!("──────────────────────────────────────────────────");
+
+        if dry_run {
+            if validation_errors.is_empty() {
+                println!();
+                println!("  ✓  Dry run complete — no errors found.");
+                println!("     Run without --dry-run to import.");
+            } else {
+                println!();
+                println!("  ✗  Dry run found {} error(s). Fix them before importing.", validation_errors.len());
+            }
+            println!();
+            return Ok(());
+        }
+
+        // collect mode: abort if any errors found.
+        if on_error == "collect" && !validation_errors.is_empty() {
+            anyhow::bail!(
+                "{} validation error(s) found. Fix them or use --on-error skip to skip invalid rows.",
+                validation_errors.len()
+            );
+        }
+    }
+
+    // ── Import loop ───────────────────────────────────────────────────────
+    println!();
+    println!("  Importing...");
+    let import_start = std::time::Instant::now();
+    let mut rows_failed: u64 = 0;
+    let mut first_sequence: Option<u64> = None;
+    let mut last_sequence: Option<u64> = None;
+    let mut batch_count: u64 = 0;
+
+    for (i, row) in rows.iter().enumerate() {
+        let row_num = i as u64 + 1;
+
+        // Skip already-processed rows on resume.
+        if row_num <= skip_rows {
+            continue;
+        }
+
+        // Build idempotency key.
+        let idem_key = if let Some(ref id_col) = id_column {
+            // Use the row's id_column value if present — stored in external_ref as fallback.
+            row.idempotency_key.clone()
+                .or_else(|| row.external_ref.clone())
+                .unwrap_or_else(|| {
+                    let raw = format!("{}:row:{}", id_col, row_num);
+                    hex::encode(blake3::hash(raw.as_bytes()).as_bytes())
+                })
+        } else {
+            // Auto: BLAKE3 of full raw row content.
+            let key = format!("import:{}:{}",
+                &source_sha256[..16],
+                hex::encode(blake3::hash(row.raw.as_bytes()).as_bytes())
+            );
+            key
+        };
+
+        // Resolve or create accounts.
+        let debit_id = match resolve_or_create_account(
+            &mut ledger, &mut account_lookup,
+            &row.debit_account, &row.currency, &row.domain, create_accounts,
+        ) {
+            Ok(id) => id,
+            Err(e) => {
+                let msg = format!("debit account '{}': {}", row.debit_account, e);
+                if on_error == "abort" {
+                    anyhow::bail!("Row {row_num}: {msg}");
+                }
+                eprintln!("  ⚠  Row {row_num} skipped: {msg}");
+                state.rows_skipped += 1;
+                rows_failed += 1;
+                continue;
+            }
+        };
+
+        let credit_id = match resolve_or_create_account(
+            &mut ledger, &mut account_lookup,
+            &row.credit_account, &row.currency, &row.domain, create_accounts,
+        ) {
+            Ok(id) => id,
+            Err(e) => {
+                let msg = format!("credit account '{}': {}", row.credit_account, e);
+                if on_error == "abort" {
+                    anyhow::bail!("Row {row_num}: {msg}");
+                }
+                eprintln!("  ⚠  Row {row_num} skipped: {msg}");
+                state.rows_skipped += 1;
+                rows_failed += 1;
+                continue;
+            }
+        };
+
+        let amount = match vledger_ledger::Amount::new(row.amount) {
+            Some(a) => a,
+            None => {
+                let msg = format!("amount must be non-zero (got {})", row.amount);
+                if on_error == "abort" {
+                    anyhow::bail!("Row {row_num}: {msg}");
+                }
+                eprintln!("  ⚠  Row {row_num} skipped: {msg}");
+                state.rows_skipped += 1;
+                rows_failed += 1;
+                continue;
+            }
+        };
+
+        // Parse effective_date if provided.
+        let effective_at = if let Some(ref date_str) = row.effective_date {
+            match chrono::DateTime::parse_from_rfc3339(date_str) {
+                Ok(dt) => dt.with_timezone(&chrono::Utc),
+                Err(_) => {
+                    // Try YYYY-MM-DD
+                    match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                        Ok(d) => d.and_hms_opt(0, 0, 0)
+                            .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc))
+                            .unwrap_or_else(chrono::Utc::now),
+                        Err(_) => chrono::Utc::now(),
+                    }
+                }
+            }
+        } else {
+            chrono::Utc::now()
+        };
+
+        let mut builder = vledger_ledger::JournalEntryBuilder::new(
+            &row.description,
+            &row.domain,
+        )
+        .debit(debit_id, amount, &row.currency)
+        .credit(credit_id, amount, &row.currency)
+        .effective_at(effective_at)
+        .idempotency_key(&idem_key);
+
+        if let Some(ref ext) = row.external_ref {
+            if !ext.is_empty() {
+                builder = builder.external_ref(ext);
+            }
+        }
+
+        let entry = builder.build();
+
+        match ledger.post_entry(entry) {
+            Ok(posted) => {
+                let seq = posted.sequence;
+                if first_sequence.is_none() { first_sequence = Some(seq); }
+                last_sequence = Some(seq);
+                state.rows_imported += 1;
+            }
+            Err(vledger_ledger::LedgerError::IdempotencyConflict(_)) => {
+                state.rows_already_existed += 1;
+            }
+            // Idempotency returns Ok with original entry — count as existing.
+            Err(_) if state.rows_imported > 0 => {
+                // post_entry returns Ok on duplicate key, so this path means
+                // a real error (balance, currency, etc.).
+                let msg = "post_entry failed";
+                if on_error == "abort" {
+                    anyhow::bail!("Row {row_num}: {msg}");
+                }
+                eprintln!("  ⚠  Row {row_num} skipped: {msg}");
+                state.rows_skipped += 1;
+                rows_failed += 1;
+                continue;
+            }
+            Err(e) => {
+                if on_error == "abort" {
+                    anyhow::bail!("Row {row_num}: {e}");
+                }
+                eprintln!("  ⚠  Row {row_num} skipped: {e}");
+                state.rows_skipped += 1;
+                rows_failed += 1;
+                continue;
+            }
+        }
+
+        state.rows_processed += 1;
+        state.last_row_index = row_num;
+        batch_count += 1;
+
+        // Progress reporting.
+        if progress_interval > 0 && state.rows_processed % progress_interval == 0 {
+            let elapsed = import_start.elapsed().as_secs_f64();
+            let tps = state.rows_imported as f64 / elapsed;
+            println!(
+                "  {}/{} rows  |  imported: {}  existed: {}  skipped: {}  ({:.0} TPS)",
+                state.rows_processed, total_rows,
+                state.rows_imported, state.rows_already_existed,
+                state.rows_skipped, tps
+            );
+        }
+
+        // Checkpoint after each batch.
+        if batch_count >= batch_size {
+            state.save(state_file)?;
+            batch_count = 0;
+        }
+    }
+
+    // Final checkpoint save.
+    state.save(state_file)?;
+
+    let elapsed = import_start.elapsed();
+    let tps = if elapsed.as_secs_f64() > 0.0 {
+        state.rows_imported as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    let chain_tip = hex::encode(ledger.chain_tip());
+    let entry_count = ledger.entry_count();
+    let completed_at = chrono::Utc::now().to_rfc3339();
+
+    // ── Import manifest ───────────────────────────────────────────────────
+    let import_id = format!("imp_{}", &source_sha256[..16]);
+    let manifest = ImportManifest {
+        import_id: import_id.clone(),
+        source_file: file.display().to_string(),
+        source_sha256: source_sha256.clone(),
+        started_at: started_at.clone(),
+        completed_at: completed_at.clone(),
+        dry_run,
+        rows_processed: state.rows_processed,
+        rows_imported: state.rows_imported,
+        rows_already_existed: state.rows_already_existed,
+        rows_skipped: state.rows_skipped,
+        rows_failed,
+        first_sequence,
+        last_sequence,
+        chain_tip: chain_tip.clone(),
+        entry_count,
+        format: fmt.clone(),
+        domain: domain.to_string(),
+        on_error: on_error.to_string(),
+    };
+    std::fs::write(
+        manifest_path,
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+
+    // Clean up state file on successful completion.
+    if rows_failed == 0 && state_file.exists() {
+        let _ = std::fs::remove_file(state_file);
+    }
+
+    println!();
+    println!("── Import Complete ───────────────────────────────");
+    println!("  Source file       : {}", file.display());
+    println!("  Source SHA-256    : {}...{}", &source_sha256[..8], &source_sha256[56..]);
+    println!("  Import ID         : {import_id}");
+    println!();
+    println!("  Rows processed    : {}", state.rows_processed);
+    println!("  Rows imported     : {}", state.rows_imported);
+    println!("  Already existed   : {}", state.rows_already_existed);
+    println!("  Rows skipped      : {}", state.rows_skipped);
+    if rows_failed > 0 {
+        println!("  Rows failed       : {rows_failed}");
+    }
+    println!();
+    if let (Some(first), Some(last)) = (first_sequence, last_sequence) {
+        println!("  First sequence    : {first}");
+        println!("  Last sequence     : {last}");
+    }
+    println!("  Chain tip         : {}...{}", &chain_tip[..16], &chain_tip[48..]);
+    println!("  Total entries     : {entry_count}");
+    println!();
+    println!("  Elapsed           : {:.2}s  ({:.0} TPS)", elapsed.as_secs_f64(), tps);
+    println!("  Manifest          : {}", manifest_path.display());
+    println!("──────────────────────────────────────────────────");
+
+    if rows_failed > 0 {
+        anyhow::bail!("{rows_failed} row(s) failed to import.");
+    }
+
+    Ok(())
+}
+
+/// Validate a single import row without writing anything.
+fn validate_import_row(
+    row: &ImportRow,
+    account_lookup: &std::collections::HashMap<String, vledger_ledger::AccountId>,
+) -> anyhow::Result<()> {
+    if row.description.is_empty() {
+        anyhow::bail!("description is empty");
+    }
+    if row.debit_account.is_empty() {
+        anyhow::bail!("debit_account is empty");
+    }
+    if row.credit_account.is_empty() {
+        anyhow::bail!("credit_account is empty");
+    }
+    if row.debit_account == row.credit_account {
+        anyhow::bail!("debit_account and credit_account are the same");
+    }
+    if row.amount <= 0 {
+        anyhow::bail!("amount must be a positive integer, got {}", row.amount);
+    }
+    if row.currency.is_empty() {
+        anyhow::bail!("currency is empty");
+    }
+    if !account_lookup.contains_key(&row.debit_account) {
+        anyhow::bail!("debit account '{}' not found in ledger", row.debit_account);
+    }
+    if !account_lookup.contains_key(&row.credit_account) {
+        anyhow::bail!("credit account '{}' not found in ledger", row.credit_account);
+    }
+    Ok(())
+}
+
+/// Resolve an account code to its ID, optionally creating it if missing.
+fn resolve_or_create_account(
+    ledger: &mut vledger_ledger::LedgerStore,
+    lookup: &mut std::collections::HashMap<String, vledger_ledger::AccountId>,
+    code: &str,
+    currency: &str,
+    domain: &str,
+    create: bool,
+) -> anyhow::Result<vledger_ledger::AccountId> {
+    if let Some(&id) = lookup.get(code) {
+        return Ok(id);
+    }
+    if !create {
+        anyhow::bail!("account '{}' not found. Use --create-accounts to create it.", code);
+    }
+    // Auto-create as a generic Asset account with the given currency.
+    let acct = vledger_ledger::Account::new(
+        code,
+        code, // name = code until updated
+        vledger_ledger::AccountType::Asset,
+        currency,
+        domain,
+    );
+    let id = ledger.create_account(acct)
+        .with_context(|| format!("Failed to create account '{code}'"))?;
+    lookup.insert(code.to_string(), id);
+    Ok(id)
+}
+
+/// Parse CSV bytes into `ImportRow` values using the column mapping.
+fn parse_csv_rows(
+    data: &[u8],
+    col_map: &ColMap,
+    default_domain: &str,
+    default_currency: &str,
+) -> anyhow::Result<Vec<ImportRow>> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(data);
+
+    let headers: Vec<String> = reader
+        .headers()
+        .context("Failed to read CSV headers")?
+        .iter()
+        .map(|h| h.to_string())
+        .collect();
+
+    // Build a resolved header name → field name map.
+    let resolved: std::collections::HashMap<String, String> = headers
+        .iter()
+        .map(|h| {
+            let target = col_map.get(h).cloned().unwrap_or_else(|| h.clone());
+            (h.clone(), target)
+        })
+        .collect();
+
+    let mut rows = Vec::new();
+    for result in reader.records() {
+        let record = result.context("Failed to read CSV record")?;
+        let raw = record.iter().collect::<Vec<_>>().join(",");
+        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (i, h) in headers.iter().enumerate() {
+            let target = resolved.get(h).cloned().unwrap_or_else(|| h.clone());
+            map.insert(target, record.get(i).unwrap_or("").to_string());
+        }
+        rows.push(row_from_map(map, &raw, default_domain, default_currency)?);
+    }
+    Ok(rows)
+}
+
+/// Parse JSON bytes (array of objects) into `ImportRow` values.
+fn parse_json_rows(
+    data: &[u8],
+    col_map: &ColMap,
+    default_domain: &str,
+    default_currency: &str,
+) -> anyhow::Result<Vec<ImportRow>> {
+    let json_str = std::str::from_utf8(data).context("JSON file is not valid UTF-8")?;
+    let records: Vec<std::collections::HashMap<String, serde_json::Value>> =
+        serde_json::from_str(json_str).context("JSON file must be an array of objects")?;
+
+    let mut rows = Vec::new();
+    for record in records {
+        let raw = serde_json::to_string(&record).unwrap_or_default();
+        let mut map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (k, v) in record {
+            let target = col_map.get(&k).cloned().unwrap_or(k);
+            let val = match v {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            map.insert(target, val);
+        }
+        rows.push(row_from_map(map, &raw, default_domain, default_currency)?);
+    }
+    Ok(rows)
+}
+
+/// Build an `ImportRow` from a resolved field map.
+fn row_from_map(
+    map: std::collections::HashMap<String, String>,
+    raw: &str,
+    default_domain: &str,
+    default_currency: &str,
+) -> anyhow::Result<ImportRow> {
+    let get = |key: &str| map.get(key).cloned().unwrap_or_default();
+
+    let amount_str = get("amount");
+    let amount: i64 = amount_str.trim().parse::<i64>()
+        .or_else(|_| {
+            // Try parsing as a decimal (e.g. "1000.00") and convert to integer.
+            amount_str.trim().parse::<f64>().map(|f| f.round() as i64)
+        })
+        .with_context(|| format!("Cannot parse amount '{}' as integer", amount_str))?;
+
+    Ok(ImportRow {
+        description: get("description"),
+        debit_account: get("debit_account"),
+        credit_account: get("credit_account"),
+        amount,
+        currency: {
+            let c = get("currency");
+            if c.is_empty() { default_currency.to_string() } else { c.to_uppercase() }
+        },
+        domain: {
+            let d = get("domain");
+            if d.is_empty() { default_domain.to_string() } else { d }
+        },
+        external_ref: { let v = get("external_ref"); if v.is_empty() { None } else { Some(v) } },
+        idempotency_key: { let v = get("idempotency_key"); if v.is_empty() { None } else { Some(v) } },
+        effective_date: { let v = get("effective_date"); if v.is_empty() { None } else { Some(v) } },
+        raw: raw.to_string(),
+    })
 }

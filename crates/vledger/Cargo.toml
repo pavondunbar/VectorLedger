@@ -39,6 +39,7 @@ chrono              = { workspace = true }
 hex                 = { workspace = true }
 uuid                = { workspace = true }
 rustyline           = { version = "14.0.0", features = ["derive"] }
+csv                 = { workspace = true }
 tempfile            = { workspace = true }
 tar                 = "0.4.44"
 blake3              = { workspace = true }
