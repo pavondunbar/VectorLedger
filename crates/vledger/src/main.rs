@@ -1537,25 +1537,24 @@ async fn cmd_sql(
             data_dir.display()
         );
         println!();
-        let stdin = std::io::stdin();
-        let mut line = String::new();
+
+        let mut rl = rustyline::DefaultEditor::new()
+            .context("Failed to initialize line editor")?;
         loop {
-            print!("vledger> ");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            line.clear();
-            if stdin.read_line(&mut line).unwrap_or(0) == 0 {
-                break;
-            }
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if trimmed == "exit" || trimmed == "\\q" {
-                break;
-            }
-            if let Err(e) = run_sql_authenticated(&mut ledger, trimmed, &session) {
-                eprintln!("Error: {e}");
+            let prompt = "vledger> ";
+            match rl.readline(prompt) {
+                Ok(line) => {
+                    let trimmed = line.trim().to_string();
+                    if trimmed.is_empty() { continue; }
+                    let _ = rl.add_history_entry(&trimmed);
+                    if trimmed == "exit" || trimmed == "\\q" { break; }
+                    if let Err(e) = run_sql_authenticated(&mut ledger, &trimmed, &session) {
+                        eprintln!("Error: {e}");
+                    }
+                }
+                Err(rustyline::error::ReadlineError::Eof)
+                | Err(rustyline::error::ReadlineError::Interrupted) => break,
+                Err(e) => { eprintln!("Input error: {e}"); break; }
             }
         }
     }
@@ -1810,72 +1809,70 @@ async fn cmd_sql_network(
         println!("VectorLedger SQL REPL — connected to {addr} as {username} ({role})");
         println!("  Type 'exit' or Ctrl-D to quit. Use \\x to toggle expanded display.");
         println!();
-        let stdin = std::io::stdin();
-        let mut line = String::new();
+
+        let mut rl = rustyline::DefaultEditor::new()
+            .context("Failed to initialize line editor")?;
         loop {
             let prompt = if expanded {
                 "vledger (expanded)> "
             } else {
                 "vledger> "
             };
-            print!("{prompt}");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            line.clear();
-            if stdin.read_line(&mut line).unwrap_or(0) == 0 {
-                break;
-            }
-            let trimmed = line.trim().to_string();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if trimmed == "exit" || trimmed == "\\q" {
-                break;
-            }
+            match rl.readline(prompt) {
+                Ok(line) => {
+                    let trimmed = line.trim().to_string();
+                    if trimmed.is_empty() { continue; }
+                    let _ = rl.add_history_entry(&trimmed);
+                    if trimmed == "exit" || trimmed == "\\q" { break; }
 
-            // Handle REPL meta-commands (no server round-trip needed).
-            if trimmed == "\\x" {
-                expanded = !expanded;
-                println!(
-                    "Expanded display is {}.",
-                    if expanded { "on" } else { "off" }
-                );
-                println!();
-                continue;
-            }
-            if trimmed == "\\?" || trimmed == "\\help" {
-                println!("  \\x        Toggle expanded (vertical) display");
-                println!("  \\q        Quit");
-                println!("  exit      Quit");
-                println!("  \\?        Show this help");
-                println!();
-                continue;
-            }
+                    // Handle REPL meta-commands (no server round-trip needed).
+                    if trimmed == "\\x" {
+                        expanded = !expanded;
+                        println!(
+                            "Expanded display is {}.",
+                            if expanded { "on" } else { "off" }
+                        );
+                        println!();
+                        continue;
+                    }
+                    if trimmed == "\\?" || trimmed == "\\help" {
+                        println!("  \\x        Toggle expanded (vertical) display");
+                        println!("  \\q        Quit");
+                        println!("  exit      Quit");
+                        println!("  \\?        Show this help");
+                        println!();
+                        continue;
+                    }
 
-            let req = serde_json::json!({ "sql": trimmed, "token": token });
-            if let Err(e) = write_half
-                .write_all(format!("{}\n", req).as_bytes())
-                .await
-                .and(write_half.flush().await)
-            {
-                eprintln!("Connection error: {e}");
-                break;
-            }
-            match lines.next_line().await {
-                Ok(Some(resp_line)) => {
-                    match serde_json::from_str::<serde_json::Value>(&resp_line) {
-                        Ok(resp) => print_response(&resp, expanded),
-                        Err(e) => eprintln!("Bad response: {e}"),
+                    let req = serde_json::json!({ "sql": trimmed, "token": token });
+                    if let Err(e) = write_half
+                        .write_all(format!("{}\n", req).as_bytes())
+                        .await
+                        .and(write_half.flush().await)
+                    {
+                        eprintln!("Connection error: {e}");
+                        break;
+                    }
+                    match lines.next_line().await {
+                        Ok(Some(resp_line)) => {
+                            match serde_json::from_str::<serde_json::Value>(&resp_line) {
+                                Ok(resp) => print_response(&resp, expanded),
+                                Err(e) => eprintln!("Bad response: {e}"),
+                            }
+                        }
+                        Ok(None) => {
+                            eprintln!("Server closed connection.");
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("Read error: {e}");
+                            break;
+                        }
                     }
                 }
-                Ok(None) => {
-                    eprintln!("Server closed connection.");
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("Read error: {e}");
-                    break;
-                }
+                Err(rustyline::error::ReadlineError::Eof)
+                | Err(rustyline::error::ReadlineError::Interrupted) => break,
+                Err(e) => { eprintln!("Input error: {e}"); break; }
             }
         }
     }
