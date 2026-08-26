@@ -137,16 +137,18 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
           # Generate workspace-level CycloneDX JSON SBOM.
-          cargo cyclonedx --format json --all --override-filename bom
-          # cargo-cyclonedx may produce bom.json or bom.cdx.json depending on version.
-          # Find whichever file was produced and rename it to the versioned asset name.
-          SBOM_SRC=$(ls bom.json bom.cdx.json 2>/dev/null | head -1)
+          # Run without --override-filename so cargo-cyclonedx uses its default
+          # output filename, then find whatever it produced.
+          cargo cyclonedx --format json --all
+          # Find the generated SBOM file anywhere in the workspace.
+          SBOM_SRC=$(find . -maxdepth 2 -name "*.cdx.json" -o -name "bom.json" 2>/dev/null | head -1)
           if [ -z "$SBOM_SRC" ]; then
-            echo "ERROR: cargo-cyclonedx did not produce bom.json or bom.cdx.json"
-            echo "Files in workspace root:"
-            ls -la
+            echo "ERROR: cargo-cyclonedx did not produce any SBOM file"
+            echo "All JSON files found:"
+            find . -maxdepth 3 -name "*.json" | grep -v target | grep -v ".git"
             exit 1
           fi
+          echo "Found SBOM at: $SBOM_SRC"
           mv "$SBOM_SRC" "vledger-${VERSION}-sbom.cdx.json"
           echo "SBOM=vledger-${VERSION}-sbom.cdx.json" >> "$GITHUB_ENV"
 
