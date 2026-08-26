@@ -136,16 +136,13 @@ jobs:
       - name: Generate SBOM
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          # Generate workspace-level CycloneDX JSON SBOM.
-          # Run without --override-filename so cargo-cyclonedx uses its default
-          # output filename, then find whatever it produced.
-          cargo cyclonedx --format json --all
-          # Find the generated SBOM file anywhere in the workspace.
-          SBOM_SRC=$(find . -maxdepth 2 -name "*.cdx.json" -o -name "bom.json" 2>/dev/null | head -1)
+          # cargo-cyclonedx generates one <crate>.cdx.json per crate.
+          # Use the top-level vledger crate which transitively covers all deps.
+          cargo cyclonedx --format json --manifest-path crates/vledger/Cargo.toml
+          SBOM_SRC=$(find crates/vledger -maxdepth 1 -name "*.cdx.json" | head -1)
           if [ -z "$SBOM_SRC" ]; then
-            echo "ERROR: cargo-cyclonedx did not produce any SBOM file"
-            echo "All JSON files found:"
-            find . -maxdepth 3 -name "*.json" | grep -v target | grep -v ".git"
+            echo "ERROR: cargo-cyclonedx did not produce a SBOM file"
+            find . -maxdepth 4 -name "*.cdx.json" | head -20
             exit 1
           fi
           echo "Found SBOM at: $SBOM_SRC"
