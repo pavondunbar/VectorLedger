@@ -30,6 +30,10 @@ VectorLedger makes tampering **cryptographically detectable**:
 - **Idempotency keys** — duplicate submissions for the same financial event are detected and returned without double-posting
 - **Exposure limits** and **non-negative balance enforcement** configurable per account
 - **Multi-domain** support — each account and entry is tagged to a legal entity or business domain
+- **Hash-protected metadata** — every entry can carry an arbitrary JSON metadata blob (e.g. sender name, channel, status) that is included in `canonical_bytes()` and cannot be altered after posting without breaking the hash chain
+- **Settlement lifecycle** — entries support `Pending → Settled | Failed` status transitions stored as append-only events; the original entry row is never modified
+- **Legal holds** — accounts can be placed under a legal hold, blocking all new entries, reversals, and settlement transitions until the hold is lifted
+- **Reconciliation** — on-demand balance reconciliation recomputes all account balances from journal entries and compares against the running cache
 
 ### Cryptographic Security
 - **AES-256-GCM** encryption at rest, with per-table keys derived via HKDF-SHA256 from a master key — compromising one table key does not expose others
@@ -55,6 +59,7 @@ VectorLedger makes tampering **cryptographically detectable**:
 ### Authentication and Authorization
 - Four built-in roles: `admin`, `operator`, `auditor`, `read_only`
 - Privilege enforcement is applied to the **resolved query plan**, not raw SQL text — immune to comment/whitespace bypass attacks
+- **Per-user domain filter** — user accounts can be restricted to a specific domain; the restriction is enforced at query execution time so a restricted user cannot see entries or accounts outside their assigned domain
 - **Brute-force protection**: 5-attempt lockout with 5-minute cooldown and exponential back-off delay (200 ms–3 s per attempt)
 - Session tokens use `BLAKE3(server_secret || username || role || 32-byte OsRng nonce)` — no sequential or timestamp-based tokens
 - Session store bounded at 4,096 entries with two-phase eviction; background purge every 60 seconds
@@ -1016,9 +1021,13 @@ SELECT * FROM ledger WHERE domain = 'main';
 SELECT * FROM ledger WHERE status = 'Posted';
 ```
 
-Columns: `sequence`, `id`, `status`, `description`, `domain`, `effective_at`, `posted_at`, `external_ref`, `content_hash`, `chain_hash`, `lines`
+Columns: `sequence`, `id`, `status`, `description`, `domain`, `effective_at`, `posted_at`, `external_ref`, `content_hash`, `chain_hash`, `lines`, `metadata`
 
 The `lines` column contains all debit and credit lines as a single semicolon-separated string. Use `ledger_lines` (below) for the traditional accounting view.
+
+The `metadata` column is an optional JSON blob for arbitrary extra fields (e.g. sender name, channel, original transaction ID). It is hash-protected — included in the entry's content hash so any post-hoc modification breaks the chain. Example value: `{"sender_name":"John Smith","channel":"wire","status":"settled"}`
+
+**Entry status values:** `Posted`, `Reversed`, `Reversal`, `PendingApproval`, `Rejected`, `Pending`, `Settled`, `Failed`. The last three are part of the settlement lifecycle and are derived from append-only `SettlementEvent` records — the original entry row is never mutated.
 
 #### `ledger_lines` — one row per debit/credit line
 ```sql
@@ -1045,9 +1054,9 @@ date       | sequence | entry_id | description      | domain | account_id | dr_c
 2026-08-17 |        1 | <uuid>   | Customer payment | main   | <uuid>     | Credit |   1.00 | USD      | Posted
 ```
 
-Columns: `date`, `sequence`, `entry_id`, `description`, `domain`, `account_id`, `dr_cr`, `amount`, `currency`, `status`
+Columns: `date`, `sequence`, `entry_id`, `description`, `domain`, `account_id`, `dr_cr`, `amount`, `currency`, `status`, `metadata`
 
-Amounts are displayed as decimals (e.g. `1.00`) rather than minor units. The cap applies to the number of **entries** before line expansion — a cap of 10,000 entries yields up to 20,000 rows (two lines per entry) for a standard two-line transaction.
+Amounts are displayed as integers in minor units (e.g. `100000` = $1,000.00 for USD). The `metadata` column mirrors the entry-level metadata JSON blob. The cap applies to the number of **entries** before line expansion — a cap of 10,000 entries yields up to 20,000 rows (two lines per entry) for a standard two-line transaction.
 
 #### `accounts` — chart of accounts
 ```sql
@@ -1055,7 +1064,9 @@ SELECT * FROM accounts;
 SELECT * FROM accounts WHERE domain = 'main';
 ```
 
-Columns: `id`, `code`, `name`, `account_type`, `currency`, `status`, `domain`, `balance`
+Columns: `id`, `code`, `name`, `account_type`, `currency`, `status`, `domain`, `balance`, `legal_hold`
+
+The `legal_hold` column is `true` when the account is under a legal hold. While active, no entries, reversals, or settlement transitions involving this account are permitted.
 
 ---
 
@@ -1201,11 +1212,23 @@ Start the server.
 
 ```bash
 vledger start [OPTIONS]
-  --data-dir <PATH>        Data directory (default: ./vledger-data)
-  --bind <ADDR>            Bind address (default: 127.0.0.1:5433)
-  --pgwire                 Also start the PostgreSQL wire-protocol listener on port 5432
-  --with-proofs            Attach Merkle proofs to every SELECT response
+  --data-dir <PATH>              Data directory (default: ./vledger-data)
+  --bind <ADDR>                  Bind address (default: 127.0.0.1:5433)
+  --pgwire                       Also start the PostgreSQL wire-protocol listener on port 5432
+  --with-proofs                  Attach Merkle proofs to every SELECT response
+  --wal-sync-mode <MODE>         per_record | group_commit | no_sync (default: group_commit)
+  --group-commit-delay-ms <MS>   Group-commit flush interval in ms (default: 2)
+  --query-timeout-ms <MS>        Max SQL query duration before cancellation (default: 30,000)
+  --metrics-addr <ADDR>          Prometheus metrics HTTP bind address (default: 127.0.0.1:9090)
+                                 Set to empty string to disable
+  --max-connections <N>          Max concurrent connections (default: 128)
 ```
+
+When started, a Prometheus metrics server is automatically available at `http://127.0.0.1:9090/metrics` (configurable via `--metrics-addr`).
+
+Two background tasks run automatically after startup:
+- **Hourly integrity check** — calls `VERIFY_CHAIN()` every 60 minutes. Any failure is logged as an error and written to the audit log as `INTEGRITY_ALERT`.
+- **15-minute invariant monitor** — checks that `Σ(Assets+Expenses) == Σ(Liabilities+Equity+Income)` every 15 minutes. Violations are logged as `INVARIANT_ALERT`.
 
 When started with `--with-proofs`, every SELECT response in the `vledger sql` network REPL includes:
 ```
@@ -1220,7 +1243,7 @@ Responds to `SIGTERM` and `CTRL-C` with a graceful drain — in-flight connectio
 
 ### `vledger sql`
 
-Interactive SQL REPL or single-statement execution.
+Interactive SQL REPL or single-statement execution. The REPL includes built-in line editing (arrow keys for cursor movement, up/down for command history) — no external tools like `rlwrap` are required.
 
 ```bash
 vledger sql [OPTIONS]
@@ -1231,6 +1254,10 @@ vledger sql [OPTIONS]
   --server <ADDR>     Connect to a running server at host:port instead of opening
                       the data directory directly (auto-detected if server is
                       reachable at 127.0.0.1:5433)
+  --ca-cert <PATH>    CA certificate PEM to verify the server's TLS certificate.
+                      Required when connecting to a non-loopback address.
+                      Loopback connections (127.0.0.1 / localhost) accept the
+                      self-signed certificate automatically.
 ```
 
 When `vledger start` is running, the CLI automatically detects it and connects over TLS. Use `--server` to point at a non-default address. If no server is reachable, the CLI opens the data directory directly (safe only when the server is stopped).
@@ -1264,6 +1291,9 @@ Verify WAL integrity and the ledger hash chain.
 
 ```bash
 vledger verify --data-dir <PATH>
+               [--self-test]           Run full integrity suite in an isolated temp database
+               [--entries <N>]         Entries to generate for self-test (default: 100,000)
+               [--keep-data]           Keep the self-test database after completion
 ```
 
 ### `vledger status`
@@ -1288,6 +1318,14 @@ Restore a backup archive. Verifies every file's hash before completing.
 
 ```bash
 vledger restore --from <FILE.tar> [--target <PATH>] [--force]
+```
+
+### `vledger backup-verify`
+
+Verify a backup archive without restoring it (manifest + hash check).
+
+```bash
+vledger backup-verify --from <FILE.tar> [--decrypt]
 ```
 
 ### `vledger rotate-keys`
@@ -1545,6 +1583,168 @@ vledger user set-enabled --data-dir <PATH> --username alice --enabled false
 
 ```bash
 vledger user delete --data-dir <PATH> --username alice
+```
+
+---
+
+### `vledger seed`
+
+Populate the database with randomly generated journal entries for testing and benchmarking. Does not require a running server — opens the data directory directly.
+
+```bash
+vledger seed [OPTIONS]
+  --data-dir <PATH>    Data directory (default: ./vledger-data)
+  --entries <N>        Number of journal entries to generate (default: 10,000)
+  --accounts <N>       Number of accounts to create (default: 20)
+  --seed <N>           RNG seed for reproducible datasets (default: random)
+  --progress <N>       Print progress every N entries; 0 = silent (default: 100,000)
+```
+
+The server must NOT be running. Accounts are distributed across random types (Asset, Liability, Income, Expense, Equity) and currencies, weighted toward USD. Each entry is a balanced debit/credit pair going through the full `post_entry()` path — hash chain, WAL persistence, balance cache update.
+
+```bash
+# Generate 10 million entries
+vledger seed --data-dir ./vledger-data --entries 10000000 --accounts 50 --progress 500000
+
+# Reproducible dataset — same data every time
+vledger seed --data-dir ./vledger-data --entries 10000000 --seed 12345
+```
+
+---
+
+### `vledger import`
+
+Import journal entries from a CSV or JSON file. Every row goes through the full `post_entry()` integrity path — debit/credit validation, account existence, currency check, balance constraints, idempotency, hash chain, WAL persistence. The server must NOT be running.
+
+```bash
+vledger import [OPTIONS]
+  -f, --file <PATH>                  Import file path (required)
+  --format <csv|json>                File format; auto-detected from extension if omitted
+  --dry-run                          Validate only — no data written; reports all errors
+  --map <SRC=TARGET>                 Column mapping (repeatable).
+                                     Target fields: description, debit_account,
+                                     credit_account, amount, currency, domain,
+                                     external_ref, idempotency_key, effective_date
+                                     Example: --map memo=description
+  --mapping-file <PATH>              JSON mapping file {"source_col":"target_field",...}
+  --domain <DOMAIN>                  Default domain for imported entries (default: main)
+  --default-currency <CODE>          Default currency when not in source (default: USD)
+  --id-column <COL>                  Source column used as idempotency key.
+                                     If omitted, a BLAKE3 hash of the full row is used
+  --on-error <abort|skip|collect>    Behaviour on row error (default: abort)
+  --batch-size <N>                   Rows per checkpoint (default: 1,000)
+  --state-file <PATH>                Checkpoint state file (default: import-state.json)
+  --resume                           Resume an interrupted import from last checkpoint
+  --progress <N>                     Print progress every N rows; 0 = silent (default: 10,000)
+  --manifest <PATH>                  Cryptographic import manifest output path
+                                     (default: import-manifest.json)
+  --create-accounts                  Auto-create referenced accounts not yet in ledger
+  --metadata-columns <LIST>          Comma-separated source columns to pack into the
+                                     metadata JSON field on every imported entry.
+                                     Example: --metadata-columns sender_name,channel,status
+```
+
+**Recommended workflow:**
+```bash
+# Step 1 — Validate first (no data written)
+vledger import --file export.csv --dry-run \
+  --map sender_account=debit_account \
+  --map receiver_account=credit_account \
+  --metadata-columns sender_name,receiver_name,channel,status
+
+# Step 2 — Execute
+vledger import --file export.csv \
+  --map sender_account=debit_account \
+  --map receiver_account=credit_account \
+  --metadata-columns sender_name,receiver_name,channel,status \
+  --create-accounts --on-error skip --progress 100000
+
+# If interrupted, resume from last checkpoint
+vledger import --file export.csv --resume
+```
+
+The import manifest (`import-manifest.json`) produced at completion contains the source file hash, row counts (processed, imported, already existed, skipped, failed), first/last sequence numbers, chain tip, and timestamps — cryptographic provenance proving exactly what data was imported and when.
+
+---
+
+### `vledger reconcile`
+
+Recompute all account balances from journal entries and compare against the running balance cache. Exits non-zero if any discrepancy is found. Does not require a running server.
+
+```bash
+vledger reconcile [OPTIONS]
+  --data-dir <PATH>      Data directory (default: ./vledger-data)
+  --format <text|json>   Output format (default: text)
+  -o, --output <PATH>    Write output to file instead of stdout
+```
+
+A clean ledger produces:
+```
+── VectorLedger Reconciliation ─────────────────
+  ✓  All accounts reconcile.  Balance cache matches journal entries.
+```
+
+Any discrepancy shows the account code, cached balance, recomputed balance, and delta.
+
+---
+
+### `vledger settle`
+
+Transition a journal entry through the settlement lifecycle. Status transitions: `Posted → Pending → Settled | Failed`. The original entry row is never modified — transitions are stored as append-only `SettlementEvent` records. Legal holds block settlement transitions. Does not require a running server.
+
+```bash
+vledger settle [OPTIONS]
+  --data-dir <PATH>                   Data directory (default: ./vledger-data)
+  --entry-id <UUID>                   Entry ID to transition (required)
+  --status <pending|settled|failed>   New status (required)
+  --notes <TEXT>                      Optional notes (settlement reference, failure reason)
+```
+
+---
+
+### `vledger hold`
+
+Manage legal holds on accounts. While a hold is active, no new entries, reversals, or settlement transitions involving any line of the held account are permitted. Does not require a running server.
+
+```bash
+vledger hold place --data-dir <PATH> --account <CODE_OR_UUID>
+vledger hold lift  --data-dir <PATH> --account <CODE_OR_UUID>
+vledger hold list  --data-dir <PATH>
+```
+
+---
+
+### `vledger retention`
+
+Manage data retention policies. Policies are stored in `<data-dir>/catalog/retention_policy.json`. Does not require a running server.
+
+```bash
+vledger retention show  --data-dir <PATH>
+vledger retention set   --data-dir <PATH> --days <N> [--domain <DOMAIN>]
+vledger retention clear --data-dir <PATH>
+```
+
+`--days 0` means keep forever. `--domain` applies the policy to a specific domain only; omit to set the default.
+
+---
+
+### `vledger rules`
+
+Record and track accounting rule versions. Rule versions are stored in `<data-dir>/catalog/accounting_rules.json`. Does not require a running server.
+
+```bash
+vledger rules show    --data-dir <PATH>
+vledger rules set     --data-dir <PATH> --version <VERSION> --description <TEXT>
+                      [--effective-date <YYYY-MM-DD>]
+vledger rules history --data-dir <PATH>
+```
+
+Example:
+```bash
+vledger rules set --data-dir ./vledger-data \
+  --version "2026-Q3" \
+  --description "Updated FX conversion rules per IFRS 9 amendment" \
+  --effective-date 2026-07-01
 ```
 
 ---
@@ -2000,7 +2200,7 @@ vledger init --key-source pyhsm --pyhsm-socket 127.0.0.1:7777
 
 VectorLedger uses a tiered license model. The binary enforces feature availability at startup by verifying a signed `license.json` file in your data directory. If no license file is present, the engine runs in **Free** tier mode.
 
-Licenses are issued by VectorGuard Labs. After purchasing a subscription at [vectorguardlabs.com/pricing](https://vectorguardlabs.com/pricing), your `license.json` is generated automatically and delivered to the email address on your account.
+Licenses are issued by VectorGuard Labs. After purchasing a subscription at [vledger.vectorguardlabs.com](https://vledger.vectorguardlabs.com), your `license.json` is generated automatically and delivered to the email address on your account.
 
 ### Pricing
 
@@ -2012,7 +2212,7 @@ Licenses are issued by VectorGuard Labs. After purchasing a subscription at [vec
 | **Enterprise** | Contact Sales | Banks, payment processors, PCI-DSS Level 1, hardware HSM requirements |
 
 Annual billing available on all paid tiers — pay for 10 months, get 12.
-Contact [sales@vectorguardlabs.com](mailto:sales@vectorguardlabs.com) for multi-instance or custom pricing.
+Contact [pavon@vectorguardlabs.com](mailto:pavon@vectorguardlabs.com) for multi-instance or custom pricing.
 
 ### What each tier includes
 
@@ -2072,19 +2272,19 @@ Example output (Growth tier):
 ```
 $ vledger start --data-dir ./vledger-data --pgwire
 Error: Feature 'pgwire' is not available on your Free license.
-Upgrade at https://vectorguardlabs.com/pricing
+Upgrade at https://vledger.vectorguardlabs.com or contact pavon@vectorguardlabs.com
 
 $ vledger start --data-dir ./vledger-data --pgwire   # on Starter
 ✓ pgwire enabled
 
 $ vledger start --data-dir ./vledger-data            # replication on Starter
 Error: Feature 'replication' is not available on your Starter license.
-Upgrade at https://vectorguardlabs.com/pricing
+Upgrade at https://vledger.vectorguardlabs.com or contact pavon@vectorguardlabs.com
 ```
 
 ### License expiry
 
-The server startup banner shows days remaining when a signed license is active. A warning is printed when fewer than 30 days remain. Contact [sales@vectorguardlabs.com](mailto:sales@vectorguardlabs.com) to renew.
+The server startup banner shows days remaining when a signed license is active. A warning is printed when fewer than 30 days remain. Contact [pavon@vectorguardlabs.com](mailto:pavon@vectorguardlabs.com) to renew.
 
 ---
 
