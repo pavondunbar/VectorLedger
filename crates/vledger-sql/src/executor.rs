@@ -99,6 +99,7 @@ impl<'a> ReadExecutor<'a> {
             "content_hash".into(),
             "chain_hash".into(),
             "lines".into(),
+            "metadata".into(),
         ];
 
         // All leaf hashes are always computed over the full entry set so that
@@ -293,6 +294,7 @@ impl<'a> ReadExecutor<'a> {
                     Value::Hash(hex::encode(entry.content_hash)),
                     Value::Hash(hex::encode(entry.chain_hash)),
                     Value::Text(lines_str),
+                    Value::Text(entry.metadata.clone().unwrap_or_default()),
                 ],
             ));
             leaf_indices.push(*idx);
@@ -339,6 +341,7 @@ impl<'a> ReadExecutor<'a> {
             "amount".into(),
             "currency".into(),
             "status".into(),
+            "metadata".into(),
         ];
 
         // Apply entry-level filter first, then expand each entry into its lines.
@@ -462,6 +465,7 @@ impl<'a> ReadExecutor<'a> {
                         Value::BigInt(amount_minor as i128),
                         Value::Text(line.currency_code.clone()),
                         Value::Text(format!("{:?}", entry.status)),
+                        Value::Text(entry.metadata.clone().unwrap_or_default()),
                     ],
                 ));
             }

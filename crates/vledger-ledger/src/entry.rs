@@ -111,6 +111,11 @@ pub struct JournalEntry {
     pub chain_hash: Hash,
     /// ID of the second approver (four-eyes control).
     pub approved_by: Option<String>,
+    /// Optional JSON metadata blob for storing arbitrary extra fields.
+    /// Hash-protected — included in canonical_bytes() so any modification
+    /// invalidates content_hash and breaks the chain.
+    /// Example: {"sender_name":"John Smith","channel":"wire","status":"settled"}
+    pub metadata: Option<String>,
 }
 
 impl JournalEntry {
@@ -238,6 +243,10 @@ impl JournalEntry {
         // ── Approval metadata (length-prefixed) ───────────────────────────
         write_opt_bytes(&mut buf, self.approved_by.as_deref().map(str::as_bytes));
 
+        // ── Arbitrary metadata JSON (length-prefixed) ─────────────────────
+        // Included in the hash so any post-hoc modification is detectable.
+        write_opt_bytes(&mut buf, self.metadata.as_deref().map(str::as_bytes));
+
         // ── Journal lines (length-prefixed group count + per-line fields) ─
         buf.extend_from_slice(&(self.lines.len() as u32).to_le_bytes());
         for line in &self.lines {
@@ -324,6 +333,7 @@ pub struct JournalEntryBuilder {
     idempotency_key: Option<String>,
     domain: String,
     reverses_entry_id: Option<Uuid>,
+    metadata: Option<String>,
 }
 
 impl JournalEntryBuilder {
@@ -336,6 +346,7 @@ impl JournalEntryBuilder {
             idempotency_key: None,
             domain: domain.into(),
             reverses_entry_id: None,
+            metadata: None,
         }
     }
 
@@ -388,6 +399,16 @@ impl JournalEntryBuilder {
         self
     }
 
+    /// Attach arbitrary JSON metadata to the entry.
+    /// The metadata is hash-protected — it cannot be altered after posting
+    /// without invalidating the content_hash and breaking the chain.
+    /// Value should be a valid JSON object string, e.g.:
+    /// `{"sender_name":"John","channel":"wire","status":"settled"}`
+    pub fn metadata(mut self, json: impl Into<String>) -> Self {
+        self.metadata = Some(json.into());
+        self
+    }
+
     pub fn reverses(mut self, entry_id: Uuid) -> Self {
         self.reverses_entry_id = Some(entry_id);
         self
@@ -417,6 +438,7 @@ impl JournalEntryBuilder {
             prev_hash: ZERO_HASH,
             chain_hash: ZERO_HASH,
             approved_by: None,
+            metadata: self.metadata,
         }
     }
 }

@@ -977,6 +977,7 @@ impl LedgerStore {
             prev_hash: ZERO_HASH,
             chain_hash: ZERO_HASH,
             approved_by: None,
+            metadata: None,
         };
 
         let seq = self.next_sequence.fetch_add(1, Ordering::SeqCst);

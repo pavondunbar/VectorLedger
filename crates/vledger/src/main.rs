@@ -494,6 +494,12 @@ enum Commands {
         /// Automatically create accounts referenced in the file but not in the ledger.
         #[arg(long)]
         create_accounts: bool,
+        /// Comma-separated list of source columns to pack into the metadata JSON field.
+        /// Example: --metadata-columns sender_name,receiver_name,channel,status
+        /// These columns are stored as a JSON object on every imported entry,
+        /// hash-protected and queryable via SELECT * FROM ledger.
+        #[arg(long)]
+        metadata_columns: Option<String>,
     },
 
     /// Exits non-zero if any discrepancy is found.
@@ -867,13 +873,14 @@ async fn main() -> Result<()> {
         Commands::Import {
             file, format, dry_run, mappings, mapping_file, domain,
             default_currency, id_column, on_error, batch_size, state_file,
-            resume, progress, manifest, create_accounts,
+            resume, progress, manifest, create_accounts, metadata_columns,
         } => {
             cmd_import(
                 &cli.data_dir, &file, format.as_deref(), dry_run, &mappings,
                 mapping_file.as_deref(), &domain, &default_currency,
                 id_column.as_deref(), &on_error, batch_size, &state_file,
                 resume, progress, &manifest, create_accounts,
+                metadata_columns.as_deref(),
             ).await
         }
         Commands::Reconcile { format, output } => {
@@ -4565,6 +4572,8 @@ struct ImportRow {
     effective_date: Option<String>,
     /// Raw row bytes used for auto-idempotency-key generation.
     raw: String,
+    /// All original source columns (pre-mapping) for metadata extraction.
+    raw_fields: std::collections::HashMap<String, String>,
 }
 
 /// Column mapping: source column name → target ImportRow field name.
@@ -4637,6 +4646,7 @@ async fn cmd_import(
     progress_interval: u64,
     manifest_path: &std::path::Path,
     create_accounts: bool,
+    metadata_columns: Option<&str>,
 ) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Data directory not found — run `vledger init` first.");
@@ -4693,6 +4703,11 @@ async fn cmd_import(
         hasher.update(&file_bytes);
         hex::encode(hasher.finalize().as_bytes())
     };
+
+    // ── Parse metadata column list ────────────────────────────────────────
+    let meta_cols: Vec<&str> = metadata_columns
+        .map(|s| s.split(',').map(|c| c.trim()).collect())
+        .unwrap_or_default();
 
     // ── Parse all rows ────────────────────────────────────────────────────
     let rows = if fmt == "csv" {
@@ -4938,6 +4953,23 @@ async fn cmd_import(
             }
         }
 
+        // Build metadata JSON from the designated extra columns.
+        if !meta_cols.is_empty() {
+            let mut obj = serde_json::Map::new();
+            // raw is a comma-separated value string for CSV; for JSON it's
+            // the serialized object. We re-parse the raw field map from the
+            // row's raw string to extract the requested columns.
+            // Simpler: store raw_fields on ImportRow directly.
+            for col in &meta_cols {
+                if let Some(val) = row.raw_fields.get(*col) {
+                    obj.insert(col.to_string(), serde_json::Value::String(val.clone()));
+                }
+            }
+            if !obj.is_empty() {
+                builder = builder.metadata(serde_json::Value::Object(obj).to_string());
+            }
+        }
+
         let entry = builder.build();
 
         match ledger.post_entry(entry) {
@@ -5169,12 +5201,18 @@ fn parse_csv_rows(
     for result in reader.records() {
         let record = result.context("Failed to read CSV record")?;
         let raw = record.iter().collect::<Vec<_>>().join(",");
-        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // raw_fields: original source column names → values (before mapping)
+        let mut raw_fields: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for (i, h) in headers.iter().enumerate() {
+            let val = record.get(i).unwrap_or("").to_string();
+            raw_fields.insert(h.clone(), val.clone());
             let target = resolved.get(h).cloned().unwrap_or_else(|| h.clone());
-            map.insert(target, record.get(i).unwrap_or("").to_string());
+            map.insert(target, val);
         }
-        rows.push(row_from_map(map, &raw, default_domain, default_currency)?);
+        rows.push(row_from_map(map, &raw, raw_fields, default_domain, default_currency)?);
     }
     Ok(rows)
 }
@@ -5193,20 +5231,23 @@ fn parse_json_rows(
     let mut rows = Vec::new();
     for record in records {
         let raw = serde_json::to_string(&record).unwrap_or_default();
+        let mut raw_fields: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         let mut map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for (k, v) in record {
-            let target = col_map.get(&k).cloned().unwrap_or(k);
-            let val = match v {
-                serde_json::Value::String(s) => s,
+            let val = match &v {
+                serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Number(n) => n.to_string(),
                 serde_json::Value::Bool(b) => b.to_string(),
                 serde_json::Value::Null => String::new(),
                 other => other.to_string(),
             };
+            raw_fields.insert(k.clone(), val.clone());
+            let target = col_map.get(&k).cloned().unwrap_or(k);
             map.insert(target, val);
         }
-        rows.push(row_from_map(map, &raw, default_domain, default_currency)?);
+        rows.push(row_from_map(map, &raw, raw_fields, default_domain, default_currency)?);
     }
     Ok(rows)
 }
@@ -5215,6 +5256,7 @@ fn parse_json_rows(
 fn row_from_map(
     map: std::collections::HashMap<String, String>,
     raw: &str,
+    raw_fields: std::collections::HashMap<String, String>,
     default_domain: &str,
     default_currency: &str,
 ) -> anyhow::Result<ImportRow> {
@@ -5245,5 +5287,6 @@ fn row_from_map(
         idempotency_key: { let v = get("idempotency_key"); if v.is_empty() { None } else { Some(v) } },
         effective_date: { let v = get("effective_date"); if v.is_empty() { None } else { Some(v) } },
         raw: raw.to_string(),
+        raw_fields,
     })
 }
