@@ -5270,10 +5270,12 @@ fn row_from_map(
     let amount_str = get("amount");
     let amount: i64 = amount_str.trim().parse::<i64>()
         .or_else(|_| {
-            // Try parsing as a decimal (e.g. "1000.00") and convert to integer.
-            amount_str.trim().parse::<f64>().map(|f| f.round() as i64)
+            // Parse as decimal and convert to minor units (multiply by 100).
+            // $915.87 → 91587 cents. This preserves cents-level precision
+            // rather than rounding to the nearest whole dollar.
+            amount_str.trim().parse::<f64>().map(|f| (f * 100.0).round() as i64)
         })
-        .with_context(|| format!("Cannot parse amount '{}' as integer", amount_str))?;
+        .with_context(|| format!("Cannot parse amount '{}' as integer or decimal", amount_str))?;
 
     Ok(ImportRow {
         description: get("description"),
