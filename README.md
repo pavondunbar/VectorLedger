@@ -1638,11 +1638,17 @@ vledger import [OPTIONS]
   --progress <N>                     Print progress every N rows; 0 = silent (default: 10,000)
   --manifest <PATH>                  Cryptographic import manifest output path
                                      (default: import-manifest.json)
-  --create-accounts                  Auto-create referenced accounts not yet in ledger
+  --create-accounts                  Auto-create referenced accounts not yet in ledger.
+                                     Auto-created accounts use Suspense type with no
+                                     balance constraint — safe for migrations where
+                                     account types are unknown and debits may arrive
+                                     before offsetting credits.
   --metadata-columns <LIST>          Comma-separated source columns to pack into the
                                      metadata JSON field on every imported entry.
                                      Example: --metadata-columns sender_name,channel,status
 ```
+
+**Amount handling:** Decimal amounts are automatically converted to minor units (cents). `915.87` becomes `91587`, `1900.60` becomes `190060`. If your source column is already in minor units (e.g. `91587`), it is passed through unchanged. VectorLedger never uses floating point for financial values — all amounts are stored as integers internally.
 
 **Recommended workflow:**
 ```bash
