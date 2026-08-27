@@ -5154,14 +5154,19 @@ fn resolve_or_create_account(
     if !create {
         anyhow::bail!("account '{}' not found. Use --create-accounts to create it.", code);
     }
-    // Auto-create as a generic Asset account with the given currency.
-    let acct = vledger_ledger::Account::new(
+    // Auto-create as Suspense type with no balance constraints.
+    // Suspense accounts have no normal-balance direction and do not enforce
+    // non-negative balance, making them safe for migration from external
+    // datasets where account types are unknown and balances may go negative
+    // during the import sequence before offsetting credits arrive.
+    let mut acct = vledger_ledger::Account::new(
         code,
         code, // name = code until updated
-        vledger_ledger::AccountType::Asset,
+        vledger_ledger::AccountType::Suspense,
         currency,
         domain,
     );
+    acct.require_non_negative_balance = false;
     let id = ledger.create_account(acct)
         .with_context(|| format!("Failed to create account '{code}'"))?;
     lookup.insert(code.to_string(), id);
