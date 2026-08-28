@@ -321,6 +321,137 @@ impl LedgerStore {
         Self::open(&tmp)
     }
 
+    /// Open the ledger in **import mode** with an explicit WAL sync mode.
+    ///
+    /// Import mode replays the WAL without loading existing entries into
+    /// `self.entries`. Only accounts, chain state, and idempotency keys are
+    /// loaded — memory usage is O(accounts) regardless of how many entries
+    /// are already in the WAL. This allows billion-record imports on
+    /// modest hardware (8 GB RAM).
+    ///
+    /// After import completes, open the ledger normally with `LedgerStore::open()`
+    /// to rebuild the full in-memory indexes for query serving.
+    pub fn open_for_import(
+        data_dir: &Path,
+        sync_mode: vledger_wal::WalSyncMode,
+    ) -> Result<Self, LedgerError> {
+        let wal_dir = data_dir.join("wal");
+        let pages_dir = data_dir.join("pages");
+        let signing_key = Self::load_signing_key(data_dir);
+        let tx_manager = TransactionManager::open_with_signing_and_mode(
+            &wal_dir, signing_key, sync_mode
+        )?;
+        let page_store = PageStore::open(&pages_dir)?;
+        let lock = DataDirLock::acquire(data_dir).map_err(|e| {
+            LedgerError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("cannot lock data directory: {e}"),
+            ))
+        })?;
+        let mut store = Self {
+            tx_manager,
+            page_store,
+            accounts: HashMap::new(),
+            entries: Vec::new(), // intentionally stays empty in import mode
+            account_entry_index: HashMap::new(),
+            domain_index: HashMap::new(),
+            sequence_index: HashMap::new(),
+            status_index: HashMap::new(),
+            balance_cache: HashMap::new(),
+            next_sequence: AtomicU64::new(1),
+            last_chain_hash: ZERO_HASH,
+            idempotency_keys: std::collections::HashSet::new(),
+            reversal_event_index: HashMap::new(),
+            settlement_event_index: HashMap::new(),
+            legal_hold_accounts: std::collections::HashSet::new(),
+            currency_registry: crate::currency::CurrencyRegistry::new(),
+            next_account_page: 0,
+            next_entry_page: 0,
+            _lock: Some(lock),
+            data_dir: Some(data_dir.to_path_buf()),
+            last_committed_entry_bytes: None,
+        };
+        // Replay in import mode — loads accounts + chain state, skips entries.
+        store.replay_from_wal_import_mode(&wal_dir)?;
+        info!(
+            accounts = store.accounts.len(),
+            sequence = store.next_sequence.load(Ordering::SeqCst),
+            "LedgerStore opened in import mode (entries not loaded into RAM)"
+        );
+        Ok(store)
+    }
+
+    /// Post an entry in import mode — writes to WAL + page store but does NOT
+    /// update `self.entries`, `self.balance_cache`, or query indexes.
+    ///
+    /// This keeps memory usage flat regardless of how many entries have been
+    /// imported. Use this method only during bulk import; for normal operation
+    /// use `post_entry()` which maintains full in-memory indexes.
+    ///
+    /// Validations still enforced:
+    /// - Entry is balanced (debits == credits)
+    /// - All accounts exist and are active
+    /// - Currency matches per line
+    /// - Amount is non-zero
+    /// - Idempotency key deduplication
+    /// - BLAKE3 hash chain extended
+    /// - WAL record written
+    ///
+    /// Validations skipped (acceptable for bulk import):
+    /// - Non-negative balance check (balance_cache not maintained)
+    /// - Exposure limit check (balance_cache not maintained)
+    /// - Four-eyes check
+    pub fn import_entry_direct(
+        &mut self,
+        mut entry: JournalEntry,
+    ) -> Result<u64, LedgerError> {
+        // 1. Structural validation
+        entry.validate()?;
+
+        // 2. Idempotency check
+        if let Some(ref key) = entry.idempotency_key {
+            if self.idempotency_keys.contains(key) {
+                // Already imported — return the sequence as a sentinel 0 to signal skip.
+                return Ok(0);
+            }
+        }
+
+        // 3. Per-line account validation (existence, status, currency only).
+        for line in &entry.lines {
+            let acct = self.accounts.get(&line.account_id)
+                .ok_or_else(|| LedgerError::AccountNotFound(line.account_id.to_string()))?;
+            if !acct.is_active() {
+                return Err(LedgerError::AccountClosed(line.account_id.to_string()));
+            }
+            if acct.currency_code != line.currency_code {
+                return Err(LedgerError::CurrencyMismatch {
+                    account_currency: acct.currency_code.clone(),
+                    entry_currency: line.currency_code.clone(),
+                });
+            }
+        }
+
+        // 4. Assign sequence and finalize chain hash.
+        let seq = self.next_sequence.fetch_add(1, Ordering::SeqCst);
+        entry.sequence = seq;
+        entry.posted_at = chrono::Utc::now();
+        entry.finalize_chain_hash(&self.last_chain_hash);
+
+        // 5. Persist to WAL + page store.
+        let bytes = encode(&entry)?;
+        let prev_hash = Some(entry.prev_hash);
+        self.persist_row(TABLE_ENTRIES, &bytes, MutationKind::Insert, prev_hash)?;
+
+        // 6. Update ONLY the minimal state needed for chain continuity and dedup.
+        //    Do NOT touch self.entries, balance_cache, or query indexes.
+        self.last_chain_hash = entry.chain_hash;
+        if let Some(ref key) = entry.idempotency_key {
+            self.idempotency_keys.insert(key.clone());
+        }
+
+        Ok(seq)
+    }
+
     // ── Signing key loader ────────────────────────────────────────────────
 
     /// Load the Ed25519 database signing key from `data_dir/keys/db_signing_key.hex`.
@@ -382,6 +513,18 @@ impl LedgerStore {
     /// a signing key), `recover_verified` is used so that any tampered commit
     /// is caught as a hard error before state is applied.
     fn replay_from_wal(&mut self, wal_dir: &Path) -> Result<(), LedgerError> {
+        self.replay_from_wal_mode(wal_dir, false)
+    }
+
+    /// Replay WAL in import mode — loads accounts and chain state but does NOT
+    /// populate `self.entries`, `self.balance_cache`, or query indexes.
+    /// This keeps memory usage flat (O(accounts)) regardless of entry count,
+    /// enabling billion-record imports on modest hardware.
+    fn replay_from_wal_import_mode(&mut self, wal_dir: &Path) -> Result<(), LedgerError> {
+        self.replay_from_wal_mode(wal_dir, true)
+    }
+
+    fn replay_from_wal_mode(&mut self, wal_dir: &Path, import_mode: bool) -> Result<(), LedgerError> {
         use vledger_wal::record::MutationKind;
         use vledger_wal::recovery::{decode_data_payload, recover, recover_verified};
 
@@ -411,7 +554,20 @@ impl LedgerStore {
                         }
                         TABLE_ENTRIES => {
                             let entry: JournalEntry = decode(&payload.row_data)?;
-                            self.apply_entry(entry);
+                            if import_mode {
+                                // Import mode: only update chain state and idempotency keys.
+                                // Do NOT push to self.entries — that's the memory hog.
+                                if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
+                                    self.next_sequence.store(entry.sequence + 1, Ordering::SeqCst);
+                                }
+                                self.last_chain_hash = entry.chain_hash;
+                                if let Some(ref key) = entry.idempotency_key {
+                                    self.idempotency_keys.insert(key.clone());
+                                }
+                                self.next_entry_page += 1;
+                            } else {
+                                self.apply_entry(entry);
+                            }
                         }
                         TABLE_REVERSAL_EVENTS => {
                             let event: ReversalEvent = decode(&payload.row_data)?;

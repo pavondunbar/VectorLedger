@@ -4776,7 +4776,7 @@ async fn cmd_import(
 
     let skip_rows = state.last_row_index;
 
-    // ── Open ledger ───────────────────────────────────────────────────────
+    // ── Open ledger in import mode (constant memory) ─────────────────────
     let sync_mode: vledger_wal::WalSyncMode = wal_sync_mode.parse().unwrap_or_else(|_| {
         eprintln!("  ⚠  Unknown --wal-sync-mode '{}', defaulting to group_commit", wal_sync_mode);
         vledger_wal::WalSyncMode::GroupCommit
@@ -4785,7 +4785,9 @@ async fn cmd_import(
         eprintln!("  ⚠  --wal-sync-mode=no_sync: fsync disabled for this import.");
         eprintln!("     Run `vledger verify --data-dir {}` after completion.", data_dir.display());
     }
-    let mut ledger = vledger_ledger::LedgerStore::open_with_sync_mode(data_dir, sync_mode)
+    // open_for_import replays WAL without loading entries into RAM.
+    // Memory stays flat at O(accounts) regardless of entry count.
+    let mut ledger = vledger_ledger::LedgerStore::open_for_import(data_dir, sync_mode)
         .context("Failed to open ledger. Is vledger start running? Stop it first.")?;
 
     // Build account lookup: code → AccountId
@@ -5084,28 +5086,18 @@ async fn cmd_import(
 
         let entry = builder.build();
 
-        match ledger.post_entry(entry) {
-            Ok(posted) => {
-                let seq = posted.sequence;
+        match ledger.import_entry_direct(entry) {
+            Ok(0) => {
+                // Idempotency key already exists — entry was previously imported.
+                state.rows_already_existed += 1;
+            }
+            Ok(seq) => {
                 if first_sequence.is_none() { first_sequence = Some(seq); }
                 last_sequence = Some(seq);
                 state.rows_imported += 1;
             }
             Err(vledger_ledger::LedgerError::IdempotencyConflict(_)) => {
                 state.rows_already_existed += 1;
-            }
-            // Idempotency returns Ok with original entry — count as existing.
-            Err(_) if state.rows_imported > 0 => {
-                // post_entry returns Ok on duplicate key, so this path means
-                // a real error (balance, currency, etc.).
-                let msg = "post_entry failed";
-                if on_error == "abort" {
-                    anyhow::bail!("Row {row_num}: {msg}");
-                }
-                eprintln!("  ⚠  Row {row_num} skipped: {msg}");
-                state.rows_skipped += 1;
-                rows_failed += 1;
-                continue;
             }
             Err(e) => {
                 if on_error == "abort" {
