@@ -4695,28 +4695,46 @@ async fn cmd_import(
         col_map.insert(parts[0].to_string(), parts[1].to_string());
     }
 
-    // ── Compute source file SHA-256 for manifest provenance ───────────────
-    let file_bytes = std::fs::read(file)
-        .with_context(|| format!("Cannot read import file: {}", file.display()))?;
+    // ── Compute source file hash (streaming — constant memory) ───────────
+    // Read the file in 64 KiB chunks so a 50 GB CSV doesn't require 50 GB RAM.
     let source_sha256 = {
+        use std::io::Read;
         let mut hasher = blake3::Hasher::new();
-        hasher.update(&file_bytes);
+        let f = std::fs::File::open(file)
+            .with_context(|| format!("Cannot read import file: {}", file.display()))?;
+        let mut reader = std::io::BufReader::with_capacity(65_536, f);
+        let mut buf = [0u8; 65_536];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
         hex::encode(hasher.finalize().as_bytes())
+    };
+
+    // ── Count rows for the header (streaming pass — no heap allocation) ──
+    // We need total_rows for progress reporting. Walk the CSV once with a
+    // lightweight counter before the main import pass.
+    let total_rows: u64 = {
+        let f = std::fs::File::open(file)
+            .with_context(|| format!("Cannot read import file: {}", file.display()))?;
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .flexible(true)
+            .trim(csv::Trim::All)
+            .from_reader(std::io::BufReader::with_capacity(65_536, f));
+        let mut count = 0u64;
+        for result in reader.records() {
+            result.context("Failed to read CSV record during row count")?;
+            count += 1;
+        }
+        count
     };
 
     // ── Parse metadata column list ────────────────────────────────────────
     let meta_cols: Vec<&str> = metadata_columns
         .map(|s| s.split(',').map(|c| c.trim()).collect())
         .unwrap_or_default();
-
-    // ── Parse all rows ────────────────────────────────────────────────────
-    let rows = if fmt == "csv" {
-        parse_csv_rows(&file_bytes, &col_map, domain, default_currency)?
-    } else {
-        parse_json_rows(&file_bytes, &col_map, domain, default_currency)?
-    };
-
-    let total_rows = rows.len() as u64;
 
     println!("── VectorLedger Import ───────────────────────────");
     println!("  File       : {}", file.display());
@@ -4759,34 +4777,77 @@ async fn cmd_import(
     let mut account_lookup: std::collections::HashMap<String, vledger_ledger::AccountId> =
         ledger.all_accounts().map(|a| (a.code.clone(), a.id)).collect();
 
-    // ── Validation / dry-run pass ─────────────────────────────────────────
-    let mut validation_errors: Vec<(u64, String)> = Vec::new();
-    let mut currencies_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut accounts_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // ── Helper: open a streaming CSV reader ───────────────────────────────
+    // Returns (headers, reader) — each call opens a fresh file handle so
+    // the same file can be streamed twice (once for dry-run, once for import)
+    // without holding both in memory simultaneously.
+    let open_csv = || -> anyhow::Result<(Vec<String>, csv::Reader<std::io::BufReader<std::fs::File>>)> {
+        let f = std::fs::File::open(file)
+            .with_context(|| format!("Cannot open import file: {}", file.display()))?;
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .flexible(true)
+            .trim(csv::Trim::All)
+            .from_reader(std::io::BufReader::with_capacity(65_536, f));
+        let headers: Vec<String> = reader
+            .headers()
+            .context("Failed to read CSV headers")?
+            .iter()
+            .map(|h| h.to_string())
+            .collect();
+        Ok((headers, reader))
+    };
 
+    // ── Validation / dry-run pass (streaming) ─────────────────────────────
     if dry_run || on_error == "collect" {
         println!();
         println!("  Validating rows...");
-        for (i, row) in rows.iter().enumerate() {
-            let row_num = i as u64 + 1;
-            currencies_seen.insert(row.currency.clone());
-            accounts_seen.insert(row.debit_account.clone());
-            accounts_seen.insert(row.credit_account.clone());
 
-            if let Err(e) = validate_import_row(row, &account_lookup) {
-                validation_errors.push((row_num, e.to_string()));
+        let (headers, mut reader) = open_csv()?;
+        let resolved: std::collections::HashMap<String, String> = headers.iter()
+            .map(|h| (h.clone(), col_map.get(h).cloned().unwrap_or_else(|| h.clone())))
+            .collect();
+
+        let mut validation_errors: Vec<(u64, String)> = Vec::new();
+        let mut currencies_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut accounts_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut row_num = 0u64;
+
+        for result in reader.records() {
+            row_num += 1;
+            let record = result.context("Failed to read CSV record")?;
+            let raw = record.iter().collect::<Vec<_>>().join(",");
+            let mut raw_fields = std::collections::HashMap::new();
+            let mut map = std::collections::HashMap::new();
+            for (i, h) in headers.iter().enumerate() {
+                let val = record.get(i).unwrap_or("").to_string();
+                raw_fields.insert(h.clone(), val.clone());
+                let target = resolved.get(h).cloned().unwrap_or_else(|| h.clone());
+                map.insert(target, val);
+            }
+            match row_from_map(map, &raw, raw_fields, domain, default_currency) {
+                Ok(row) => {
+                    currencies_seen.insert(row.currency.clone());
+                    accounts_seen.insert(row.debit_account.clone());
+                    accounts_seen.insert(row.credit_account.clone());
+                    if let Err(e) = validate_import_row(&row, &account_lookup) {
+                        validation_errors.push((row_num, e.to_string()));
+                    }
+                }
+                Err(e) => {
+                    validation_errors.push((row_num, e.to_string()));
+                }
             }
         }
 
-        let valid = total_rows - validation_errors.len() as u64;
-        let accounts_missing: Vec<_> = accounts_seen
-            .iter()
+        let valid = row_num.saturating_sub(validation_errors.len() as u64);
+        let accounts_missing: Vec<_> = accounts_seen.iter()
             .filter(|c| !account_lookup.contains_key(*c))
             .collect();
 
         println!();
         println!("── Import Validation Report ─────────────────────");
-        println!("  Rows detected     : {total_rows}");
+        println!("  Rows detected     : {row_num}");
         println!("  Valid             : {valid}");
         println!("  Invalid           : {}", validation_errors.len());
         println!("  Accounts detected : {}", accounts_seen.len());
@@ -4796,47 +4857,40 @@ async fn cmd_import(
         if !validation_errors.is_empty() {
             println!();
             println!("  Errors (first 20):");
-            for (row, err) in validation_errors.iter().take(20) {
-                println!("    Row {row:>8}: {err}");
+            for (r, err) in validation_errors.iter().take(20) {
+                println!("    Row {r:>8}: {err}");
             }
             if validation_errors.len() > 20 {
                 println!("    ... and {} more", validation_errors.len() - 20);
             }
         }
-
         if !accounts_missing.is_empty() && !create_accounts {
             println!();
             println!("  Missing accounts (use --create-accounts to create them):");
-            for a in accounts_missing.iter().take(10) {
-                println!("    {a}");
-            }
+            for a in accounts_missing.iter().take(10) { println!("    {a}"); }
         }
-
         println!("──────────────────────────────────────────────────");
 
         if dry_run {
             if validation_errors.is_empty() {
-                println!();
-                println!("  ✓  Dry run complete — no errors found.");
+                println!("\n  ✓  Dry run complete — no errors found.");
                 println!("     Run without --dry-run to import.");
             } else {
-                println!();
-                println!("  ✗  Dry run found {} error(s). Fix them before importing.", validation_errors.len());
+                println!("\n  ✗  Dry run found {} error(s). Fix them before importing.", validation_errors.len());
             }
             println!();
             return Ok(());
         }
 
-        // collect mode: abort if any errors found.
         if on_error == "collect" && !validation_errors.is_empty() {
             anyhow::bail!(
-                "{} validation error(s) found. Fix them or use --on-error skip to skip invalid rows.",
+                "{} validation error(s) found. Fix them or use --on-error skip.",
                 validation_errors.len()
             );
         }
     }
 
-    // ── Import loop ───────────────────────────────────────────────────────
+    // ── Import loop (streaming — constant memory) ─────────────────────────
     println!();
     println!("  Importing...");
     let import_start = std::time::Instant::now();
@@ -4844,14 +4898,57 @@ async fn cmd_import(
     let mut first_sequence: Option<u64> = None;
     let mut last_sequence: Option<u64> = None;
     let mut batch_count: u64 = 0;
+    let mut row_num = 0u64;
 
-    for (i, row) in rows.iter().enumerate() {
-        let row_num = i as u64 + 1;
+    let (headers, mut reader) = open_csv()?;
+    let resolved: std::collections::HashMap<String, String> = headers.iter()
+        .map(|h| (h.clone(), col_map.get(h).cloned().unwrap_or_else(|| h.clone())))
+        .collect();
+
+    for result in reader.records() {
+        row_num += 1;
+        let row_num_local = row_num;
 
         // Skip already-processed rows on resume.
-        if row_num <= skip_rows {
+        if row_num_local <= skip_rows {
             continue;
         }
+
+        let record = match result {
+            Ok(r) => r,
+            Err(e) => {
+                if on_error == "abort" {
+                    anyhow::bail!("Row {row_num_local}: CSV read error: {e}");
+                }
+                eprintln!("  ⚠  Row {row_num_local} skipped: CSV read error: {e}");
+                rows_failed += 1;
+                continue;
+            }
+        };
+        let raw = record.iter().collect::<Vec<_>>().join(",");
+        let mut raw_fields = std::collections::HashMap::new();
+        let mut map = std::collections::HashMap::new();
+        for (i, h) in headers.iter().enumerate() {
+            let val = record.get(i).unwrap_or("").to_string();
+            raw_fields.insert(h.clone(), val.clone());
+            let target = resolved.get(h).cloned().unwrap_or_else(|| h.clone());
+            map.insert(target, val);
+        }
+
+        let row = match row_from_map(map, &raw, raw_fields, domain, default_currency) {
+            Ok(r) => r,
+            Err(e) => {
+                if on_error == "abort" {
+                    anyhow::bail!("Row {row_num_local}: {e}");
+                }
+                eprintln!("  ⚠  Row {row_num_local} skipped: {e}");
+                rows_failed += 1;
+                continue;
+            }
+        };
+
+        // The row_num here acts as the loop variable for the rest of the body.
+        let row_num = row_num_local;
 
         // Build idempotency key.
         let idem_key = if let Some(ref id_col) = id_column {
@@ -5016,7 +5113,7 @@ async fn cmd_import(
             let tps = state.rows_imported as f64 / elapsed;
             println!(
                 "  {}/{} rows  |  imported: {}  existed: {}  skipped: {}  ({:.0} TPS)",
-                state.rows_processed, total_rows,
+                row_num, total_rows,
                 state.rows_imported, state.rows_already_existed,
                 state.rows_skipped, tps
             );
