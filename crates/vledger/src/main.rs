@@ -1516,97 +1516,133 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
     }
     println!("── VectorLedger Integrity Verification ─────────");
 
-    // ── WAL integrity ─────────────────────────────────────────────────────
     let wal_dir = data_dir.join("wal");
-    print!("  WAL integrity            ... ");
-    if wal_dir.exists() {
-        let r = vledger_wal::recovery::recover(&wal_dir)?;
-        if r.torn_write_detected {
-            println!("⚠  TORN WRITE");
-        } else {
-            println!("✓ ({} committed txns)", r.committed.len());
-        }
-    } else {
-        println!("N/A (no WAL yet)");
+    if !wal_dir.exists() {
+        println!("  WAL integrity            ... N/A (no WAL yet)");
+        println!("  Ledger hash chain        ... N/A (no WAL yet)");
+        println!("\n✓ Verification complete");
+        return Ok(());
     }
 
-    // ── Ledger hash chain — streaming, constant memory ────────────────────
-    // Walk every committed entry in WAL sequence order and verify the BLAKE3
-    // hash chain without loading all entries into RAM simultaneously.
-    // Memory usage: O(1) — only two entries needed at a time (prev + current).
-    print!("  Ledger hash chain        ... ");
+    // ── Streaming WAL + hash chain verification ───────────────────────────
+    // Uses WalReader directly (record-at-a-time iterator) instead of recover()
+    // which collects all committed transactions into a Vec.
+    //
+    // Memory: O(1 transaction) — we hold at most one transaction's data
+    // records in memory at a time (typically 1 record per tx for imports).
+    // For 10M entries this stays flat at a few MB regardless of dataset size.
+    print!("  WAL + hash chain         ... ");
     {
-        use vledger_wal::recovery::{decode_data_payload, recover};
+        use vledger_wal::reader::WalReader;
+        use vledger_wal::record::RecordType;
+        use vledger_wal::recovery::decode_data_payload;
         use vledger_crypto::ZERO_HASH;
 
-        let result = recover(&wal_dir)?;
+        let reader = WalReader::open_with_key(&wal_dir, None)
+            .map_err(|e| anyhow::anyhow!("Cannot open WAL: {e}"))?;
+
+        // Per-transaction state — cleared on each Commit/Rollback.
+        let mut pending_data: Vec<vledger_wal::record::WalRecord> = Vec::new();
+        let mut committed_txns: u64 = 0;
+        let mut torn_write = false;
+
+        // Chain state — updated as we verify each committed entry.
         let mut prev_chain_hash = ZERO_HASH;
         let mut entry_count: u64 = 0;
         let mut chain_tip = ZERO_HASH;
-        let mut broken = false;
-        let mut break_msg = String::new();
+        let mut chain_broken = false;
+        let mut chain_break_msg = String::new();
 
-        'outer: for tx in &result.committed {
-            for record in &tx.data_records {
-                let payload = match decode_data_payload(record) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                // Only process journal entry records (table_id=1).
-                if payload.table_id != 1 { continue; }
-                if !matches!(payload.mutation,
-                    vledger_wal::record::MutationKind::Insert |
-                    vledger_wal::record::MutationKind::Update) {
-                    continue;
+        'scan: for result in reader {
+            match result {
+                Err(vledger_wal::error::WalError::ChecksumMismatch { .. }
+                    | vledger_wal::error::WalError::TruncatedRecord { .. }
+                    | vledger_wal::error::WalError::BadMagic
+                    | vledger_wal::error::WalError::Decryption) => {
+                    torn_write = true;
+                    break 'scan;
                 }
-                // Decode just enough to verify hashes — no heap accumulation.
-                let entry: vledger_ledger::JournalEntry = match bincode::serde::decode_from_slice(
-                    &payload.row_data,
-                    bincode::config::standard(),
-                ) {
-                    Ok((e, _)) => e,
-                    Err(e) => {
-                        broken = true;
-                        break_msg = format!("Failed to decode entry: {e}");
-                        break 'outer;
+                Err(e) => return Err(anyhow::anyhow!("WAL read error: {e}")),
+                Ok(record) => {
+                    let record_type = match vledger_wal::record::RecordType::try_from(
+                        record.header.record_type
+                    ) {
+                        Ok(rt) => rt,
+                        Err(_) => continue,
+                    };
+
+                    match record_type {
+                        RecordType::Begin => {
+                            pending_data.clear();
+                        }
+                        RecordType::Data => {
+                            pending_data.push(record);
+                        }
+                        RecordType::Commit => {
+                            committed_txns += 1;
+                            // Process this transaction's data records immediately
+                            // then clear them — never accumulate across transactions.
+                            for data_record in &pending_data {
+                                let payload = match decode_data_payload(data_record) {
+                                    Ok(p) => p,
+                                    Err(_) => continue,
+                                };
+                                // Only journal entry records (table_id=1, Insert/Update).
+                                if payload.table_id != 1 { continue; }
+                                if !matches!(payload.mutation,
+                                    vledger_wal::record::MutationKind::Insert |
+                                    vledger_wal::record::MutationKind::Update) {
+                                    continue;
+                                }
+                                let entry: vledger_ledger::JournalEntry = match
+                                    bincode::serde::decode_from_slice(
+                                        &payload.row_data,
+                                        bincode::config::standard(),
+                                    ) {
+                                    Ok((e, _)) => e,
+                                    Err(e) => {
+                                        chain_broken = true;
+                                        chain_break_msg = format!("decode error: {e}");
+                                        break 'scan;
+                                    }
+                                };
+                                if !entry.verify_hashes() {
+                                    chain_broken = true;
+                                    chain_break_msg = format!(
+                                        "hash mismatch at sequence {}", entry.sequence
+                                    );
+                                    break 'scan;
+                                }
+                                if entry.prev_hash != prev_chain_hash {
+                                    chain_broken = true;
+                                    chain_break_msg = format!(
+                                        "chain linkage broken at sequence {}", entry.sequence
+                                    );
+                                    break 'scan;
+                                }
+                                prev_chain_hash = entry.chain_hash;
+                                chain_tip = entry.chain_hash;
+                                entry_count += 1;
+                            }
+                            pending_data.clear();
+                        }
+                        RecordType::Rollback => {
+                            pending_data.clear();
+                        }
+                        _ => {}
                     }
-                };
-
-                // Verify content hash.
-                if !entry.verify_hashes() {
-                    broken = true;
-                    break_msg = format!(
-                        "content_hash or chain_hash mismatch at sequence {}",
-                        entry.sequence
-                    );
-                    break 'outer;
                 }
-
-                // Verify chain linkage.
-                if entry.prev_hash != prev_chain_hash {
-                    broken = true;
-                    break_msg = format!(
-                        "chain linkage broken at sequence {} \
-                         (expected prev={}, got {})",
-                        entry.sequence,
-                        hex::encode(prev_chain_hash),
-                        hex::encode(entry.prev_hash)
-                    );
-                    break 'outer;
-                }
-
-                prev_chain_hash = entry.chain_hash;
-                chain_tip = entry.chain_hash;
-                entry_count += 1;
             }
         }
 
-        if broken {
-            println!("✗ BROKEN: {break_msg}");
+        if chain_broken {
+            println!("✗ BROKEN: {chain_break_msg}");
+        } else if torn_write && entry_count == 0 {
+            println!("⚠  TORN WRITE (no committed entries found)");
         } else {
+            let torn_note = if torn_write { " ⚠ torn write detected" } else { "" };
             println!(
-                "✓ ({} entries, tip={})",
-                entry_count,
+                "✓ ({committed_txns} txns, {entry_count} entries, tip={}){torn_note}",
                 hex::encode(&chain_tip[..8])
             );
         }
