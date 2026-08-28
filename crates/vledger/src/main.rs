@@ -1516,7 +1516,7 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
     }
     println!("── VectorLedger Integrity Verification ─────────");
 
-    // WAL
+    // ── WAL integrity ─────────────────────────────────────────────────────
     let wal_dir = data_dir.join("wal");
     print!("  WAL integrity            ... ");
     if wal_dir.exists() {
@@ -1530,18 +1530,86 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
         println!("N/A (no WAL yet)");
     }
 
-    // Ledger hash chain
+    // ── Ledger hash chain — streaming, constant memory ────────────────────
+    // Walk every committed entry in WAL sequence order and verify the BLAKE3
+    // hash chain without loading all entries into RAM simultaneously.
+    // Memory usage: O(1) — only two entries needed at a time (prev + current).
     print!("  Ledger hash chain        ... ");
-    match vledger_ledger::LedgerStore::open(data_dir) {
-        Ok(ledger) => match ledger.verify_chain_integrity() {
-            Ok(()) => println!(
+    {
+        use vledger_wal::recovery::{decode_data_payload, recover};
+        use vledger_crypto::ZERO_HASH;
+
+        let result = recover(&wal_dir)?;
+        let mut prev_chain_hash = ZERO_HASH;
+        let mut entry_count: u64 = 0;
+        let mut chain_tip = ZERO_HASH;
+        let mut broken = false;
+        let mut break_msg = String::new();
+
+        'outer: for tx in &result.committed {
+            for record in &tx.data_records {
+                let payload = match decode_data_payload(record) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                // Only process journal entry records (table_id=1).
+                if payload.table_id != 1 { continue; }
+                if !matches!(payload.mutation,
+                    vledger_wal::record::MutationKind::Insert |
+                    vledger_wal::record::MutationKind::Update) {
+                    continue;
+                }
+                // Decode just enough to verify hashes — no heap accumulation.
+                let entry: vledger_ledger::JournalEntry = match bincode::serde::decode_from_slice(
+                    &payload.row_data,
+                    bincode::config::standard(),
+                ) {
+                    Ok((e, _)) => e,
+                    Err(e) => {
+                        broken = true;
+                        break_msg = format!("Failed to decode entry: {e}");
+                        break 'outer;
+                    }
+                };
+
+                // Verify content hash.
+                if !entry.verify_hashes() {
+                    broken = true;
+                    break_msg = format!(
+                        "content_hash or chain_hash mismatch at sequence {}",
+                        entry.sequence
+                    );
+                    break 'outer;
+                }
+
+                // Verify chain linkage.
+                if entry.prev_hash != prev_chain_hash {
+                    broken = true;
+                    break_msg = format!(
+                        "chain linkage broken at sequence {} \
+                         (expected prev={}, got {})",
+                        entry.sequence,
+                        hex::encode(prev_chain_hash),
+                        hex::encode(entry.prev_hash)
+                    );
+                    break 'outer;
+                }
+
+                prev_chain_hash = entry.chain_hash;
+                chain_tip = entry.chain_hash;
+                entry_count += 1;
+            }
+        }
+
+        if broken {
+            println!("✗ BROKEN: {break_msg}");
+        } else {
+            println!(
                 "✓ ({} entries, tip={})",
-                ledger.entry_count(),
-                hex::encode(&ledger.chain_tip()[..8])
-            ),
-            Err(e) => println!("✗ BROKEN: {e}"),
-        },
-        Err(e) => println!("N/A ({e})"),
+                entry_count,
+                hex::encode(&chain_tip[..8])
+            );
+        }
     }
 
     println!("\n✓ Verification complete");

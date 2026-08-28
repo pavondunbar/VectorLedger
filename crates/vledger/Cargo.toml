@@ -38,6 +38,7 @@ serde_json          = { workspace = true }
 chrono              = { workspace = true }
 hex                 = { workspace = true }
 uuid                = { workspace = true }
+bincode             = { workspace = true }
 rustyline           = { version = "14.0.0", features = ["derive"] }
 csv                 = { workspace = true }
 tempfile            = { workspace = true }
