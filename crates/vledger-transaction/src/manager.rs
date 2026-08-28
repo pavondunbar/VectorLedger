@@ -52,7 +52,21 @@ impl TransactionManager {
         wal_dir: &Path,
         signing_key: Option<vledger_crypto::sign::DbSigningKey>,
     ) -> Result<Self, TxError> {
-        let wal = WalWriter::open(wal_dir)?;
+        Self::open_with_signing_and_mode(wal_dir, signing_key, vledger_wal::WalSyncMode::GroupCommit)
+    }
+
+    /// Open with a signing key and explicit WAL sync mode.
+    pub fn open_with_signing_and_mode(
+        wal_dir: &Path,
+        signing_key: Option<vledger_crypto::sign::DbSigningKey>,
+        sync_mode: vledger_wal::WalSyncMode,
+    ) -> Result<Self, TxError> {
+        let wal = vledger_wal::WalWriter::open_with_options(
+            wal_dir,
+            vledger_wal::DEFAULT_SEGMENT_SIZE,
+            sync_mode,
+            None,
+        )?;
 
         // Recover the WAL to determine the highest committed tx_id and
         // any idempotency keys that were already committed.

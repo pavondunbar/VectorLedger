@@ -500,6 +500,11 @@ enum Commands {
         /// hash-protected and queryable via SELECT * FROM ledger.
         #[arg(long)]
         metadata_columns: Option<String>,
+        /// WAL sync mode for the import: group_commit (default), per_record, or no_sync.
+        /// Use no_sync for maximum import speed on bulk migrations — run
+        /// `vledger verify` after import completes to confirm integrity.
+        #[arg(long, default_value = "group_commit")]
+        wal_sync_mode: String,
     },
 
     /// Exits non-zero if any discrepancy is found.
@@ -874,13 +879,14 @@ async fn main() -> Result<()> {
             file, format, dry_run, mappings, mapping_file, domain,
             default_currency, id_column, on_error, batch_size, state_file,
             resume, progress, manifest, create_accounts, metadata_columns,
+            wal_sync_mode,
         } => {
             cmd_import(
                 &cli.data_dir, &file, format.as_deref(), dry_run, &mappings,
                 mapping_file.as_deref(), &domain, &default_currency,
                 id_column.as_deref(), &on_error, batch_size, &state_file,
                 resume, progress, &manifest, create_accounts,
-                metadata_columns.as_deref(),
+                metadata_columns.as_deref(), &wal_sync_mode,
             ).await
         }
         Commands::Reconcile { format, output } => {
@@ -4647,6 +4653,7 @@ async fn cmd_import(
     manifest_path: &std::path::Path,
     create_accounts: bool,
     metadata_columns: Option<&str>,
+    wal_sync_mode: &str,
 ) -> Result<()> {
     if !data_dir.exists() {
         anyhow::bail!("Data directory not found — run `vledger init` first.");
@@ -4770,7 +4777,15 @@ async fn cmd_import(
     let skip_rows = state.last_row_index;
 
     // ── Open ledger ───────────────────────────────────────────────────────
-    let mut ledger = vledger_ledger::LedgerStore::open(data_dir)
+    let sync_mode: vledger_wal::WalSyncMode = wal_sync_mode.parse().unwrap_or_else(|_| {
+        eprintln!("  ⚠  Unknown --wal-sync-mode '{}', defaulting to group_commit", wal_sync_mode);
+        vledger_wal::WalSyncMode::GroupCommit
+    });
+    if sync_mode == vledger_wal::WalSyncMode::NoSync {
+        eprintln!("  ⚠  --wal-sync-mode=no_sync: fsync disabled for this import.");
+        eprintln!("     Run `vledger verify --data-dir {}` after completion.", data_dir.display());
+    }
+    let mut ledger = vledger_ledger::LedgerStore::open_with_sync_mode(data_dir, sync_mode)
         .context("Failed to open ledger. Is vledger start running? Stop it first.")?;
 
     // Build account lookup: code → AccountId

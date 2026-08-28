@@ -244,13 +244,23 @@ impl LedgerStore {
     /// Recovery is also run with signature verification enabled so tampered
     /// commits are caught on startup.
     pub fn open(data_dir: &Path) -> Result<Self, LedgerError> {
+        Self::open_with_sync_mode(data_dir, vledger_wal::WalSyncMode::GroupCommit)
+    }
+
+    /// Open with an explicit WAL sync mode — used by bulk import to avoid
+    /// per-record fsyncs that would make large imports prohibitively slow.
+    pub fn open_with_sync_mode(
+        data_dir: &Path,
+        sync_mode: vledger_wal::WalSyncMode,
+    ) -> Result<Self, LedgerError> {
         let wal_dir = data_dir.join("wal");
         let pages_dir = data_dir.join("pages");
 
-        // Load Ed25519 signing key if persisted by `vledger init`.
         let signing_key = Self::load_signing_key(data_dir);
 
-        let tx_manager = TransactionManager::open_with_signing(&wal_dir, signing_key)?;
+        let tx_manager = TransactionManager::open_with_signing_and_mode(
+            &wal_dir, signing_key, sync_mode
+        )?;
         let page_store = PageStore::open(&pages_dir)?;
 
         // Acquire an exclusive advisory lock on the data directory to prevent
