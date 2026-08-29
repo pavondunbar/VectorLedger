@@ -111,7 +111,7 @@ mod tests {
             }
 
             // P-INV-1: every entry must have SUM(debits) == SUM(credits)
-            for entry in store.all_entries() {
+            for entry in store.entries_scan(usize::MAX) {
                 use crate::entry::DrCr;
                 let debits: i128 = entry.lines.iter()
                     .filter(|l| l.dr_cr == DrCr::Debit)
@@ -219,7 +219,7 @@ mod tests {
                 }
             }
 
-            let entries = store.all_entries();
+            let entries = store.entries_scan(usize::MAX);
             let mut prev = 0u64;
             for entry in entries {
                 prop_assert!(
@@ -268,7 +268,7 @@ mod tests {
                 "hash chain must be valid after {} transactions", txs.len()
             );
 
-            for entry in store.all_entries() {
+            for entry in store.entries_scan(usize::MAX) {
                 prop_assert!(
                     entry.verify_hashes(),
                     "entry {} has invalid hashes", entry.sequence
@@ -301,7 +301,7 @@ mod tests {
                 .credit(rev, amt, "USD")
                 .build();
             store.post_entry(e).unwrap();
-            let original_id = store.all_entries()[0].id;
+            let original_id = store.entries_scan(usize::MAX)[0].id;
 
             prop_assert_eq!(
                 store.balance(&cash), amount_cents as i128,
@@ -360,7 +360,7 @@ mod tests {
                     }
                 }
 
-                let entries   = store.all_entries();
+                let entries   = store.entries_scan(usize::MAX);
                 let count     = entries.len();
                 let chain_tip = entries.last().map(|e| e.chain_hash).unwrap_or([0u8; 32]);
                 (count, balance, chain_tip)
@@ -384,7 +384,7 @@ mod tests {
                         "WAL replay: balance mismatch"
                     );
                 }
-                let replayed_tip = store2.all_entries()
+                let replayed_tip = store2.entries_scan(usize::MAX)
                     .last()
                     .map(|e| e.chain_hash)
                     .unwrap_or([0u8; 32]);
@@ -432,7 +432,7 @@ mod tests {
                 }
             }
 
-            let entries = store.all_entries();
+            let entries = store.entries_scan(usize::MAX);
             let total_debits: i128 = entries.iter()
                 .flat_map(|e| e.lines.iter())
                 .filter(|l| l.dr_cr == DrCr::Debit)

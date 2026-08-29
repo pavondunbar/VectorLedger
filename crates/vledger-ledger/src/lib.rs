@@ -25,6 +25,7 @@ mod concurrent_tests;
 mod crash_tests;
 pub mod currency;
 pub mod entry;
+pub mod entry_db;
 pub mod error;
 #[cfg(test)]
 mod fault_injection_tests;

@@ -85,8 +85,6 @@ impl<'a> ReadExecutor<'a> {
     const DEFAULT_SCAN_LIMIT: usize = 10_000;
 
     fn exec_scan_entries(&self, filter: Option<EntryFilter>) -> Result<QueryResult, SqlError> {
-        let entries = self.ledger.all_entries();
-
         let cols = vec![
             "sequence".into(),
             "id".into(),
@@ -102,69 +100,39 @@ impl<'a> ReadExecutor<'a> {
             "metadata".into(),
         ];
 
-        // All leaf hashes are always computed over the full entry set so that
-        // Merkle proofs remain valid regardless of which filter is applied.
-        let all_leaf_data: Vec<Vec<u8>> = entries.iter().map(|e| e.content_hash.to_vec()).collect();
-
-        let is_point_lookup = matches!(
-            filter,
-            Some(EntryFilter::BySequence(_)) | Some(EntryFilter::ByExternalRef(_))
-        );
         let explicit_limit = if let Some(EntryFilter::Limit(n)) = &filter {
             Some(*n)
         } else {
             None
         };
 
-        // ── Index-accelerated paths ───────────────────────────────────────
-        // For ByDomain, ByStatus, and BySequence we use the in-memory indexes
-        // built by LedgerStore during WAL replay and on every post_entry call.
-        // This avoids a full O(n) scan over all entries.
-        //
-        // Each fast path produces a Vec<(usize, &JournalEntry)> — the same
-        // shape as the full-scan path — so the downstream capping and row
-        // building logic is shared.
+        // ── SQLite-accelerated paths ──────────────────────────────────────
 
-        // BySequence: O(1) hash lookup → single entry or empty.
+        // BySequence: O(1) SQLite point lookup.
         if let Some(EntryFilter::BySequence(seq)) = &filter {
-            let matched: Vec<(usize, &vledger_ledger::JournalEntry)> =
-                match self.ledger.entry_position_by_sequence(*seq) {
-                    Some(pos) => entries
-                        .get(pos)
-                        .map(|e| vec![(pos, e)])
-                        .unwrap_or_default(),
+            let matched: Vec<vledger_ledger::JournalEntry> =
+                match self.ledger.get_entry_by_sequence(*seq) {
+                    Some(e) => vec![e],
                     None => vec![],
                 };
             return Self::build_scan_entries_result(
                 cols,
                 matched,
-                &all_leaf_data,
-                true,  // point lookup — no cap
+                true, // point lookup — no cap
                 None,
                 self.attach_proofs,
                 |root| self.ledger.sign_bytes(root),
             );
         }
 
-        // ByDomain: O(k) index lookup — only touches matching entries.
+        // ByDomain: SQLite index scan.
         if let Some(EntryFilter::ByDomain(domain)) = &filter {
             let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let domain_entries = self.ledger.entries_by_domain(domain);
-            // Map back to (global_index, entry) pairs for Merkle proof tracking.
-            let matched: Vec<(usize, &vledger_ledger::JournalEntry)> = domain_entries
-                .into_iter()
-                .filter_map(|e| {
-                    self.ledger
-                        .entry_position_by_sequence(e.sequence)
-                        .map(|pos| (pos, e))
-                })
-                .take(limit)
-                .collect();
+            let matched = self.ledger.entries_by_domain_limited(domain, limit);
             let cap_applied = explicit_limit.is_none() && matched.len() == limit;
             return Self::build_scan_entries_result(
                 cols,
                 matched,
-                &all_leaf_data,
                 !cap_applied,
                 if cap_applied { Some(limit) } else { None },
                 self.attach_proofs,
@@ -172,24 +140,14 @@ impl<'a> ReadExecutor<'a> {
             );
         }
 
-        // ByStatus: O(k) index lookup — only touches matching entries.
+        // ByStatus: SQLite index scan.
         if let Some(EntryFilter::ByStatus(status)) = &filter {
             let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let status_entries = self.ledger.entries_by_status(status);
-            let matched: Vec<(usize, &vledger_ledger::JournalEntry)> = status_entries
-                .into_iter()
-                .filter_map(|e| {
-                    self.ledger
-                        .entry_position_by_sequence(e.sequence)
-                        .map(|pos| (pos, e))
-                })
-                .take(limit)
-                .collect();
+            let matched = self.ledger.entries_by_status_limited(status, limit);
             let cap_applied = explicit_limit.is_none() && matched.len() == limit;
             return Self::build_scan_entries_result(
                 cols,
                 matched,
-                &all_leaf_data,
                 !cap_applied,
                 if cap_applied { Some(limit) } else { None },
                 self.attach_proofs,
@@ -197,39 +155,27 @@ impl<'a> ReadExecutor<'a> {
             );
         }
 
-        // ── Full scan fallback (ByExternalRef, Limit, None) ───────────────
-        // Apply filter predicate.
-        let filtered: Vec<(usize, _)> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| match &filter {
-                None => true,
-                Some(EntryFilter::ByExternalRef(r)) => {
-                    e.external_ref.as_deref() == Some(r.as_str())
-                }
-                Some(EntryFilter::ByDrCr(_)) => true, // not applicable to ledger; filter ignored
-                Some(EntryFilter::Limit(_)) => true,
-                // Already handled above via index — unreachable here.
-                Some(EntryFilter::BySequence(_))
-                | Some(EntryFilter::ByDomain(_))
-                | Some(EntryFilter::ByStatus(_)) => false,
-            })
-            .collect();
+        // ByExternalRef: SQLite index scan.
+        if let Some(EntryFilter::ByExternalRef(r)) = &filter {
+            let matched = self.ledger.entries_by_external_ref(r);
+            return Self::build_scan_entries_result(
+                cols,
+                matched,
+                true, // point-ish lookup — no cap
+                None,
+                self.attach_proofs,
+                |root| self.ledger.sign_bytes(root),
+            );
+        }
 
-        // Determine effective row cap.
-        let (capped, cap_applied) = if is_point_lookup {
-            (filtered, false)
-        } else {
-            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let capped = filtered.into_iter().take(limit).collect::<Vec<_>>();
-            let cap_applied = explicit_limit.is_none();
-            (capped, cap_applied)
-        };
+        // ── Full scan fallback (Limit / None) — paginated via SQLite ─────
+        let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+        let matched = self.ledger.entries_scan(limit);
+        let cap_applied = explicit_limit.is_none() && matched.len() == limit;
 
         Self::build_scan_entries_result(
             cols,
-            capped,
-            &all_leaf_data,
+            matched,
             !cap_applied,
             if cap_applied {
                 Some(Self::DEFAULT_SCAN_LIMIT)
@@ -243,16 +189,14 @@ impl<'a> ReadExecutor<'a> {
 
     /// Shared row-builder for `exec_scan_entries`.
     ///
-    /// Converts a `Vec<(usize, &JournalEntry)>` into a `QueryResult`,
-    /// optionally attaching a Merkle proof.  Used by both the index-
-    /// accelerated fast paths and the full-scan fallback.
-    ///
-    /// `no_cap` — when true, the message says `"{n} rows"`.
-    /// `cap_limit` — when `Some(k)`, the message includes the cap value.
+    /// Takes owned `Vec<JournalEntry>` (returned by SQLite-backed methods).
+    /// Merkle proofs are built over the returned leaf set only — proofs cover
+    /// the query result rather than the entire ledger, which is the correct
+    /// semantic for disk-backed stores where loading all entries into RAM is
+    /// not possible.
     fn build_scan_entries_result<F>(
         cols: Vec<String>,
-        matched: Vec<(usize, &vledger_ledger::JournalEntry)>,
-        all_leaf_data: &[Vec<u8>],
+        matched: Vec<vledger_ledger::JournalEntry>,
         no_cap: bool,
         cap_limit: Option<usize>,
         attach_proofs: bool,
@@ -262,9 +206,9 @@ impl<'a> ReadExecutor<'a> {
         F: FnOnce(&[u8; 32]) -> Option<([u8; 64], [u8; 32])>,
     {
         let mut rows = Vec::new();
-        let mut leaf_indices = Vec::new();
+        let mut leaf_data: Vec<Vec<u8>> = Vec::new();
 
-        for (idx, entry) in &matched {
+        for entry in &matched {
             let lines_str = entry
                 .lines
                 .iter()
@@ -297,7 +241,7 @@ impl<'a> ReadExecutor<'a> {
                     Value::Text(entry.metadata.clone().unwrap_or_default()),
                 ],
             ));
-            leaf_indices.push(*idx);
+            leaf_data.push(entry.content_hash.to_vec());
         }
 
         let n = rows.len();
@@ -311,8 +255,10 @@ impl<'a> ReadExecutor<'a> {
         };
         let mut result = QueryResult::rows(cols, rows, message);
 
-        if attach_proofs && !all_leaf_data.is_empty() {
-            result.proof = Some(build_merkle_proof(all_leaf_data, &leaf_indices, sign_root));
+        if attach_proofs && !leaf_data.is_empty() {
+            // Build proof over the result set's leaves (seq 0..n-1).
+            let indices: Vec<usize> = (0..leaf_data.len()).collect();
+            result.proof = Some(build_merkle_proof(&leaf_data, &indices, sign_root));
         }
 
         Ok(result)
@@ -328,8 +274,6 @@ impl<'a> ReadExecutor<'a> {
     //  2026-08-17  | 1        | Wire xfer   | <uuid>     | Credit | 100.00 | USD      | main
 
     fn exec_scan_ledger_lines(&self, filter: Option<EntryFilter>) -> Result<QueryResult, SqlError> {
-        let entries = self.ledger.all_entries();
-
         let cols = vec![
             "date".into(),
             "sequence".into(),
@@ -344,98 +288,62 @@ impl<'a> ReadExecutor<'a> {
             "metadata".into(),
         ];
 
-        // Apply entry-level filter first, then expand each entry into its lines.
-        // Point lookups (by sequence) skip the cap; everything else is capped at
-        // DEFAULT_SCAN_LIMIT entries (before line expansion) to prevent OOM.
-        let is_point_lookup = matches!(
-            filter,
-            Some(EntryFilter::BySequence(_)) | Some(EntryFilter::ByExternalRef(_))
-        );
         let explicit_limit = if let Some(EntryFilter::Limit(n)) = &filter {
             Some(*n)
         } else {
             None
         };
 
-        // ── Index-accelerated paths ───────────────────────────────────────
-        // BySequence: O(1) lookup.
+        // ── SQLite-accelerated paths ──────────────────────────────────────
+        // BySequence: O(1) SQLite point lookup.
         if let Some(EntryFilter::BySequence(seq)) = &filter {
-            let matched: Vec<&vledger_ledger::JournalEntry> =
-                match self.ledger.entry_position_by_sequence(*seq) {
-                    Some(pos) => entries.get(pos).map(|e| vec![e]).unwrap_or_default(),
+            let matched: Vec<vledger_ledger::JournalEntry> =
+                match self.ledger.get_entry_by_sequence(*seq) {
+                    Some(e) => vec![e],
                     None => vec![],
                 };
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
 
-        // ByDomain: O(k) index lookup.
+        // ByDomain: SQLite index scan.
         if let Some(EntryFilter::ByDomain(domain)) = &filter {
             let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let matched: Vec<&vledger_ledger::JournalEntry> = self
-                .ledger
-                .entries_by_domain(domain)
-                .into_iter()
-                .take(limit)
-                .collect();
+            let matched = self.ledger.entries_by_domain_limited(domain, limit);
             let cap_applied = explicit_limit.is_none() && matched.len() == limit;
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, cap_applied);
         }
 
-        // ByStatus: O(k) index lookup.
+        // ByStatus: SQLite index scan.
         if let Some(EntryFilter::ByStatus(status)) = &filter {
             let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let matched: Vec<&vledger_ledger::JournalEntry> = self
-                .ledger
-                .entries_by_status(status)
-                .into_iter()
-                .take(limit)
-                .collect();
+            let matched = self.ledger.entries_by_status_limited(status, limit);
             let cap_applied = explicit_limit.is_none() && matched.len() == limit;
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, cap_applied);
         }
 
-        // ── Full scan fallback ────────────────────────────────────────────
-        let filtered_entries: Vec<_> = entries
-            .iter()
-            .filter(|e| match &filter {
-                None => true,
-                Some(EntryFilter::ByExternalRef(r)) => {
-                    e.external_ref.as_deref() == Some(r.as_str())
-                }
-                Some(EntryFilter::ByDrCr(_)) => true, // dr_cr filter applied at line level below
-                Some(EntryFilter::Limit(_)) => true,
-                // Already handled above via index — unreachable here.
-                Some(EntryFilter::BySequence(_))
-                | Some(EntryFilter::ByDomain(_))
-                | Some(EntryFilter::ByStatus(_)) => false,
-            })
-            .collect();
+        // ByExternalRef: SQLite index scan.
+        if let Some(EntryFilter::ByExternalRef(r)) = &filter {
+            let matched = self.ledger.entries_by_external_ref(r);
+            return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
+        }
 
-        let (capped_entries, cap_applied) = if is_point_lookup {
-            (filtered_entries, false)
-        } else {
-            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let capped = filtered_entries.into_iter().take(limit).collect::<Vec<_>>();
-            let cap_applied = explicit_limit.is_none();
-            (capped, cap_applied)
-        };
-
-        Self::build_scan_ledger_lines_result(cols, capped_entries, &filter, cap_applied)
+        // ── Full scan fallback (Limit / None / ByDrCr) ───────────────────
+        let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+        let matched = self.ledger.entries_scan(limit);
+        let cap_applied = explicit_limit.is_none() && matched.len() == limit;
+        Self::build_scan_ledger_lines_result(cols, matched, &filter, cap_applied)
     }
 
     /// Shared row-builder for `exec_scan_ledger_lines`.
-    ///
-    /// Expands a list of entries into one row per debit/credit line,
-    /// applying the `ByDrCr` filter at the line level if present.
     fn build_scan_ledger_lines_result(
         cols: Vec<String>,
-        entries: Vec<&vledger_ledger::JournalEntry>,
+        entries: Vec<vledger_ledger::JournalEntry>,
         filter: &Option<EntryFilter>,
         cap_applied: bool,
     ) -> Result<QueryResult, SqlError> {
         let mut rows = Vec::new();
 
-        for entry in entries {
+        for entry in &entries {
             let date = entry.effective_at.format("%Y-%m-%d").to_string();
             for line in &entry.lines {
                 let dr_cr_str = match line.dr_cr {
@@ -945,16 +853,19 @@ impl<'a> Executor<'a> {
         }
 
         let entry = builder.build();
-        let posted = self.ledger.post_entry(entry)?;
-        let seq = posted.sequence;
-        let id = posted.id;
-        let domain = posted.domain.clone();
-        let amount = posted
-            .lines
-            .iter()
-            .filter(|l| matches!(l.dr_cr, vledger_ledger::entry::DrCr::Debit))
-            .map(|l| l.amount.as_i64())
-            .sum::<i64>();
+        let seq = self.ledger.post_entry(entry)?;
+
+        // For the response we need the entry id and domain. Fetch from SQLite.
+        let (id, domain, amount) = self.ledger
+            .get_entry_by_sequence(seq)
+            .map(|e| {
+                let amt = e.lines.iter()
+                    .filter(|l| matches!(l.dr_cr, vledger_ledger::entry::DrCr::Debit))
+                    .map(|l| l.amount.as_i64())
+                    .sum::<i64>();
+                (e.id, e.domain.clone(), amt)
+            })
+            .unwrap_or((uuid::Uuid::nil(), spec.domain.clone(), spec.amount));
 
         let cols = vec!["sequence".into(), "id".into(), "status".into()];
         let rows = vec![Row::new(

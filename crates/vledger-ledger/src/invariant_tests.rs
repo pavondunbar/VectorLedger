@@ -74,7 +74,7 @@ mod tests {
         }
 
         // INV-1: every entry must be balanced
-        for entry in store.all_entries() {
+        for entry in store.entries_scan(usize::MAX) {
             let debits: i128 = entry
                 .lines
                 .iter()
@@ -172,7 +172,7 @@ mod tests {
             post(&mut store, cash, rev, 1);
         }
 
-        let entries = store.all_entries();
+        let entries = store.entries_scan(usize::MAX);
         assert_eq!(entries.len(), n);
 
         let mut prev_seq = 0u64;
@@ -213,7 +213,7 @@ mod tests {
         );
 
         // Verify every individual entry's self-consistency
-        for entry in store.all_entries() {
+        for entry in store.entries_scan(usize::MAX) {
             assert!(
                 entry.verify_hashes(),
                 "entry {} has invalid hash",
@@ -231,7 +231,7 @@ mod tests {
         let rev = mk_account(&mut store, "REVENUE", AccountType::Income);
         post(&mut store, cash, rev, 9_999);
 
-        let mut entry = store.all_entries()[0].clone();
+        let mut entry = store.entries_scan(usize::MAX)[0].clone();
         entry.description = "TAMPERED DESCRIPTION".to_string();
         // verify_hashes must now return false
         assert!(
@@ -254,7 +254,7 @@ mod tests {
         for i in 1i64..=100 {
             post(&mut store, cash, rev, i * 137); // varied amounts
             let id = {
-                let entries = store.all_entries();
+                let entries = store.entries_scan(usize::MAX);
                 entries.last().unwrap().id
             };
             store.reverse_entry(id, "reversal", "test").unwrap();
@@ -279,7 +279,7 @@ mod tests {
         assert!(store.verify_chain_integrity().is_ok());
 
         // Every original entry must be tracked in the reversal event index
-        let entries = store.all_entries();
+        let entries = store.entries_scan(usize::MAX);
         let originals: Vec<_> = entries
             .iter()
             .filter(|e| {
@@ -302,7 +302,7 @@ mod tests {
         let rev = mk_account(&mut store, "REVENUE", AccountType::Income);
 
         post(&mut store, cash, rev, 5_000);
-        let id = store.all_entries()[0].id;
+        let id = store.entries_scan(usize::MAX)[0].id;
 
         store.reverse_entry(id, "first reversal", "test").unwrap();
         let result = store.reverse_entry(id, "second reversal", "test");
@@ -604,7 +604,7 @@ mod tests {
         }
 
         // Calculate total debits and credits from all entries
-        let entries = store.all_entries();
+        let entries = store.entries_scan(usize::MAX);
         let total_debits: i128 = entries
             .iter()
             .flat_map(|e| e.lines.iter())
@@ -643,7 +643,7 @@ mod tests {
                 post(&mut store, cash, rev, i * 7);
             }
 
-            let entries = store.all_entries();
+            let entries = store.entries_scan(usize::MAX);
             let balance = store.balance(&cash);
             let chain_hash = entries.last().unwrap().chain_hash;
             (entries.len(), balance, chain_hash)
@@ -667,7 +667,7 @@ mod tests {
         );
 
         // Hash chain tip must be identical
-        let replayed_chain_hash = store2.all_entries().last().unwrap().chain_hash;
+        let replayed_chain_hash = store2.entries_scan(usize::MAX).last().unwrap().chain_hash;
         assert_eq!(
             replayed_chain_hash, last_chain_hash,
             "WAL replay: chain hash tip must be identical"

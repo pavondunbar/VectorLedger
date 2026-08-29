@@ -314,7 +314,8 @@ mod tests {
             let mut store = LedgerStore::open(path).unwrap();
             let (c, r) = cash_and_revenue(&mut store);
             post_entry(&mut store, c, r, 10_000);
-            let eid = store.all_entries()[0].id;
+            let seq1 = store.entry_count() as u64; // sequence 1
+            let eid = store.get_entry_by_sequence(seq1).unwrap().id;
             store.reverse_entry(eid, "void", "test").unwrap();
             (eid, c, r)
         };

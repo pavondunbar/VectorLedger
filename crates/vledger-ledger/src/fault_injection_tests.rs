@@ -170,7 +170,7 @@ mod tests {
             let mut s = mk_store(&dir);
             let (c, r) = mk_accounts(&mut s);
             post(&mut s, c, r, 5_000);
-            let id = s.all_entries()[0].id;
+            let id = s.get_entry_by_sequence(1).unwrap().id;
             (id, c, r)
         };
 
@@ -288,8 +288,7 @@ mod tests {
                 .debit(cash, amt, "USD")
                 .credit(rev, amt, "USD")
                 .build();
-            let posted = s.post_entry(e).unwrap();
-            let new_seq = posted.sequence;
+            let new_seq = s.post_entry(e).unwrap();
             assert!(
                 new_seq > last_seq,
                 "sequence {new_seq} must be > previous {last_seq} across crash boundary"

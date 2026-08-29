@@ -44,6 +44,7 @@ const FORMAT_VERSION: u32 = 2;
 
 // ── GenerateOptions ───────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct GenerateOptions {
     /// When true, embed all entries and per-entry Merkle proofs in the package.
     /// Only practical for ledgers with < ~10,000 entries.
@@ -59,17 +60,6 @@ pub struct GenerateOptions {
     pub period_end: Option<String>,
 }
 
-impl Default for GenerateOptions {
-    fn default() -> Self {
-        Self {
-            include_entries: false,
-            tenant: None,
-            description: None,
-            period_start: None,
-            period_end: None,
-        }
-    }
-}
 
 // ── generate ──────────────────────────────────────────────────────────────────
 
@@ -90,13 +80,24 @@ pub fn generate(
                   Run `vledger verify` to diagnose.",
     )?;
 
-    let entries = ledger.all_entries();
-    let entry_count = entries.len();
+    let entry_count = ledger.entry_count();
 
-    // ── Build Merkle root (single pass over canonical bytes) ─────────────
+    // ── Build Merkle root (single streaming pass over canonical bytes) ────
     // This is the only O(n) step and is fast — no proof generation here.
     eprint!("  Computing Merkle root over {entry_count} entries...");
-    let leaf_bytes: Vec<Vec<u8>> = entries.iter().map(|e| e.canonical_bytes()).collect();
+    let mut leaf_bytes: Vec<Vec<u8>> = Vec::new();
+    let mut first_sequence = 0u64;
+    let mut last_sequence = 0u64;
+    let mut entry_vec: Vec<vledger_ledger::JournalEntry> = Vec::new();
+    ledger.stream_entries(|e| {
+        if first_sequence == 0 { first_sequence = e.sequence; }
+        last_sequence = e.sequence;
+        leaf_bytes.push(e.canonical_bytes());
+        if opts.include_entries {
+            entry_vec.push(e);
+        }
+        Ok(())
+    }).ok();
 
     let root: [u8; 32] = if leaf_bytes.is_empty() {
         ZERO_HASH
@@ -106,8 +107,6 @@ pub fn generate(
     let root_hex = hash_to_hex(&root);
     let chain_tip = ledger.chain_tip();
     let chain_tip_hex = hash_to_hex(chain_tip);
-    let first_sequence = entries.first().map(|e| e.sequence).unwrap_or(0);
-    let last_sequence = entries.last().map(|e| e.sequence).unwrap_or(0);
     eprintln!(" done.");
 
     // ── Sign: canonical commitment bytes ──────────────────────────────────
@@ -196,7 +195,7 @@ pub fn generate(
             .collect();
         eprintln!(" done.");
 
-        let chain_proof_json: Vec<Value> = entries
+        let chain_proof_json: Vec<Value> = entry_vec
             .iter()
             .map(|e| {
                 json!({
@@ -208,7 +207,7 @@ pub fn generate(
             })
             .collect();
 
-        let entries_json: Vec<Value> = entries
+        let entries_json: Vec<Value> = entry_vec
             .iter()
             .map(|e| serde_json::to_value(e).expect("JournalEntry is always JSON-serializable"))
             .collect();
@@ -278,18 +277,25 @@ pub fn prove_entry(
 
     // Open ledger.
     let ledger = LedgerStore::open(data_dir).context("Failed to open ledger")?;
-    let entries = ledger.all_entries();
 
     // Find the entry by sequence number.
-    let idx = entries
-        .iter()
-        .position(|e| e.sequence == sequence)
+    let entry = ledger.get_entry_by_sequence(sequence)
         .ok_or_else(|| anyhow::anyhow!("Entry with sequence={sequence} not found"))?;
-    let entry = &entries[idx];
 
     // Build leaf bytes for the full tree (needed to compute proof paths).
-    eprint!("  Building Merkle tree over {} entries...", entries.len());
-    let leaf_bytes: Vec<Vec<u8>> = entries.iter().map(|e| e.canonical_bytes()).collect();
+    let total = ledger.entry_count();
+    eprint!("  Building Merkle tree over {} entries...", total);
+    let mut leaf_bytes: Vec<Vec<u8>> = Vec::new();
+    let mut entry_idx: Option<usize> = None;
+    ledger.stream_entries(|e| {
+        if e.sequence == sequence {
+            entry_idx = Some(leaf_bytes.len());
+        }
+        leaf_bytes.push(e.canonical_bytes());
+        Ok(())
+    }).ok();
+    let idx = entry_idx
+        .ok_or_else(|| anyhow::anyhow!("Entry with sequence={sequence} not found in SQLite index"))?;
     let root: [u8; 32] = merkle_root(&leaf_bytes);
     let root_hex = hash_to_hex(&root);
     eprintln!(" done.");
@@ -316,7 +322,7 @@ pub fn prove_entry(
             "committed_root":     committed_root,
             "commitment_file":    commitment_file.display().to_string(),
         },
-        "entry": serde_json::to_value(entry).expect("JournalEntry is JSON-serializable"),
+        "entry": serde_json::to_value(entry.clone()).expect("JournalEntry is JSON-serializable"),
         "chain_proof": {
             "sequence":     entry.sequence,
             "prev_hash":    hash_to_hex(&entry.prev_hash),

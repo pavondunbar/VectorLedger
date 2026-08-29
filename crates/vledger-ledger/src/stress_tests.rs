@@ -119,9 +119,9 @@ mod tests {
         );
 
         // Sequence numbers: strictly monotonic, no gaps
-        let entries = g.all_entries();
+        let entries = g.entries_scan(usize::MAX);
         let mut prev_seq = 0u64;
-        for entry in entries {
+        for entry in &entries {
             assert!(
                 entry.sequence > prev_seq,
                 "[{n_clients} clients]: sequence {} not > {prev_seq}",
@@ -143,7 +143,7 @@ mod tests {
         );
 
         // All entries individually valid
-        for entry in entries {
+        for entry in &entries {
             assert!(
                 entry.verify_hashes(),
                 "[{n_clients} clients]: entry {} has invalid hashes",
@@ -403,7 +403,8 @@ mod tests {
                 .credit(r, amt, "USD")
                 .build();
             let posted = g.post_entry(e).unwrap();
-            (c, r, posted.id)
+            let original_entry_id = g.get_entry_by_sequence(posted).unwrap().id;
+            (c, r, original_entry_id)
         };
 
         let n_racers = 100usize;
