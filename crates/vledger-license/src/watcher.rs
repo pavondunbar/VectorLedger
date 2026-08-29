@@ -25,7 +25,7 @@
 //! Pass a `tokio_util::sync::CancellationToken`; the task exits cleanly when
 //! the token is cancelled (i.e. on graceful server shutdown).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -80,7 +80,7 @@ pub fn spawn_license_watcher(
 }
 
 /// Reload the license from disk and update the shared store.
-async fn refresh(shared: &SharedLicense, data_dir: &PathBuf) {
+async fn refresh(shared: &SharedLicense, data_dir: &std::path::Path) {
     let new_license = LicenseStore::load_or_free(data_dir);
 
     let mut guard = shared.write().await;

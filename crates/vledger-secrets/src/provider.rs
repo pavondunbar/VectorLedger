@@ -1135,7 +1135,7 @@ impl PyHsmProvider {
             .map_err(|_| SecretsError::PyHsm("PyHSM IPC read timeout".into()))?
             .map_err(|e| SecretsError::PyHsm(format!("PyHSM IPC read: {e}")))?;
 
-            return pyhsm_parse_response(resp_line.trim());
+            pyhsm_parse_response(resp_line.trim())
         }
 
         #[cfg(not(unix))]

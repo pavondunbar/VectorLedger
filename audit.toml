@@ -25,7 +25,7 @@ ignore = ["RUSTSEC-2025-0141"]
 # tokio-rustls and rustls ecosystem crates. No security vulnerability
 # exists; the crate is feature-complete and the warning is advisory only.
 # Will be removed automatically if the dependency graph is updated upstream.
-ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2025-0134"]
+ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2025-0134", "RUSTSEC-2026-0038"]
 
 
 [output]

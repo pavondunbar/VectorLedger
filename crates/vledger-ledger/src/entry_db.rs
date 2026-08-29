@@ -110,11 +110,15 @@ impl EntryDb {
         )
         .map_err(|e| LedgerError::Serialization(format!("SQLite schema error: {e}")))?;
 
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, LedgerError> {
-        self.conn.lock().map_err(|_| LedgerError::Serialization("SQLite mutex poisoned".into()))
+        self.conn
+            .lock()
+            .map_err(|_| LedgerError::Serialization("SQLite mutex poisoned".into()))
     }
 
     /// Insert a journal entry into the index.
@@ -123,25 +127,25 @@ impl EntryDb {
         let data = encode_entry(entry)?;
         let conn = self.lock()?;
         conn.execute(
-                "INSERT OR IGNORE INTO entries
+            "INSERT OR IGNORE INTO entries
                  (sequence, id, status, domain, external_ref, idempotency_key,
                   content_hash, chain_hash, effective_at, posted_at, data)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                params![
-                    entry.sequence as i64,
-                    entry.id.to_string(),
-                    format!("{:?}", entry.status),
-                    entry.domain,
-                    entry.external_ref.as_deref(),
-                    entry.idempotency_key.as_deref(),
-                    hex::encode(entry.content_hash),
-                    hex::encode(entry.chain_hash),
-                    entry.effective_at.to_rfc3339(),
-                    entry.posted_at.to_rfc3339(),
-                    data,
-                ],
-            )
-            .map_err(|e| LedgerError::Serialization(format!("SQLite insert error: {e}")))?;
+            params![
+                entry.sequence as i64,
+                entry.id.to_string(),
+                format!("{:?}", entry.status),
+                entry.domain,
+                entry.external_ref.as_deref(),
+                entry.idempotency_key.as_deref(),
+                hex::encode(entry.content_hash),
+                hex::encode(entry.chain_hash),
+                entry.effective_at.to_rfc3339(),
+                entry.posted_at.to_rfc3339(),
+                data,
+            ],
+        )
+        .map_err(|e| LedgerError::Serialization(format!("SQLite insert error: {e}")))?;
         Ok(())
     }
 
@@ -303,9 +307,7 @@ impl EntryDb {
     ) -> Result<Vec<JournalEntry>, LedgerError> {
         let conn = self.lock()?;
         let mut stmt = conn
-            .prepare(
-                "SELECT data FROM entries WHERE external_ref=?1 ORDER BY sequence LIMIT ?2",
-            )
+            .prepare("SELECT data FROM entries WHERE external_ref=?1 ORDER BY sequence LIMIT ?2")
             .map_err(|e| LedgerError::Serialization(format!("SQLite prepare error: {e}")))?;
 
         let rows = stmt
@@ -349,11 +351,7 @@ impl EntryDb {
     }
 
     /// Fetch entries in a sequence range [from_seq, to_seq] inclusive.
-    pub fn scan_range(
-        &self,
-        from_seq: u64,
-        to_seq: u64,
-    ) -> Result<Vec<JournalEntry>, LedgerError> {
+    pub fn scan_range(&self, from_seq: u64, to_seq: u64) -> Result<Vec<JournalEntry>, LedgerError> {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
@@ -377,10 +375,7 @@ impl EntryDb {
     }
 
     /// Get all sequence numbers for entries touching a specific account.
-    pub fn sequences_for_account(
-        &self,
-        account_id: &uuid::Uuid,
-    ) -> Result<Vec<u64>, LedgerError> {
+    pub fn sequences_for_account(&self, account_id: &uuid::Uuid) -> Result<Vec<u64>, LedgerError> {
         let _ = account_id; // handled via account_entries table
         Ok(vec![])
     }
@@ -395,10 +390,10 @@ impl EntryDb {
     ) -> Result<(), LedgerError> {
         let conn = self.lock()?;
         conn.execute(
-                "INSERT OR IGNORE INTO account_entries (account_id, sequence) VALUES (?1, ?2)",
-                params![account_id.to_string(), sequence as i64],
-            )
-            .map_err(|e| LedgerError::Serialization(format!("SQLite account_entry insert: {e}")))?;
+            "INSERT OR IGNORE INTO account_entries (account_id, sequence) VALUES (?1, ?2)",
+            params![account_id.to_string(), sequence as i64],
+        )
+        .map_err(|e| LedgerError::Serialization(format!("SQLite account_entry insert: {e}")))?;
         Ok(())
     }
 
@@ -436,15 +431,15 @@ impl EntryDb {
     pub fn ensure_account_entries_table(&self) -> Result<(), LedgerError> {
         let conn = self.lock()?;
         conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS account_entries (
+            "CREATE TABLE IF NOT EXISTS account_entries (
                     account_id TEXT NOT NULL,
                     sequence   INTEGER NOT NULL,
                     PRIMARY KEY (account_id, sequence)
                 );
                 CREATE INDEX IF NOT EXISTS idx_ae_account
                     ON account_entries(account_id);",
-            )
-            .map_err(|e| LedgerError::Serialization(format!("SQLite account_entries schema: {e}")))?;
+        )
+        .map_err(|e| LedgerError::Serialization(format!("SQLite account_entries schema: {e}")))?;
         Ok(())
     }
 

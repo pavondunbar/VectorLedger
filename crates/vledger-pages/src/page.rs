@@ -141,12 +141,12 @@ impl Page {
 
     /// Read raw bytes for slot at `slot_id`.
     pub fn read_slot(&self, slot_id: u16) -> Result<&[u8], PageError> {
-        let entry =
-            self.read_slot_entry(slot_id as usize)
-                .ok_or_else(|| PageError::SlotNotFound {
-                    page_id: self.header.page_id,
-                    slot_id,
-                })?;
+        let entry = self
+            .read_slot_entry(slot_id as usize)
+            .ok_or(PageError::SlotNotFound {
+                page_id: self.header.page_id,
+                slot_id,
+            })?;
         let body_start = PageHeader::SIZE;
         let start = body_start + entry.offset as usize;
         let end = start + entry.length as usize;

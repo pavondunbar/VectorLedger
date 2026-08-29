@@ -872,29 +872,61 @@ async fn main() -> Result<()> {
             output,
         } => cmd_audit_proof(&cli.data_dir, &commitment, sequence, output.as_deref()).await,
         Commands::VerifyAuditPackage { file } => cmd_verify_audit_package(&file).await,
-        Commands::Seed { entries, accounts, seed, progress } => {
-            cmd_seed(&cli.data_dir, entries, accounts, seed, progress).await
-        }
+        Commands::Seed {
+            entries,
+            accounts,
+            seed,
+            progress,
+        } => cmd_seed(&cli.data_dir, entries, accounts, seed, progress).await,
         Commands::Import {
-            file, format, dry_run, mappings, mapping_file, domain,
-            default_currency, id_column, on_error, batch_size, state_file,
-            resume, progress, manifest, create_accounts, metadata_columns,
+            file,
+            format,
+            dry_run,
+            mappings,
+            mapping_file,
+            domain,
+            default_currency,
+            id_column,
+            on_error,
+            batch_size,
+            state_file,
+            resume,
+            progress,
+            manifest,
+            create_accounts,
+            metadata_columns,
             wal_sync_mode,
         } => {
             cmd_import(
-                &cli.data_dir, &file, format.as_deref(), dry_run, &mappings,
-                mapping_file.as_deref(), &domain, &default_currency,
-                id_column.as_deref(), &on_error, batch_size, &state_file,
-                resume, progress, &manifest, create_accounts,
-                metadata_columns.as_deref(), &wal_sync_mode,
-            ).await
+                &cli.data_dir,
+                &file,
+                format.as_deref(),
+                dry_run,
+                &mappings,
+                mapping_file.as_deref(),
+                &domain,
+                &default_currency,
+                id_column.as_deref(),
+                &on_error,
+                batch_size,
+                &state_file,
+                resume,
+                progress,
+                &manifest,
+                create_accounts,
+                metadata_columns.as_deref(),
+                &wal_sync_mode,
+            )
+            .await
         }
         Commands::Reconcile { format, output } => {
             cmd_reconcile(&cli.data_dir, &format, output.as_deref()).await
         }
-        Commands::Settle { entry_id, status, notes } => {
-            cmd_settle(&cli.data_dir, &entry_id, &status, notes).await
-        }
+        Commands::Settle {
+            entry_id,
+            status,
+            notes,
+        } => cmd_settle(&cli.data_dir, &entry_id, &status, notes).await,
         Commands::Retention { action } => cmd_retention(&cli.data_dir, action).await,
         Commands::Hold { action } => cmd_hold(&cli.data_dir, action).await,
         Commands::Rules { action } => cmd_rules(&cli.data_dir, action).await,
@@ -1379,8 +1411,7 @@ async fn cmd_start(
         let audit_bg = Some(std::sync::Arc::clone(&audit_log));
         let tok = shutdown.clone();
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(3600));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
@@ -1420,8 +1451,7 @@ async fn cmd_start(
         let audit_inv = Some(std::sync::Arc::clone(&audit_log));
         let tok = shutdown.clone();
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(900));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(900));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
@@ -1533,10 +1563,10 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
     // For 10M entries this stays flat at a few MB regardless of dataset size.
     print!("  WAL + hash chain         ... ");
     {
+        use vledger_crypto::ZERO_HASH;
         use vledger_wal::reader::WalReader;
         use vledger_wal::record::RecordType;
         use vledger_wal::recovery::decode_data_payload;
-        use vledger_crypto::ZERO_HASH;
 
         let reader = WalReader::open_with_key(&wal_dir, None)
             .map_err(|e| anyhow::anyhow!("Cannot open WAL: {e}"))?;
@@ -1555,17 +1585,19 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
 
         'scan: for result in reader {
             match result {
-                Err(vledger_wal::error::WalError::ChecksumMismatch { .. }
+                Err(
+                    vledger_wal::error::WalError::ChecksumMismatch { .. }
                     | vledger_wal::error::WalError::TruncatedRecord { .. }
                     | vledger_wal::error::WalError::BadMagic
-                    | vledger_wal::error::WalError::Decryption) => {
+                    | vledger_wal::error::WalError::Decryption,
+                ) => {
                     torn_write = true;
                     break 'scan;
                 }
                 Err(e) => return Err(anyhow::anyhow!("WAL read error: {e}")),
                 Ok(record) => {
                     let record_type = match vledger_wal::record::RecordType::try_from(
-                        record.header.record_type
+                        record.header.record_type,
                     ) {
                         Ok(rt) => rt,
                         Err(_) => continue,
@@ -1588,35 +1620,39 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
                                     Err(_) => continue,
                                 };
                                 // Only journal entry records (table_id=1, Insert/Update).
-                                if payload.table_id != 1 { continue; }
-                                if !matches!(payload.mutation,
-                                    vledger_wal::record::MutationKind::Insert |
-                                    vledger_wal::record::MutationKind::Update) {
+                                if payload.table_id != 1 {
                                     continue;
                                 }
-                                let entry: vledger_ledger::JournalEntry = match
-                                    bincode::serde::decode_from_slice(
+                                if !matches!(
+                                    payload.mutation,
+                                    vledger_wal::record::MutationKind::Insert
+                                        | vledger_wal::record::MutationKind::Update
+                                ) {
+                                    continue;
+                                }
+                                let entry: vledger_ledger::JournalEntry =
+                                    match bincode::serde::decode_from_slice(
                                         &payload.row_data,
                                         bincode::config::standard(),
                                     ) {
-                                    Ok((e, _)) => e,
-                                    Err(e) => {
-                                        chain_broken = true;
-                                        chain_break_msg = format!("decode error: {e}");
-                                        break 'scan;
-                                    }
-                                };
+                                        Ok((e, _)) => e,
+                                        Err(e) => {
+                                            chain_broken = true;
+                                            chain_break_msg = format!("decode error: {e}");
+                                            break 'scan;
+                                        }
+                                    };
                                 if !entry.verify_hashes() {
                                     chain_broken = true;
-                                    chain_break_msg = format!(
-                                        "hash mismatch at sequence {}", entry.sequence
-                                    );
+                                    chain_break_msg =
+                                        format!("hash mismatch at sequence {}", entry.sequence);
                                     break 'scan;
                                 }
                                 if entry.prev_hash != prev_chain_hash {
                                     chain_broken = true;
                                     chain_break_msg = format!(
-                                        "chain linkage broken at sequence {}", entry.sequence
+                                        "chain linkage broken at sequence {}",
+                                        entry.sequence
                                     );
                                     break 'scan;
                                 }
@@ -1640,7 +1676,11 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
         } else if torn_write && entry_count == 0 {
             println!("⚠  TORN WRITE (no committed entries found)");
         } else {
-            let torn_note = if torn_write { " ⚠ torn write detected" } else { "" };
+            let torn_note = if torn_write {
+                " ⚠ torn write detected"
+            } else {
+                ""
+            };
             println!(
                 "✓ ({committed_txns} txns, {entry_count} entries, tip={}){torn_note}",
                 hex::encode(&chain_tip[..8])
@@ -1734,23 +1774,29 @@ async fn cmd_sql(
         );
         println!();
 
-        let mut rl = rustyline::DefaultEditor::new()
-            .context("Failed to initialize line editor")?;
+        let mut rl = rustyline::DefaultEditor::new().context("Failed to initialize line editor")?;
         loop {
             let prompt = "vledger> ";
             match rl.readline(prompt) {
                 Ok(line) => {
                     let trimmed = line.trim().to_string();
-                    if trimmed.is_empty() { continue; }
+                    if trimmed.is_empty() {
+                        continue;
+                    }
                     let _ = rl.add_history_entry(&trimmed);
-                    if trimmed == "exit" || trimmed == "\\q" { break; }
+                    if trimmed == "exit" || trimmed == "\\q" {
+                        break;
+                    }
                     if let Err(e) = run_sql_authenticated(&mut ledger, &trimmed, &session) {
                         eprintln!("Error: {e}");
                     }
                 }
                 Err(rustyline::error::ReadlineError::Eof)
                 | Err(rustyline::error::ReadlineError::Interrupted) => break,
-                Err(e) => { eprintln!("Input error: {e}"); break; }
+                Err(e) => {
+                    eprintln!("Input error: {e}");
+                    break;
+                }
             }
         }
     }
@@ -2006,8 +2052,7 @@ async fn cmd_sql_network(
         println!("  Type 'exit' or Ctrl-D to quit. Use \\x to toggle expanded display.");
         println!();
 
-        let mut rl = rustyline::DefaultEditor::new()
-            .context("Failed to initialize line editor")?;
+        let mut rl = rustyline::DefaultEditor::new().context("Failed to initialize line editor")?;
         loop {
             let prompt = if expanded {
                 "vledger (expanded)> "
@@ -2017,9 +2062,13 @@ async fn cmd_sql_network(
             match rl.readline(prompt) {
                 Ok(line) => {
                     let trimmed = line.trim().to_string();
-                    if trimmed.is_empty() { continue; }
+                    if trimmed.is_empty() {
+                        continue;
+                    }
                     let _ = rl.add_history_entry(&trimmed);
-                    if trimmed == "exit" || trimmed == "\\q" { break; }
+                    if trimmed == "exit" || trimmed == "\\q" {
+                        break;
+                    }
 
                     // Handle REPL meta-commands (no server round-trip needed).
                     if trimmed == "\\x" {
@@ -2068,7 +2117,10 @@ async fn cmd_sql_network(
                 }
                 Err(rustyline::error::ReadlineError::Eof)
                 | Err(rustyline::error::ReadlineError::Interrupted) => break,
-                Err(e) => { eprintln!("Input error: {e}"); break; }
+                Err(e) => {
+                    eprintln!("Input error: {e}");
+                    break;
+                }
             }
         }
     }
@@ -4080,7 +4132,6 @@ async fn cmd_verify_audit_package(file: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-
 // ── reconcile ─────────────────────────────────────────────────────────────────
 
 async fn cmd_reconcile(
@@ -4092,8 +4143,7 @@ async fn cmd_reconcile(
         anyhow::bail!("Not initialised at: {}", data_dir.display());
     }
 
-    let ledger = vledger_ledger::LedgerStore::open(data_dir)
-        .context("Failed to open ledger")?;
+    let ledger = vledger_ledger::LedgerStore::open(data_dir).context("Failed to open ledger")?;
 
     let discrepancies = ledger.reconcile();
 
@@ -4140,8 +4190,11 @@ async fn cmd_reconcile(
     }
 
     if !discrepancies.is_empty() {
-        anyhow::bail!("{} reconciliation discrepanc{} found", discrepancies.len(),
-            if discrepancies.len() == 1 { "y" } else { "ies" });
+        anyhow::bail!(
+            "{} reconciliation discrepanc{} found",
+            discrepancies.len(),
+            if discrepancies.len() == 1 { "y" } else { "ies" }
+        );
     }
     Ok(())
 }
@@ -4161,19 +4214,20 @@ async fn cmd_settle(
     let entry_id = uuid::Uuid::parse_str(entry_id_str)
         .with_context(|| format!("Invalid entry UUID: {entry_id_str}"))?;
 
-    let mut ledger = vledger_ledger::LedgerStore::open(data_dir)
-        .context("Failed to open ledger")?;
+    let mut ledger =
+        vledger_ledger::LedgerStore::open(data_dir).context("Failed to open ledger")?;
 
     match status_str.to_lowercase().as_str() {
-        "pending" => ledger.mark_pending(entry_id, notes)
+        "pending" => ledger
+            .mark_pending(entry_id, notes)
             .context("Failed to mark entry as pending")?,
-        "settled" => ledger.mark_settled(entry_id, notes)
+        "settled" => ledger
+            .mark_settled(entry_id, notes)
             .context("Failed to mark entry as settled")?,
-        "failed" => ledger.mark_failed(entry_id, notes)
+        "failed" => ledger
+            .mark_failed(entry_id, notes)
             .context("Failed to mark entry as failed")?,
-        other => anyhow::bail!(
-            "Unknown status '{other}'. Valid values: pending, settled, failed"
-        ),
+        other => anyhow::bail!("Unknown status '{other}'. Valid values: pending, settled, failed"),
     }
 
     let effective = ledger.effective_status(&entry_id);
@@ -4263,12 +4317,20 @@ async fn cmd_retention(data_dir: &PathBuf, action: RetentionAction) -> Result<()
             match domain {
                 Some(d) => {
                     policy.domain_overrides.insert(d.clone(), days);
-                    let desc = if days == 0 { "keep forever".to_string() } else { format!("{days} days") };
+                    let desc = if days == 0 {
+                        "keep forever".to_string()
+                    } else {
+                        format!("{days} days")
+                    };
                     println!("  Set retention for domain '{d}': {desc}");
                 }
                 None => {
                     policy.default_days = days;
-                    let desc = if days == 0 { "keep forever".to_string() } else { format!("{days} days") };
+                    let desc = if days == 0 {
+                        "keep forever".to_string()
+                    } else {
+                        format!("{days} days")
+                    };
                     println!("  Set default retention: {desc}");
                 }
             }
@@ -4291,13 +4353,14 @@ async fn cmd_hold(data_dir: &PathBuf, action: HoldAction) -> Result<()> {
         anyhow::bail!("Not initialised at: {}", data_dir.display());
     }
 
-    let mut ledger = vledger_ledger::LedgerStore::open(data_dir)
-        .context("Failed to open ledger")?;
+    let mut ledger =
+        vledger_ledger::LedgerStore::open(data_dir).context("Failed to open ledger")?;
 
     match action {
         HoldAction::Place { account } => {
             let id = resolve_account_id(&ledger, &account)?;
-            ledger.place_legal_hold(&id)
+            ledger
+                .place_legal_hold(&id)
                 .context("Failed to place legal hold")?;
             println!("── Legal Hold Placed ────────────────────────────");
             println!("  Account : {account} ({id})");
@@ -4306,7 +4369,8 @@ async fn cmd_hold(data_dir: &PathBuf, action: HoldAction) -> Result<()> {
         }
         HoldAction::Lift { account } => {
             let id = resolve_account_id(&ledger, &account)?;
-            ledger.lift_legal_hold(&id)
+            ledger
+                .lift_legal_hold(&id)
                 .context("Failed to lift legal hold")?;
             println!("── Legal Hold Lifted ────────────────────────────");
             println!("  Account : {account} ({id})");
@@ -4406,7 +4470,11 @@ async fn cmd_rules(data_dir: &PathBuf, action: RulesAction) -> Result<()> {
             }
             println!("──────────────────────────────────────────────────");
         }
-        RulesAction::Set { version, description, effective_date } => {
+        RulesAction::Set {
+            version,
+            description,
+            effective_date,
+        } => {
             let mut rules = AccountingRules::load(data_dir)?;
             let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
             let entry = AccountingRuleVersion {
@@ -4436,8 +4504,11 @@ async fn cmd_rules(data_dir: &PathBuf, action: RulesAction) -> Result<()> {
                         ""
                     };
                     println!(
-                        "  [{}] {} — {}{}", i + 1, entry.version,
-                        entry.effective_date, marker
+                        "  [{}] {} — {}{}",
+                        i + 1,
+                        entry.version,
+                        entry.effective_date,
+                        marker
                     );
                     println!("       {}", entry.description);
                     println!("       recorded: {}", entry.recorded_at);
@@ -4449,7 +4520,6 @@ async fn cmd_rules(data_dir: &PathBuf, action: RulesAction) -> Result<()> {
     Ok(())
 }
 
-
 // ── seed ──────────────────────────────────────────────────────────────────────
 
 async fn cmd_seed(
@@ -4460,16 +4530,18 @@ async fn cmd_seed(
     progress_interval: u64,
 ) -> Result<()> {
     if !data_dir.exists() {
-        anyhow::bail!(
-            "Data directory not found — run `vledger init` first."
-        );
+        anyhow::bail!("Data directory not found — run `vledger init` first.");
     }
 
     // ── Simple deterministic PRNG (xorshift64) ────────────────────────────
-    struct Rng { x: u64 }
+    struct Rng {
+        x: u64,
+    }
     impl Rng {
         fn new(seed: u64) -> Self {
-            Self { x: if seed == 0 { 0xdeadbeef_cafebabe } else { seed } }
+            Self {
+                x: if seed == 0 { 0xdeadbeef_cafebabe } else { seed },
+            }
         }
         fn next(&mut self) -> u64 {
             self.x ^= self.x << 13;
@@ -4498,19 +4570,19 @@ async fn cmd_seed(
     println!("  Data dir : {}", data_dir.display());
     println!("─────────────────────────────────────────────────");
 
-    let mut ledger = vledger_ledger::LedgerStore::open(data_dir)
-        .context("Failed to open ledger")?;
+    let mut ledger =
+        vledger_ledger::LedgerStore::open(data_dir).context("Failed to open ledger")?;
 
     // ── Account types, currencies, and description templates ─────────────
     let account_types = [
-        (vledger_ledger::AccountType::Asset,     "ASSET"),
+        (vledger_ledger::AccountType::Asset, "ASSET"),
         (vledger_ledger::AccountType::Liability, "LIAB"),
-        (vledger_ledger::AccountType::Income,    "INC"),
-        (vledger_ledger::AccountType::Expense,   "EXP"),
-        (vledger_ledger::AccountType::Equity,    "EQ"),
+        (vledger_ledger::AccountType::Income, "INC"),
+        (vledger_ledger::AccountType::Expense, "EXP"),
+        (vledger_ledger::AccountType::Equity, "EQ"),
     ];
     let currencies = ["USD", "EUR", "GBP", "USD", "USD"]; // weighted toward USD
-    let domains    = ["main", "main", "main", "fx", "ops"];
+    let domains = ["main", "main", "main", "fx", "ops"];
     let descriptions = [
         "Customer payment",
         "Vendor invoice",
@@ -4540,9 +4612,9 @@ async fn cmd_seed(
         let to_create = need - account_ids.len();
         eprint!("  Creating {} accounts...", to_create);
         for i in 0..to_create {
-            let type_idx  = rng.range(0, account_types.len() as u64) as usize;
-            let curr_idx  = rng.range(0, currencies.len() as u64)    as usize;
-            let dom_idx   = rng.range(0, domains.len() as u64)        as usize;
+            let type_idx = rng.range(0, account_types.len() as u64) as usize;
+            let curr_idx = rng.range(0, currencies.len() as u64) as usize;
+            let dom_idx = rng.range(0, domains.len() as u64) as usize;
             let (atype, prefix) = &account_types[type_idx];
             let code = format!("{prefix}-{:04}", account_ids.len() + i + 1);
             let name = format!("{} Account #{}", prefix, account_ids.len() + i + 1);
@@ -4602,19 +4674,21 @@ async fn cmd_seed(
         let (currency, pool) = &viable[rng.range(0, viable.len() as u64) as usize];
         let a = rng.range(0, pool.len() as u64) as usize;
         let mut b = rng.range(0, (pool.len() - 1) as u64) as usize;
-        if b >= a { b += 1; }
-        let debit_id  = account_ids[pool[a]];
+        if b >= a {
+            b += 1;
+        }
+        let debit_id = account_ids[pool[a]];
         let credit_id = account_ids[pool[b]];
 
         // Random amount: $1.00 – $99,999.99 in cents (100 – 9_999_999)
         let amount_minor = rng.range(100, 9_999_999);
         let amount = match vledger_ledger::Amount::new(amount_minor as i64) {
             Some(a) => a,
-            None    => continue,
+            None => continue,
         };
 
-        let desc_idx  = rng.range(0, descriptions.len() as u64) as usize;
-        let dom_idx   = rng.range(0, domains.len() as u64)       as usize;
+        let desc_idx = rng.range(0, descriptions.len() as u64) as usize;
+        let dom_idx = rng.range(0, domains.len() as u64) as usize;
         let description = format!("{} #{}", descriptions[desc_idx], i + 1);
 
         let entry = vledger_ledger::JournalEntryBuilder::new(&description, domains[dom_idx])
@@ -4623,7 +4697,7 @@ async fn cmd_seed(
             .build();
 
         match ledger.post_entry(entry) {
-            Ok(_)  => posted += 1,
+            Ok(_) => posted += 1,
             Err(_) => {
                 errors += 1;
                 // Currency mismatch or non-negative balance violation —
@@ -4664,7 +4738,6 @@ async fn cmd_seed(
 
     Ok(())
 }
-
 
 // ── import ────────────────────────────────────────────────────────────────────
 
@@ -4792,9 +4865,8 @@ async fn cmd_import(
         if mf.exists() {
             let raw = std::fs::read_to_string(mf)
                 .with_context(|| format!("Cannot read mapping file: {}", mf.display()))?;
-            let parsed: std::collections::HashMap<String, String> =
-                serde_json::from_str(&raw)
-                    .with_context(|| "Mapping file must be a JSON object: {\"src\": \"target\"}")?;
+            let parsed: std::collections::HashMap<String, String> = serde_json::from_str(&raw)
+                .with_context(|| "Mapping file must be a JSON object: {\"src\": \"target\"}")?;
             col_map.extend(parsed);
         }
     }
@@ -4817,7 +4889,9 @@ async fn cmd_import(
         let mut buf = [0u8; 65_536];
         loop {
             let n = reader.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher.update(&buf[..n]);
         }
         hex::encode(hasher.finalize().as_bytes())
@@ -4851,12 +4925,23 @@ async fn cmd_import(
     println!("  File       : {}", file.display());
     println!("  Format     : {}", fmt.to_uppercase());
     println!("  Rows       : {total_rows}");
-    println!("  Dry run    : {}", if dry_run { "YES — no data will be written" } else { "no" });
+    println!(
+        "  Dry run    : {}",
+        if dry_run {
+            "YES — no data will be written"
+        } else {
+            "no"
+        }
+    );
     if !col_map.is_empty() {
         println!("  Mappings   : {}", col_map.len());
     }
     println!("  On error   : {on_error}");
-    println!("  Source SHA : {}...{}", &source_sha256[..8], &source_sha256[56..]);
+    println!(
+        "  Source SHA : {}...{}",
+        &source_sha256[..8],
+        &source_sha256[56..]
+    );
     println!("──────────────────────────────────────────────────");
 
     // ── Load checkpoint state for resume ─────────────────────────────────
@@ -4882,12 +4967,18 @@ async fn cmd_import(
 
     // ── Open ledger in import mode (constant memory) ─────────────────────
     let sync_mode: vledger_wal::WalSyncMode = wal_sync_mode.parse().unwrap_or_else(|_| {
-        eprintln!("  ⚠  Unknown --wal-sync-mode '{}', defaulting to group_commit", wal_sync_mode);
+        eprintln!(
+            "  ⚠  Unknown --wal-sync-mode '{}', defaulting to group_commit",
+            wal_sync_mode
+        );
         vledger_wal::WalSyncMode::GroupCommit
     });
     if sync_mode == vledger_wal::WalSyncMode::NoSync {
         eprintln!("  ⚠  --wal-sync-mode=no_sync: fsync disabled for this import.");
-        eprintln!("     Run `vledger verify --data-dir {}` after completion.", data_dir.display());
+        eprintln!(
+            "     Run `vledger verify --data-dir {}` after completion.",
+            data_dir.display()
+        );
     }
     // open_for_import replays WAL without loading entries into RAM.
     // Memory stays flat at O(accounts) regardless of entry count.
@@ -4895,29 +4986,32 @@ async fn cmd_import(
         .context("Failed to open ledger. Is vledger start running? Stop it first.")?;
 
     // Build account lookup: code → AccountId
-    let mut account_lookup: std::collections::HashMap<String, vledger_ledger::AccountId> =
-        ledger.all_accounts().map(|a| (a.code.clone(), a.id)).collect();
+    let mut account_lookup: std::collections::HashMap<String, vledger_ledger::AccountId> = ledger
+        .all_accounts()
+        .map(|a| (a.code.clone(), a.id))
+        .collect();
 
     // ── Helper: open a streaming CSV reader ───────────────────────────────
     // Returns (headers, reader) — each call opens a fresh file handle so
     // the same file can be streamed twice (once for dry-run, once for import)
     // without holding both in memory simultaneously.
-    let open_csv = || -> anyhow::Result<(Vec<String>, csv::Reader<std::io::BufReader<std::fs::File>>)> {
-        let f = std::fs::File::open(file)
-            .with_context(|| format!("Cannot open import file: {}", file.display()))?;
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .flexible(true)
-            .trim(csv::Trim::All)
-            .from_reader(std::io::BufReader::with_capacity(65_536, f));
-        let headers: Vec<String> = reader
-            .headers()
-            .context("Failed to read CSV headers")?
-            .iter()
-            .map(|h| h.to_string())
-            .collect();
-        Ok((headers, reader))
-    };
+    let open_csv =
+        || -> anyhow::Result<(Vec<String>, csv::Reader<std::io::BufReader<std::fs::File>>)> {
+            let f = std::fs::File::open(file)
+                .with_context(|| format!("Cannot open import file: {}", file.display()))?;
+            let mut reader = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .flexible(true)
+                .trim(csv::Trim::All)
+                .from_reader(std::io::BufReader::with_capacity(65_536, f));
+            let headers: Vec<String> = reader
+                .headers()
+                .context("Failed to read CSV headers")?
+                .iter()
+                .map(|h| h.to_string())
+                .collect();
+            Ok((headers, reader))
+        };
 
     // ── Validation / dry-run pass (streaming) ─────────────────────────────
     if dry_run || on_error == "collect" {
@@ -4925,12 +5019,19 @@ async fn cmd_import(
         println!("  Validating rows...");
 
         let (headers, mut reader) = open_csv()?;
-        let resolved: std::collections::HashMap<String, String> = headers.iter()
-            .map(|h| (h.clone(), col_map.get(h).cloned().unwrap_or_else(|| h.clone())))
+        let resolved: std::collections::HashMap<String, String> = headers
+            .iter()
+            .map(|h| {
+                (
+                    h.clone(),
+                    col_map.get(h).cloned().unwrap_or_else(|| h.clone()),
+                )
+            })
             .collect();
 
         let mut validation_errors: Vec<(u64, String)> = Vec::new();
-        let mut currencies_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut currencies_seen: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut accounts_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut row_num = 0u64;
 
@@ -4962,7 +5063,8 @@ async fn cmd_import(
         }
 
         let valid = row_num.saturating_sub(validation_errors.len() as u64);
-        let accounts_missing: Vec<_> = accounts_seen.iter()
+        let accounts_missing: Vec<_> = accounts_seen
+            .iter()
             .filter(|c| !account_lookup.contains_key(*c))
             .collect();
 
@@ -4973,7 +5075,14 @@ async fn cmd_import(
         println!("  Invalid           : {}", validation_errors.len());
         println!("  Accounts detected : {}", accounts_seen.len());
         println!("  Accounts missing  : {}", accounts_missing.len());
-        println!("  Currencies        : {}", currencies_seen.iter().cloned().collect::<Vec<_>>().join(", "));
+        println!(
+            "  Currencies        : {}",
+            currencies_seen
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
         if !validation_errors.is_empty() {
             println!();
@@ -4988,7 +5097,9 @@ async fn cmd_import(
         if !accounts_missing.is_empty() && !create_accounts {
             println!();
             println!("  Missing accounts (use --create-accounts to create them):");
-            for a in accounts_missing.iter().take(10) { println!("    {a}"); }
+            for a in accounts_missing.iter().take(10) {
+                println!("    {a}");
+            }
         }
         println!("──────────────────────────────────────────────────");
 
@@ -4997,7 +5108,10 @@ async fn cmd_import(
                 println!("\n  ✓  Dry run complete — no errors found.");
                 println!("     Run without --dry-run to import.");
             } else {
-                println!("\n  ✗  Dry run found {} error(s). Fix them before importing.", validation_errors.len());
+                println!(
+                    "\n  ✗  Dry run found {} error(s). Fix them before importing.",
+                    validation_errors.len()
+                );
             }
             println!();
             return Ok(());
@@ -5022,8 +5136,14 @@ async fn cmd_import(
     let mut row_num = 0u64;
 
     let (headers, mut reader) = open_csv()?;
-    let resolved: std::collections::HashMap<String, String> = headers.iter()
-        .map(|h| (h.clone(), col_map.get(h).cloned().unwrap_or_else(|| h.clone())))
+    let resolved: std::collections::HashMap<String, String> = headers
+        .iter()
+        .map(|h| {
+            (
+                h.clone(),
+                col_map.get(h).cloned().unwrap_or_else(|| h.clone()),
+            )
+        })
         .collect();
 
     for result in reader.records() {
@@ -5074,7 +5194,8 @@ async fn cmd_import(
         // Build idempotency key.
         let idem_key = if let Some(ref id_col) = id_column {
             // Use the row's id_column value if present — stored in external_ref as fallback.
-            row.idempotency_key.clone()
+            row.idempotency_key
+                .clone()
                 .or_else(|| row.external_ref.clone())
                 .unwrap_or_else(|| {
                     let raw = format!("{}:row:{}", id_col, row_num);
@@ -5082,7 +5203,8 @@ async fn cmd_import(
                 })
         } else {
             // Auto: BLAKE3 of full raw row content.
-            let key = format!("import:{}:{}",
+            let key = format!(
+                "import:{}:{}",
                 &source_sha256[..16],
                 hex::encode(blake3::hash(row.raw.as_bytes()).as_bytes())
             );
@@ -5091,8 +5213,12 @@ async fn cmd_import(
 
         // Resolve or create accounts.
         let debit_id = match resolve_or_create_account(
-            &mut ledger, &mut account_lookup,
-            &row.debit_account, &row.currency, &row.domain, create_accounts,
+            &mut ledger,
+            &mut account_lookup,
+            &row.debit_account,
+            &row.currency,
+            &row.domain,
+            create_accounts,
         ) {
             Ok(id) => id,
             Err(e) => {
@@ -5108,8 +5234,12 @@ async fn cmd_import(
         };
 
         let credit_id = match resolve_or_create_account(
-            &mut ledger, &mut account_lookup,
-            &row.credit_account, &row.currency, &row.domain, create_accounts,
+            &mut ledger,
+            &mut account_lookup,
+            &row.credit_account,
+            &row.currency,
+            &row.domain,
+            create_accounts,
         ) {
             Ok(id) => id,
             Err(e) => {
@@ -5145,8 +5275,14 @@ async fn cmd_import(
                 Err(_) => {
                     // Try YYYY-MM-DD
                     match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                        Ok(d) => d.and_hms_opt(0, 0, 0)
-                            .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc))
+                        Ok(d) => d
+                            .and_hms_opt(0, 0, 0)
+                            .map(|dt| {
+                                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                                    dt,
+                                    chrono::Utc,
+                                )
+                            })
                             .unwrap_or_else(chrono::Utc::now),
                         Err(_) => chrono::Utc::now(),
                     }
@@ -5156,14 +5292,11 @@ async fn cmd_import(
             chrono::Utc::now()
         };
 
-        let mut builder = vledger_ledger::JournalEntryBuilder::new(
-            &row.description,
-            &row.domain,
-        )
-        .debit(debit_id, amount, &row.currency)
-        .credit(credit_id, amount, &row.currency)
-        .effective_at(effective_at)
-        .idempotency_key(&idem_key);
+        let mut builder = vledger_ledger::JournalEntryBuilder::new(&row.description, &row.domain)
+            .debit(debit_id, amount, &row.currency)
+            .credit(credit_id, amount, &row.currency)
+            .effective_at(effective_at)
+            .idempotency_key(&idem_key);
 
         if let Some(ref ext) = row.external_ref {
             if !ext.is_empty() {
@@ -5196,7 +5329,9 @@ async fn cmd_import(
                 state.rows_already_existed += 1;
             }
             Ok(seq) => {
-                if first_sequence.is_none() { first_sequence = Some(seq); }
+                if first_sequence.is_none() {
+                    first_sequence = Some(seq);
+                }
                 last_sequence = Some(seq);
                 state.rows_imported += 1;
             }
@@ -5224,9 +5359,12 @@ async fn cmd_import(
             let tps = state.rows_imported as f64 / elapsed;
             println!(
                 "  {}/{} rows  |  imported: {}  existed: {}  skipped: {}  ({:.0} TPS)",
-                row_num, total_rows,
-                state.rows_imported, state.rows_already_existed,
-                state.rows_skipped, tps
+                row_num,
+                total_rows,
+                state.rows_imported,
+                state.rows_already_existed,
+                state.rows_skipped,
+                tps
             );
         }
 
@@ -5273,10 +5411,7 @@ async fn cmd_import(
         domain: domain.to_string(),
         on_error: on_error.to_string(),
     };
-    std::fs::write(
-        manifest_path,
-        serde_json::to_string_pretty(&manifest)?,
-    )?;
+    std::fs::write(manifest_path, serde_json::to_string_pretty(&manifest)?)?;
 
     // Clean up state file on successful completion.
     if rows_failed == 0 && state_file.exists() {
@@ -5286,7 +5421,11 @@ async fn cmd_import(
     println!();
     println!("── Import Complete ───────────────────────────────");
     println!("  Source file       : {}", file.display());
-    println!("  Source SHA-256    : {}...{}", &source_sha256[..8], &source_sha256[56..]);
+    println!(
+        "  Source SHA-256    : {}...{}",
+        &source_sha256[..8],
+        &source_sha256[56..]
+    );
     println!("  Import ID         : {import_id}");
     println!();
     println!("  Rows processed    : {}", state.rows_processed);
@@ -5301,10 +5440,18 @@ async fn cmd_import(
         println!("  First sequence    : {first}");
         println!("  Last sequence     : {last}");
     }
-    println!("  Chain tip         : {}...{}", &chain_tip[..16], &chain_tip[48..]);
+    println!(
+        "  Chain tip         : {}...{}",
+        &chain_tip[..16],
+        &chain_tip[48..]
+    );
     println!("  Total entries     : {entry_count}");
     println!();
-    println!("  Elapsed           : {:.2}s  ({:.0} TPS)", elapsed.as_secs_f64(), tps);
+    println!(
+        "  Elapsed           : {:.2}s  ({:.0} TPS)",
+        elapsed.as_secs_f64(),
+        tps
+    );
     println!("  Manifest          : {}", manifest_path.display());
     println!("──────────────────────────────────────────────────");
 
@@ -5342,7 +5489,10 @@ fn validate_import_row(
         anyhow::bail!("debit account '{}' not found in ledger", row.debit_account);
     }
     if !account_lookup.contains_key(&row.credit_account) {
-        anyhow::bail!("credit account '{}' not found in ledger", row.credit_account);
+        anyhow::bail!(
+            "credit account '{}' not found in ledger",
+            row.credit_account
+        );
     }
     Ok(())
 }
@@ -5360,7 +5510,10 @@ fn resolve_or_create_account(
         return Ok(id);
     }
     if !create {
-        anyhow::bail!("account '{}' not found. Use --create-accounts to create it.", code);
+        anyhow::bail!(
+            "account '{}' not found. Use --create-accounts to create it.",
+            code
+        );
     }
     // Auto-create as Suspense type with no balance constraints.
     // Suspense accounts have no normal-balance direction and do not enforce
@@ -5375,7 +5528,8 @@ fn resolve_or_create_account(
         domain,
     );
     acct.require_non_negative_balance = false;
-    let id = ledger.create_account(acct)
+    let id = ledger
+        .create_account(acct)
         .with_context(|| format!("Failed to create account '{code}'"))?;
     lookup.insert(code.to_string(), id);
     Ok(id)
@@ -5417,15 +5571,20 @@ fn parse_csv_rows(
         // raw_fields: original source column names → values (before mapping)
         let mut raw_fields: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        let mut map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for (i, h) in headers.iter().enumerate() {
             let val = record.get(i).unwrap_or("").to_string();
             raw_fields.insert(h.clone(), val.clone());
             let target = resolved.get(h).cloned().unwrap_or_else(|| h.clone());
             map.insert(target, val);
         }
-        rows.push(row_from_map(map, &raw, raw_fields, default_domain, default_currency)?);
+        rows.push(row_from_map(
+            map,
+            &raw,
+            raw_fields,
+            default_domain,
+            default_currency,
+        )?);
     }
     Ok(rows)
 }
@@ -5446,8 +5605,7 @@ fn parse_json_rows(
         let raw = serde_json::to_string(&record).unwrap_or_default();
         let mut raw_fields: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        let mut map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for (k, v) in record {
             let val = match &v {
                 serde_json::Value::String(s) => s.clone(),
@@ -5460,7 +5618,13 @@ fn parse_json_rows(
             let target = col_map.get(&k).cloned().unwrap_or(k);
             map.insert(target, val);
         }
-        rows.push(row_from_map(map, &raw, raw_fields, default_domain, default_currency)?);
+        rows.push(row_from_map(
+            map,
+            &raw,
+            raw_fields,
+            default_domain,
+            default_currency,
+        )?);
     }
     Ok(rows)
 }
@@ -5476,12 +5640,17 @@ fn row_from_map(
     let get = |key: &str| map.get(key).cloned().unwrap_or_default();
 
     let amount_str = get("amount");
-    let amount: i64 = amount_str.trim().parse::<i64>()
+    let amount: i64 = amount_str
+        .trim()
+        .parse::<i64>()
         .or_else(|_| {
             // Parse as decimal and convert to minor units (multiply by 100).
             // $915.87 → 91587 cents. This preserves cents-level precision
             // rather than rounding to the nearest whole dollar.
-            amount_str.trim().parse::<f64>().map(|f| (f * 100.0).round() as i64)
+            amount_str
+                .trim()
+                .parse::<f64>()
+                .map(|f| (f * 100.0).round() as i64)
         })
         .with_context(|| format!("Cannot parse amount '{}' as integer or decimal", amount_str))?;
 
@@ -5492,15 +5661,44 @@ fn row_from_map(
         amount,
         currency: {
             let c = get("currency");
-            if c.is_empty() { default_currency.to_string() } else { c.to_uppercase() }
+            if c.is_empty() {
+                default_currency.to_string()
+            } else {
+                c.to_uppercase()
+            }
         },
         domain: {
             let d = get("domain");
-            if d.is_empty() { default_domain.to_string() } else { d }
+            if d.is_empty() {
+                default_domain.to_string()
+            } else {
+                d
+            }
         },
-        external_ref: { let v = get("external_ref"); if v.is_empty() { None } else { Some(v) } },
-        idempotency_key: { let v = get("idempotency_key"); if v.is_empty() { None } else { Some(v) } },
-        effective_date: { let v = get("effective_date"); if v.is_empty() { None } else { Some(v) } },
+        external_ref: {
+            let v = get("external_ref");
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        },
+        idempotency_key: {
+            let v = get("idempotency_key");
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        },
+        effective_date: {
+            let v = get("effective_date");
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        },
         raw: raw.to_string(),
         raw_fields,
     })

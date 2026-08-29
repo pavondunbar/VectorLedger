@@ -50,6 +50,7 @@ fn read_exact_vec<R: Read>(reader: &mut R, n: usize) -> Result<Vec<u8>, WalError
 
 /// Read up to `n` bytes, returning however many were actually available.
 /// Used to peek at the magic without consuming the full header.
+#[allow(dead_code)]
 fn peek_bytes<R: Read>(reader: &mut R, n: usize) -> Result<Vec<u8>, WalError> {
     let mut buf = vec![0u8; n];
     let mut read = 0;
@@ -177,7 +178,7 @@ impl SegmentReader {
             // Parse the plaintext record normally
             let blob_size = blob.len();
             self.byte_offset += blob_size as u64;
-            return self.parse_plaintext_record(&plaintext);
+            self.parse_plaintext_record(&plaintext)
         } else {
             // ── Plaintext path (magic == WAL_MAGIC or zero padding) ───────
             if magic != WAL_MAGIC {
@@ -259,11 +260,11 @@ impl SegmentReader {
                 "WAL plaintext record read"
             );
 
-            return Some(Ok(WalRecord {
+            Some(Ok(WalRecord {
                 header,
                 payload,
                 crc32: stored_crc,
-            }));
+            }))
         }
     }
 

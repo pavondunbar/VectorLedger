@@ -35,7 +35,7 @@ pub fn merkle_root(items: &[impl AsRef<[u8]>]) -> Hash {
 
 /// Compute one level up in the Merkle tree.
 fn next_layer(layer: &[Hash]) -> Vec<Hash> {
-    let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+    let mut next = Vec::with_capacity(layer.len().div_ceil(2));
     let mut i = 0;
     while i < layer.len() {
         let left = &layer[i];
@@ -109,7 +109,7 @@ pub fn merkle_proof(items: &[impl AsRef<[u8]>], leaf_index: usize) -> Option<Mer
     let mut index = leaf_index;
 
     while layer.len() > 1 {
-        let sibling_index = if index % 2 == 0 {
+        let sibling_index = if index.is_multiple_of(2) {
             // Current is left child; sibling is to the right (or duplicate)
             (index + 1).min(layer.len() - 1)
         } else {
@@ -167,7 +167,7 @@ mod tests {
             let proof = merkle_proof(&items, i).unwrap();
             proof
                 .verify()
-                .expect(&format!("proof failed for index {i}"));
+                .unwrap_or_else(|e| panic!("proof failed for index {i}: {e}"));
         }
     }
 

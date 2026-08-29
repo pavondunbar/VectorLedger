@@ -129,7 +129,6 @@ fn reencrypt_segment(
     // Read all records from the current segment.
     let mut reader = SegmentReader::open(seg_path, seg_idx, old_master_key.copied())?;
     let mut records: Vec<(Vec<u8>, bool)> = Vec::new(); // (plaintext_bytes, was_encrypted)
-    let mut any_encrypted = false;
 
     loop {
         match reader.next_record() {
@@ -157,7 +156,6 @@ fn reencrypt_segment(
                 plaintext.extend_from_slice(&record.payload);
                 plaintext.extend_from_slice(&record.crc32.to_le_bytes());
                 records.push((plaintext, true)); // was_encrypted is set below
-                any_encrypted = true;
             }
         }
     }
@@ -237,7 +235,7 @@ mod tests {
 
         // Recovery must succeed with the new key.
         let recovery = crate::recovery::recover_verified(dir.path(), Some(new_key)).unwrap();
-        assert!(recovery.committed.len() == 0); // all were Begin records, no Commits
+        assert!(recovery.committed.is_empty()); // all were Begin records, no Commits
     }
 
     #[test]

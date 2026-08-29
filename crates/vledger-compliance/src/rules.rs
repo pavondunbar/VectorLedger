@@ -37,6 +37,7 @@ fn evaluate_soc2(
     data_dir: &Path,
     _range: &ReportDateRange,
 ) -> Result<Vec<Evidence>, ComplianceError> {
+    #[allow(clippy::vec_init_then_push)]
     let mut evidence = Vec::new();
 
     // CC6.1 — Logical and physical access controls
@@ -84,6 +85,7 @@ fn evaluate_pci_dss(
     data_dir: &Path,
     _range: &ReportDateRange,
 ) -> Result<Vec<Evidence>, ComplianceError> {
+    #[allow(clippy::vec_init_then_push)]
     let mut evidence = Vec::new();
 
     // Req 2.2 — System configuration standards
@@ -156,7 +158,7 @@ fn check_audit_log_exists(data_dir: &Path, control: &str, description: &str) -> 
         Evidence::pass(
             control,
             "Audit trail present",
-            &format!("{description} (audit.log size: {size} bytes)"),
+            format!("{description} (audit.log size: {size} bytes)"),
         )
     } else {
         Evidence::fail(
@@ -266,7 +268,7 @@ fn check_audit_log_chain_integrity(data_dir: &Path) -> Evidence {
             Ok(count) => Evidence::pass(
                 "CC7.2",
                 "Audit log chain integrity",
-                &format!("BLAKE3 hash chain verified over {count} audit events"),
+                format!("BLAKE3 hash chain verified over {count} audit events"),
             ),
             Err(e) => Evidence::fail(
                 "CC7.2",
@@ -285,7 +287,7 @@ fn check_wal_exists(data_dir: &Path, control: &str, description: &str) -> Eviden
         Evidence::pass(
             control,
             "WAL append-only change log",
-            &format!("{description} ({seg_count} WAL segments)"),
+            format!("{description} ({seg_count} WAL segments)"),
         )
     } else {
         Evidence::na(
@@ -302,7 +304,7 @@ fn check_replication_config(data_dir: &Path, control: &str, description: &str) -
         Evidence::pass(
             control,
             "High-availability replication",
-            &format!("{description} (replication.json present)"),
+            format!("{description} (replication.json present)"),
         )
     } else {
         // Missing replication config is a warning for single-node deployments,
@@ -428,7 +430,7 @@ fn check_hsm_config(data_dir: &Path) -> Evidence {
                 return Evidence::warn(
                     "PCI-3.5",
                     "Key management — HSM configuration",
-                    &format!("Unknown key_source backend '{other}'"),
+                    format!("Unknown key_source backend '{other}'"),
                     vec![
                         "Verify that the configured backend provides adequate key protection \
                           for PCI-DSS Req 3.5 compliance."

@@ -60,7 +60,6 @@ pub struct GenerateOptions {
     pub period_end: Option<String>,
 }
 
-
 // ── generate ──────────────────────────────────────────────────────────────────
 
 /// Generate an audit evidence package and write it to `output_path`.
@@ -89,15 +88,19 @@ pub fn generate(
     let mut first_sequence = 0u64;
     let mut last_sequence = 0u64;
     let mut entry_vec: Vec<vledger_ledger::JournalEntry> = Vec::new();
-    ledger.stream_entries(|e| {
-        if first_sequence == 0 { first_sequence = e.sequence; }
-        last_sequence = e.sequence;
-        leaf_bytes.push(e.canonical_bytes());
-        if opts.include_entries {
-            entry_vec.push(e);
-        }
-        Ok(())
-    }).ok();
+    ledger
+        .stream_entries(|e| {
+            if first_sequence == 0 {
+                first_sequence = e.sequence;
+            }
+            last_sequence = e.sequence;
+            leaf_bytes.push(e.canonical_bytes());
+            if opts.include_entries {
+                entry_vec.push(e);
+            }
+            Ok(())
+        })
+        .ok();
 
     let root: [u8; 32] = if leaf_bytes.is_empty() {
         ZERO_HASH
@@ -279,7 +282,8 @@ pub fn prove_entry(
     let ledger = LedgerStore::open(data_dir).context("Failed to open ledger")?;
 
     // Find the entry by sequence number.
-    let entry = ledger.get_entry_by_sequence(sequence)
+    let entry = ledger
+        .get_entry_by_sequence(sequence)
         .ok_or_else(|| anyhow::anyhow!("Entry with sequence={sequence} not found"))?;
 
     // Build leaf bytes for the full tree (needed to compute proof paths).
@@ -287,15 +291,18 @@ pub fn prove_entry(
     eprint!("  Building Merkle tree over {} entries...", total);
     let mut leaf_bytes: Vec<Vec<u8>> = Vec::new();
     let mut entry_idx: Option<usize> = None;
-    ledger.stream_entries(|e| {
-        if e.sequence == sequence {
-            entry_idx = Some(leaf_bytes.len());
-        }
-        leaf_bytes.push(e.canonical_bytes());
-        Ok(())
-    }).ok();
-    let idx = entry_idx
-        .ok_or_else(|| anyhow::anyhow!("Entry with sequence={sequence} not found in SQLite index"))?;
+    ledger
+        .stream_entries(|e| {
+            if e.sequence == sequence {
+                entry_idx = Some(leaf_bytes.len());
+            }
+            leaf_bytes.push(e.canonical_bytes());
+            Ok(())
+        })
+        .ok();
+    let idx = entry_idx.ok_or_else(|| {
+        anyhow::anyhow!("Entry with sequence={sequence} not found in SQLite index")
+    })?;
     let root: [u8; 32] = merkle_root(&leaf_bytes);
     let root_hex = hash_to_hex(&root);
     eprintln!(" done.");

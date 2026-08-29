@@ -24,8 +24,8 @@ use crate::planner::{EntryFilter, LogicalPlan};
 /// original plan.
 pub fn optimize(plan: LogicalPlan) -> LogicalPlan {
     let plan = predicate_pushdown(plan);
-    let plan = constant_fold(plan);
-    plan
+
+    constant_fold(plan)
 }
 
 // ── Pass 1 — Predicate pushdown ───────────────────────────────────────────────

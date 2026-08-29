@@ -49,3 +49,4 @@ VG-PITCH-DECK.md
 
 # Proptest regression files (generated)
 proptest-regressions/
+dist/

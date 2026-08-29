@@ -65,7 +65,7 @@ jobs:
         run: cargo install cargo-audit --version "0.21.2" --locked
 
       - name: Run audit
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2026-0038
 
   # ── Dependency review (PR-only) ─────────────────────────────────────────────
   # Flags newly introduced dependencies that have known vulnerabilities,

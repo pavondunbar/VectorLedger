@@ -352,7 +352,7 @@ async fn handle_connection_starttls(
         _ = shutdown.cancelled() => return Ok(()),
     };
 
-    if len < 8 || len > 65536 {
+    if !(8..=65536).contains(&len) {
         anyhow::bail!("invalid startup packet length {len}");
     }
 
@@ -884,7 +884,7 @@ async fn execute_query(
 
     let result = {
         let mut ledger = ledger.write().await;
-        Executor::new(&mut *ledger).execute(plan)
+        Executor::new(&mut ledger).execute(plan)
     };
 
     match result {

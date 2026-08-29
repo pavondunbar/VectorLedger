@@ -110,11 +110,11 @@ fn recover_with_options(
 
                 match record_type {
                     RecordType::Begin => {
-                        pending.entry(tx_id).or_insert_with(Vec::new);
+                        pending.entry(tx_id).or_default();
                     }
 
                     RecordType::Data => {
-                        pending.entry(tx_id).or_insert_with(Vec::new).push(record);
+                        pending.entry(tx_id).or_default().push(record);
                     }
 
                     RecordType::Commit => {

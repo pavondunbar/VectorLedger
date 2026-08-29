@@ -376,11 +376,7 @@ impl LogicalPlanBuilder {
                         window_fn: wfn,
                         column: col,
                         alias,
-                        partition_by: ws
-                            .partition_by
-                            .iter()
-                            .map(expr_to_col_name)
-                            .collect(),
+                        partition_by: ws.partition_by.iter().map(expr_to_col_name).collect(),
                         order_by: ws
                             .order_by
                             .iter()
@@ -395,9 +391,7 @@ impl LogicalPlanBuilder {
         let agg_exprs = collect_aggregate_exprs(&body.projection);
         if !agg_exprs.is_empty() {
             let group_by = match &body.group_by {
-                GroupByExpr::Expressions(exprs, _) => {
-                    exprs.iter().map(expr_to_col_name).collect()
-                }
+                GroupByExpr::Expressions(exprs, _) => exprs.iter().map(expr_to_col_name).collect(),
                 _ => vec![],
             };
             let scan = base_scan(&primary_table, &body.selection, &q.limit)?;

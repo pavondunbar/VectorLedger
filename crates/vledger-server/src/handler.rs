@@ -258,7 +258,10 @@ pub async fn handle_connection(
                         );
                         send(
                             &mut writer_half,
-                            Response::err("too many authentication failures — reconnect to try again".to_string()),
+                            Response::err(
+                                "too many authentication failures — reconnect to try again"
+                                    .to_string(),
+                            ),
                         )
                         .await;
                         break;
@@ -564,10 +567,7 @@ async fn send(writer: &mut (impl AsyncWriteExt + Unpin), resp: Response) {
 /// affected.  Write plans, aggregates, joins, and constants are passed through
 /// unchanged — domain isolation on writes is enforced by the ledger's own
 /// domain field on entries and accounts.
-fn apply_domain_filter(
-    plan: LogicalPlan,
-    domain: Option<String>,
-) -> LogicalPlan {
+fn apply_domain_filter(plan: LogicalPlan, domain: Option<String>) -> LogicalPlan {
     use vledger_sql::planner::EntryFilter;
     let d = match domain {
         Some(d) if !d.is_empty() => d,

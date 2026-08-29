@@ -249,9 +249,7 @@ impl<'a> ReadExecutor<'a> {
             format!("{n} rows")
         } else {
             let limit = cap_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            format!(
-                "{n} rows (capped at {limit} — use LIMIT n or WHERE sequence = x to paginate)"
-            )
+            format!("{n} rows (capped at {limit} — use LIMIT n or WHERE sequence = x to paginate)")
         };
         let mut result = QueryResult::rows(cols, rows, message);
 
@@ -856,10 +854,13 @@ impl<'a> Executor<'a> {
         let seq = self.ledger.post_entry(entry)?;
 
         // For the response we need the entry id and domain. Fetch from SQLite.
-        let (id, domain, amount) = self.ledger
+        let (id, domain, amount) = self
+            .ledger
             .get_entry_by_sequence(seq)
             .map(|e| {
-                let amt = e.lines.iter()
+                let amt = e
+                    .lines
+                    .iter()
                     .filter(|l| matches!(l.dr_cr, vledger_ledger::entry::DrCr::Debit))
                     .map(|l| l.amount.as_i64())
                     .sum::<i64>();

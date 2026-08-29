@@ -247,6 +247,7 @@ impl PageStore {
             let path = self.dir.join(format!("{:08x}.{}", table_id, PAGE_EXT));
             let f = OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&path)?;
@@ -261,6 +262,7 @@ impl PageStore {
             let path = self.dir.join(format!("{:08x}.{}", table_id, EPAGE_EXT));
             let f = OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&path)?;

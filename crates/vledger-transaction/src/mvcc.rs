@@ -54,10 +54,7 @@ pub fn is_visible(version: &RowVersion, snapshot_tx_id: u64) -> Visibility {
 
 /// Given a list of versions in ascending `tx_id_created` order, return the
 /// latest version visible to `snapshot_tx_id`.
-pub fn latest_visible<'a>(
-    versions: &'a [RowVersion],
-    snapshot_tx_id: u64,
-) -> Option<&'a RowVersion> {
+pub fn latest_visible(versions: &[RowVersion], snapshot_tx_id: u64) -> Option<&RowVersion> {
     versions
         .iter()
         .rev()

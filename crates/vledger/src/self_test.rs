@@ -520,7 +520,7 @@ fn create_test_accounts(store: &mut LedgerStore, seed: &str) -> Result<TestAccou
 
         let asset_id = store.create_account(Account::new(
             &asset_code,
-            &format!("Test Asset Account {i}"),
+            format!("Test Asset Account {i}"),
             AccountType::Asset,
             "USD",
             "self-test",
@@ -528,7 +528,7 @@ fn create_test_accounts(store: &mut LedgerStore, seed: &str) -> Result<TestAccou
 
         let income_id = store.create_account(Account::new(
             &income_code,
-            &format!("Test Income Account {i}"),
+            format!("Test Income Account {i}"),
             AccountType::Income,
             "USD",
             "self-test",
@@ -609,7 +609,7 @@ fn wal_segments(wal_dir: &Path) -> Result<Vec<PathBuf>> {
         .context("Cannot read WAL directory")?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |x| x == "wal"))
+        .filter(|p| p.extension().is_some_and(|x| x == "wal"))
         .collect();
     segs.sort();
     Ok(segs)

@@ -40,6 +40,7 @@ use crate::{DEFAULT_SEGMENT_SIZE, WAL_MAGIC, WAL_VERSION};
 /// Controls when the WAL calls `fsync` to commit writes to stable storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum WalSyncMode {
     /// `fsync` after every single record append.
     ///
@@ -56,6 +57,7 @@ pub enum WalSyncMode {
     ///
     /// This is the recommended mode for most production deployments and
     /// matches PostgreSQL's `synchronous_commit = off` default behaviour.
+    #[default]
     GroupCommit,
 
     /// Never call `fsync`.
@@ -63,12 +65,6 @@ pub enum WalSyncMode {
     /// **Development and testing only.**  Any crash will likely corrupt or
     /// lose data.  Never use in production.
     NoSync,
-}
-
-impl Default for WalSyncMode {
-    fn default() -> Self {
-        Self::GroupCommit
-    }
 }
 
 impl std::fmt::Display for WalSyncMode {

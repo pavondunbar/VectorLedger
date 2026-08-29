@@ -52,7 +52,11 @@ impl TransactionManager {
         wal_dir: &Path,
         signing_key: Option<vledger_crypto::sign::DbSigningKey>,
     ) -> Result<Self, TxError> {
-        Self::open_with_signing_and_mode(wal_dir, signing_key, vledger_wal::WalSyncMode::GroupCommit)
+        Self::open_with_signing_and_mode(
+            wal_dir,
+            signing_key,
+            vledger_wal::WalSyncMode::GroupCommit,
+        )
     }
 
     /// Open with a signing key and explicit WAL sync mode.

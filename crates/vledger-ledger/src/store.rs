@@ -226,9 +226,8 @@ impl LedgerStore {
 
         let signing_key = Self::load_signing_key(data_dir);
 
-        let tx_manager = TransactionManager::open_with_signing_and_mode(
-            &wal_dir, signing_key, sync_mode
-        )?;
+        let tx_manager =
+            TransactionManager::open_with_signing_and_mode(&wal_dir, signing_key, sync_mode)?;
         let page_store = PageStore::open(&pages_dir)?;
 
         // Acquire an exclusive advisory lock on the data directory to prevent
@@ -302,9 +301,8 @@ impl LedgerStore {
         let wal_dir = data_dir.join("wal");
         let pages_dir = data_dir.join("pages");
         let signing_key = Self::load_signing_key(data_dir);
-        let tx_manager = TransactionManager::open_with_signing_and_mode(
-            &wal_dir, signing_key, sync_mode
-        )?;
+        let tx_manager =
+            TransactionManager::open_with_signing_and_mode(&wal_dir, signing_key, sync_mode)?;
         let page_store = PageStore::open(&pages_dir)?;
         let lock = DataDirLock::acquire(data_dir).map_err(|e| {
             LedgerError::Io(std::io::Error::new(
@@ -362,10 +360,7 @@ impl LedgerStore {
     /// - Non-negative balance check (balance_cache not maintained)
     /// - Exposure limit check (balance_cache not maintained)
     /// - Four-eyes check
-    pub fn import_entry_direct(
-        &mut self,
-        mut entry: JournalEntry,
-    ) -> Result<u64, LedgerError> {
+    pub fn import_entry_direct(&mut self, mut entry: JournalEntry) -> Result<u64, LedgerError> {
         // 1. Structural validation
         entry.validate()?;
 
@@ -379,7 +374,9 @@ impl LedgerStore {
 
         // 3. Per-line account validation (existence, status, currency only).
         for line in &entry.lines {
-            let acct = self.accounts.get(&line.account_id)
+            let acct = self
+                .accounts
+                .get(&line.account_id)
                 .ok_or_else(|| LedgerError::AccountNotFound(line.account_id.to_string()))?;
             if !acct.is_active() {
                 return Err(LedgerError::AccountClosed(line.account_id.to_string()));
@@ -485,7 +482,11 @@ impl LedgerStore {
         self.replay_from_wal_mode(wal_dir, true)
     }
 
-    fn replay_from_wal_mode(&mut self, wal_dir: &Path, import_mode: bool) -> Result<(), LedgerError> {
+    fn replay_from_wal_mode(
+        &mut self,
+        wal_dir: &Path,
+        import_mode: bool,
+    ) -> Result<(), LedgerError> {
         use vledger_wal::record::MutationKind;
         use vledger_wal::recovery::{decode_data_payload, recover, recover_verified};
 
@@ -519,7 +520,8 @@ impl LedgerStore {
                                 // Import mode: only update chain state and idempotency keys.
                                 // Do NOT push to self.entries — that's the memory hog.
                                 if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
-                                    self.next_sequence.store(entry.sequence + 1, Ordering::SeqCst);
+                                    self.next_sequence
+                                        .store(entry.sequence + 1, Ordering::SeqCst);
                                 }
                                 self.last_chain_hash = entry.chain_hash;
                                 if let Some(ref key) = entry.idempotency_key {
@@ -606,8 +608,14 @@ impl LedgerStore {
             warn!(sequence = entry.sequence, "entry_db insert failed: {e}");
         } else {
             for line in &entry.lines {
-                if let Err(e) = self.entry_db.insert_account_entry(&line.account_id, entry.sequence) {
-                    warn!(sequence = entry.sequence, "entry_db insert_account_entry failed: {e}");
+                if let Err(e) = self
+                    .entry_db
+                    .insert_account_entry(&line.account_id, entry.sequence)
+                {
+                    warn!(
+                        sequence = entry.sequence,
+                        "entry_db insert_account_entry failed: {e}"
+                    );
                 }
             }
         }
@@ -881,9 +889,9 @@ impl LedgerStore {
                 // For fiat (precision=2) we bound at 10^(18-2) = 10^16 minor units
                 // (~$100 trillion) to catch obvious data errors.
                 let max_exp: u32 = 18u32.saturating_sub(precision as u32);
-                let max_minor: i64 = 10_i64.saturating_pow(max_exp).saturating_mul(
-                    10_i64.saturating_pow(precision as u32),
-                );
+                let max_minor: i64 = 10_i64
+                    .saturating_pow(max_exp)
+                    .saturating_mul(10_i64.saturating_pow(precision as u32));
                 if line.amount.as_i64().abs() > max_minor {
                     return Err(LedgerError::PrecisionViolation {
                         currency: line.currency_code.clone(),
@@ -1054,20 +1062,23 @@ impl LedgerStore {
         domain: impl Into<String>,
     ) -> Result<Uuid, LedgerError> {
         // Fetch original entry from SQLite index.
-        let original = self.entry_db.get_by_sequence(
-            // We need to find by entry UUID, not sequence. Scan SQLite.
-            // Use stream_all to find the sequence for this entry_id.
-            {
-                let mut found_seq: Option<u64> = None;
-                let _ = self.entry_db.stream_all(|e| {
-                    if e.id == entry_id {
-                        found_seq = Some(e.sequence);
-                    }
-                    Ok(())
-                });
-                found_seq.ok_or_else(|| LedgerError::EntryNotFound(entry_id.to_string()))?
-            },
-        )?.ok_or_else(|| LedgerError::EntryNotFound(entry_id.to_string()))?;
+        let original = self
+            .entry_db
+            .get_by_sequence(
+                // We need to find by entry UUID, not sequence. Scan SQLite.
+                // Use stream_all to find the sequence for this entry_id.
+                {
+                    let mut found_seq: Option<u64> = None;
+                    let _ = self.entry_db.stream_all(|e| {
+                        if e.id == entry_id {
+                            found_seq = Some(e.sequence);
+                        }
+                        Ok(())
+                    });
+                    found_seq.ok_or_else(|| LedgerError::EntryNotFound(entry_id.to_string()))?
+                },
+            )?
+            .ok_or_else(|| LedgerError::EntryNotFound(entry_id.to_string()))?;
 
         // Only Posted entries may be reversed.
         match original.status {
@@ -1173,11 +1184,20 @@ impl LedgerStore {
             warn!("entry_db ensure_account_entries_table: {e}");
         }
         if let Err(e) = self.entry_db.insert(&reversal) {
-            warn!(sequence = reversal.sequence, "entry_db insert reversal failed: {e}");
+            warn!(
+                sequence = reversal.sequence,
+                "entry_db insert reversal failed: {e}"
+            );
         } else {
             for line in &reversal.lines {
-                if let Err(e) = self.entry_db.insert_account_entry(&line.account_id, reversal.sequence) {
-                    warn!(sequence = reversal.sequence, "entry_db insert_account_entry failed: {e}");
+                if let Err(e) = self
+                    .entry_db
+                    .insert_account_entry(&line.account_id, reversal.sequence)
+                {
+                    warn!(
+                        sequence = reversal.sequence,
+                        "entry_db insert_account_entry failed: {e}"
+                    );
                 }
             }
         }
@@ -1218,7 +1238,9 @@ impl LedgerStore {
 
     /// Return all entries for an account in posting order.
     pub fn account_entries(&self, account_id: &AccountId) -> Vec<JournalEntry> {
-        self.entry_db.entries_for_account(account_id).unwrap_or_default()
+        self.entry_db
+            .entries_for_account(account_id)
+            .unwrap_or_default()
     }
 
     /// All accounts.
@@ -1240,13 +1262,15 @@ impl LedgerStore {
 
     /// Return entries whose domain matches `domain` (SQLite index-accelerated).
     pub fn entries_by_domain(&self, domain: &str) -> Vec<JournalEntry> {
-        self.entry_db.scan_by_domain(domain, Self::DEFAULT_QUERY_LIMIT, 0)
+        self.entry_db
+            .scan_by_domain(domain, Self::DEFAULT_QUERY_LIMIT, 0)
             .unwrap_or_default()
     }
 
     /// Return entries whose domain matches `domain` with an explicit limit.
     pub fn entries_by_domain_limited(&self, domain: &str, limit: usize) -> Vec<JournalEntry> {
-        self.entry_db.scan_by_domain(domain, limit, 0)
+        self.entry_db
+            .scan_by_domain(domain, limit, 0)
             .unwrap_or_default()
     }
 
@@ -1254,20 +1278,23 @@ impl LedgerStore {
     pub fn entries_by_status(&self, status: &str) -> Vec<JournalEntry> {
         // Normalise status string to match SQLite stored format (e.g. "Posted")
         let normalised = Self::normalise_status(status);
-        self.entry_db.scan_by_status(&normalised, Self::DEFAULT_QUERY_LIMIT, 0)
+        self.entry_db
+            .scan_by_status(&normalised, Self::DEFAULT_QUERY_LIMIT, 0)
             .unwrap_or_default()
     }
 
     /// Return entries whose status matches `status` with an explicit limit.
     pub fn entries_by_status_limited(&self, status: &str, limit: usize) -> Vec<JournalEntry> {
         let normalised = Self::normalise_status(status);
-        self.entry_db.scan_by_status(&normalised, limit, 0)
+        self.entry_db
+            .scan_by_status(&normalised, limit, 0)
             .unwrap_or_default()
     }
 
     /// Return entries matching an external_ref value.
     pub fn entries_by_external_ref(&self, ext_ref: &str) -> Vec<JournalEntry> {
-        self.entry_db.scan_by_external_ref(ext_ref, Self::DEFAULT_QUERY_LIMIT)
+        self.entry_db
+            .scan_by_external_ref(ext_ref, Self::DEFAULT_QUERY_LIMIT)
             .unwrap_or_default()
     }
 
@@ -1496,11 +1523,7 @@ impl LedgerStore {
         entry_id: Uuid,
         notes: Option<String>,
     ) -> Result<(), LedgerError> {
-        self.apply_settlement_event(
-            entry_id,
-            crate::entry::EntryStatus::Pending,
-            notes,
-        )
+        self.apply_settlement_event(entry_id, crate::entry::EntryStatus::Pending, notes)
     }
 
     /// Transition an entry to `Settled` status.
@@ -1511,11 +1534,7 @@ impl LedgerStore {
         entry_id: Uuid,
         notes: Option<String>,
     ) -> Result<(), LedgerError> {
-        self.apply_settlement_event(
-            entry_id,
-            crate::entry::EntryStatus::Settled,
-            notes,
-        )
+        self.apply_settlement_event(entry_id, crate::entry::EntryStatus::Settled, notes)
     }
 
     /// Transition an entry to `Failed` settlement status.
@@ -1524,11 +1543,7 @@ impl LedgerStore {
         entry_id: Uuid,
         notes: Option<String>,
     ) -> Result<(), LedgerError> {
-        self.apply_settlement_event(
-            entry_id,
-            crate::entry::EntryStatus::Failed,
-            notes,
-        )
+        self.apply_settlement_event(entry_id, crate::entry::EntryStatus::Failed, notes)
     }
 
     /// Returns the effective status of an entry, considering settlement events.
@@ -1613,11 +1628,7 @@ impl LedgerStore {
         self.legal_hold_accounts.contains(account_id)
     }
 
-    fn set_legal_hold(
-        &mut self,
-        account_id: &AccountId,
-        hold: bool,
-    ) -> Result<(), LedgerError> {
+    fn set_legal_hold(&mut self, account_id: &AccountId, hold: bool) -> Result<(), LedgerError> {
         let acct = self
             .accounts
             .get_mut(account_id)
@@ -1647,8 +1658,7 @@ impl LedgerStore {
         // Recompute balances from entries streamed from SQLite — constant RAM.
         let mut recomputed: HM<AccountId, i128> = HM::new();
         let _ = self.entry_db.stream_all(|entry| {
-            let affects =
-                matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
+            let affects = matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
             if !affects {
                 return Ok(());
             }
@@ -1972,8 +1982,13 @@ mod tests {
         // Balance should be zero.
         // Find cash account via the original debit line
         let original_entry = store2.get_entry_by_sequence(1);
-        let cash_id = original_entry.as_ref()
-            .and_then(|e| e.lines.iter().find(|l| l.dr_cr == crate::entry::DrCr::Debit))
+        let cash_id = original_entry
+            .as_ref()
+            .and_then(|e| {
+                e.lines
+                    .iter()
+                    .find(|l| l.dr_cr == crate::entry::DrCr::Debit)
+            })
             .map(|l| l.account_id);
         if let Some(cid) = cash_id {
             assert_eq!(

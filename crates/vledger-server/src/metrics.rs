@@ -321,7 +321,7 @@ impl Metrics {
 
 impl Default for Metrics {
     fn default() -> Self {
-        Arc::try_unwrap(Self::new()).unwrap_or_else(|arc| {
+        Arc::try_unwrap(Self::new()).unwrap_or_else(|_arc| {
             // This path is unreachable for default() since we just created it,
             // but we need to satisfy the compiler.
             panic!("unexpected Arc contention in Metrics::default")

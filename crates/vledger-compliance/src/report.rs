@@ -103,8 +103,8 @@ impl ComplianceReport {
     /// Serialise to a simple Markdown table (for sharing with auditors).
     pub fn to_markdown(&self) -> String {
         let mut out = format!(
-            "# {} Compliance Report\n\n**Period:** {} — {}\n\n**Generated:** {}\n\n",
-            format!("{:?}", self.standard),
+            "# {:?} Compliance Report\n\n**Period:** {} — {}\n\n**Generated:** {}\n\n",
+            self.standard,
             self.date_range.from.format("%Y-%m-%d"),
             self.date_range.to.format("%Y-%m-%d"),
             self.generated_at.format("%Y-%m-%d %H:%M UTC"),
