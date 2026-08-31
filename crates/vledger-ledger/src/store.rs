@@ -490,9 +490,6 @@ impl LedgerStore {
         use vledger_wal::record::MutationKind;
         use vledger_wal::recovery::{decode_data_payload, recover, recover_verified};
 
-        // Use verified recovery when a signing key is configured so that
-        // Ed25519 signatures on CommitPayloads are checked on startup.
-        // LedgerError implements From<WalError> so ? propagates directly.
         let result = if self.tx_manager.signing_pubkey().is_some() {
             recover_verified(wal_dir, None)?
         } else {
@@ -504,6 +501,45 @@ impl LedgerStore {
             verify_signatures = self.tx_manager.signing_pubkey().is_some(),
             "Replaying WAL into LedgerStore"
         );
+
+        // ── SQLite fast-path ────────────────────────────────────────────────
+        // The SQLite index was populated during the previous run (import or
+        // normal operation).  Any entry with sequence ≤ sqlite_max_seq is
+        // already in the index — skip the insert, just update in-memory state.
+        // Only entries with sequence > sqlite_max_seq need to be written to
+        // SQLite.  In the common startup case (no new entries since last run)
+        // this means ZERO SQLite inserts, making startup O(WAL records) in
+        // decode time only — no I/O beyond reading the WAL.
+        //
+        // For the idempotency_keys HashSet: we only load keys for entries
+        // that are NOT yet in SQLite.  For entries already in SQLite, dedup
+        // is handled by entry_db.idempotency_key_exists() at post time.
+        // This keeps the HashSet small (typically empty on a clean restart).
+        let sqlite_max_seq = if import_mode {
+            0u64 // import mode never uses SQLite
+        } else {
+            self.entry_db.max_sequence().unwrap_or(0)
+        };
+
+        if sqlite_max_seq > 0 {
+            info!(
+                sqlite_max_seq,
+                "SQLite index already populated — skipping re-insert for existing entries"
+            );
+        }
+
+        // Ensure tables exist before any inserts.
+        if !import_mode {
+            if let Err(e) = self.entry_db.ensure_account_entries_table() {
+                warn!("ensure_account_entries_table: {e}");
+            }
+        }
+
+        // Begin a bulk SQLite transaction for any new entries that need
+        // inserting (sequence > sqlite_max_seq).  Committed in one shot at
+        // the end — dramatically faster than per-row autocommit.
+        let mut bulk_open = false;
+        let mut new_entry_count = 0u64;
 
         for tx in result.committed {
             for record in &tx.data_records {
@@ -517,8 +553,7 @@ impl LedgerStore {
                         TABLE_ENTRIES => {
                             let entry: JournalEntry = decode(&payload.row_data)?;
                             if import_mode {
-                                // Import mode: only update chain state and idempotency keys.
-                                // Do NOT push to self.entries — that's the memory hog.
+                                // Import mode: only chain state + idempotency keys.
                                 if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
                                     self.next_sequence
                                         .store(entry.sequence + 1, Ordering::SeqCst);
@@ -529,7 +564,73 @@ impl LedgerStore {
                                 }
                                 self.next_entry_page += 1;
                             } else {
-                                self.apply_entry(entry);
+                                // Normal mode.
+                                let already_in_sqlite = entry.sequence <= sqlite_max_seq;
+
+                                // Always update in-memory state (sequence, chain,
+                                // balance cache) regardless of SQLite status.
+                                if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
+                                    self.next_sequence
+                                        .store(entry.sequence + 1, Ordering::SeqCst);
+                                }
+                                self.last_chain_hash = entry.chain_hash;
+
+                                // Only load idempotency key into RAM for entries
+                                // NOT already in SQLite.  For existing entries
+                                // the SQLite index handles dedup at post time.
+                                if !already_in_sqlite {
+                                    if let Some(ref key) = entry.idempotency_key {
+                                        self.idempotency_keys.insert(key.clone());
+                                    }
+                                }
+
+                                // Balance cache: always rebuild from WAL — it is
+                                // the authoritative source of truth.
+                                let affects_balance = matches!(
+                                    entry.status,
+                                    EntryStatus::Posted | EntryStatus::Reversal
+                                );
+                                for line in &entry.lines {
+                                    if affects_balance {
+                                        self.update_balance_cache(
+                                            line.account_id,
+                                            line.amount.as_i128(),
+                                            line.dr_cr,
+                                        );
+                                    }
+                                }
+
+                                self.next_entry_page += 1;
+
+                                // Insert into SQLite only if not already there.
+                                if !already_in_sqlite {
+                                    if !bulk_open {
+                                        if let Err(e) = self.entry_db.begin_bulk() {
+                                            warn!("begin_bulk during replay: {e}");
+                                        } else {
+                                            bulk_open = true;
+                                        }
+                                    }
+                                    if let Err(e) = self.entry_db.insert(&entry) {
+                                        warn!(
+                                            sequence = entry.sequence,
+                                            "entry_db insert failed: {e}"
+                                        );
+                                    } else {
+                                        for line in &entry.lines {
+                                            if let Err(e) = self.entry_db.insert_account_entry(
+                                                &line.account_id,
+                                                entry.sequence,
+                                            ) {
+                                                warn!(
+                                                    sequence = entry.sequence,
+                                                    "entry_db insert_account_entry failed: {e}"
+                                                );
+                                            }
+                                        }
+                                        new_entry_count += 1;
+                                    }
+                                }
                             }
                         }
                         TABLE_REVERSAL_EVENTS => {
@@ -545,11 +646,8 @@ impl LedgerStore {
                         _ => {}
                     },
                     MutationKind::Delete => {
-                        // Logical deletes on accounts (close_account / legal hold toggle).
-                        // We handle these by re-reading the updated account row.
                         if payload.table_id == TABLE_ACCOUNTS {
                             let account: Account = decode(&payload.row_data)?;
-                            // Rebuild legal hold index from stored account state.
                             if account.legal_hold {
                                 self.legal_hold_accounts.insert(account.id);
                             } else {
@@ -559,6 +657,15 @@ impl LedgerStore {
                         }
                     }
                 }
+            }
+        }
+
+        // Commit any new entries that were inserted into SQLite.
+        if bulk_open {
+            if let Err(e) = self.entry_db.commit_bulk() {
+                warn!("commit_bulk during replay: {e}");
+            } else {
+                info!(new_entry_count, "SQLite index updated with new WAL entries");
             }
         }
 
@@ -821,27 +928,26 @@ impl LedgerStore {
         // 1. Structural validation
         entry.validate()?;
 
-        // 2. Idempotency check
+        // 2. Idempotency check — two-level: in-memory HashSet (fast, covers
+        //    entries posted this session) then SQLite (covers entries from
+        //    previous sessions not loaded into the HashSet at startup).
         if let Some(ref key) = entry.idempotency_key {
-            if self.idempotency_keys.contains(key) {
+            let in_ram = self.idempotency_keys.contains(key);
+            let in_sqlite = if in_ram {
+                true
+            } else {
+                self.entry_db.idempotency_key_exists(key).unwrap_or(false)
+            };
+
+            if in_sqlite || in_ram {
                 warn!(key, "Idempotency key already posted");
-                // Look up the sequence from SQLite index.
-                if let Ok(true) = self.entry_db.idempotency_key_exists(key) {
-                    // Find and return the sequence of the already-posted entry.
-                    // We scan SQLite for it (idempotency key index makes this O(1)).
-                    let mut stmt_seq: Option<u64> = None;
-                    let _ = self.entry_db.stream_all(|e| {
-                        if e.idempotency_key.as_deref() == Some(key.as_str()) {
-                            stmt_seq = Some(e.sequence);
-                        }
-                        Ok(())
-                    });
-                    if let Some(seq) = stmt_seq {
-                        return Ok(seq);
-                    }
-                }
-                // Fallback: return 0 to signal "already posted, unknown seq"
-                return Ok(0);
+                // O(1) index lookup — no full scan needed.
+                let seq = self
+                    .entry_db
+                    .sequence_for_idempotency_key(key)
+                    .unwrap_or(None)
+                    .unwrap_or(0);
+                return Ok(seq);
             }
         }
 

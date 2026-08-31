@@ -190,6 +190,20 @@ impl EntryDb {
         Ok(count > 0)
     }
 
+    /// Get the sequence number of an entry by idempotency key (O(1) index lookup).
+    pub fn sequence_for_idempotency_key(&self, key: &str) -> Result<Option<u64>, LedgerError> {
+        let conn = self.lock()?;
+        let result = conn
+            .query_row(
+                "SELECT sequence FROM entries WHERE idempotency_key = ?1 LIMIT 1",
+                params![key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| LedgerError::Serialization(format!("SQLite query error: {e}")))?;
+        Ok(result.map(|s| s as u64))
+    }
+
     /// Total number of entries in the index.
     pub fn count(&self) -> Result<u64, LedgerError> {
         let conn = self.lock()?;
