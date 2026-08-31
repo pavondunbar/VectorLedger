@@ -772,7 +772,7 @@ pub fn check_plan_privilege(
         CreateAccount(_) if !session.role.can_insert_accounts() => {
             Err(format!("role '{}' cannot create accounts", session.role))
         }
-        VerifyChain if !session.role.can_verify() => {
+        VerifyChain { .. } if !session.role.can_verify() => {
             Err(format!("role '{}' cannot run VERIFY_CHAIN", session.role))
         }
         ScanEntries { .. }
