@@ -491,18 +491,52 @@ impl LedgerStore {
         use vledger_wal::recovery::{decode_data_payload, recover_streaming};
 
         // ── SQLite fast-path ────────────────────────────────────────────────
-        // Check what's already in SQLite so we can skip re-inserting those
-        // entries during replay.
         let sqlite_max_seq = if import_mode {
             0u64
         } else {
             self.entry_db.max_sequence().unwrap_or(0)
         };
 
-        if sqlite_max_seq > 0 {
+        // Get the WAL's last sequence from the last segment only (fast).
+        let wal_max_seq = if import_mode {
+            0u64
+        } else {
+            vledger_wal::reader::scan_last_sequence_in_segment(
+                &wal_dir.join(vledger_wal::segment::segment_filename(
+                    *vledger_wal::segment::list_segments(wal_dir)
+                        .unwrap_or_default()
+                        .last()
+                        .unwrap_or(&0),
+                )),
+                *vledger_wal::segment::list_segments(wal_dir)
+                    .unwrap_or_default()
+                    .last()
+                    .unwrap_or(&0),
+                None,
+            )
+            .unwrap_or(0)
+        };
+
+        // If SQLite has all committed entries (sqlite_max_seq >= wal_max_seq),
+        // skip entry decoding entirely during WAL replay.  Only accounts,
+        // reversal events, and settlement events are processed from WAL.
+        // The balance cache is rebuilt from SQLite instead.
+        // This reduces WAL replay from O(entries × entry_size) to
+        // O(accounts + reversals + settlements) — effectively O(1) for
+        // a database with no schema changes since last startup.
+        let sqlite_is_current = !import_mode && sqlite_max_seq > 0 && sqlite_max_seq >= wal_max_seq;
+
+        if sqlite_is_current {
             info!(
                 sqlite_max_seq,
-                "SQLite index already populated — skipping re-insert for existing entries"
+                wal_max_seq,
+                "SQLite index is current — skipping entry WAL replay, rebuilding balance cache from SQLite"
+            );
+        } else if sqlite_max_seq > 0 {
+            info!(
+                sqlite_max_seq,
+                wal_max_seq,
+                "SQLite index partially populated — new entries will be inserted during replay"
             );
         }
 
@@ -513,19 +547,14 @@ impl LedgerStore {
         }
 
         let verify_signatures = self.tx_manager.signing_pubkey().is_some();
-        let master_key = None; // non-encrypted path; encrypted handled by tx_manager
 
         let mut bulk_open = false;
         let mut new_entry_count = 0u64;
         let mut committed_count = 0usize;
 
-        // ── Streaming recovery — O(1) RAM regardless of WAL size ───────────
-        // Each committed transaction is processed immediately and discarded.
-        // The pending map inside recover_streaming holds at most one in-flight
-        // transaction at a time (each entry is one WAL transaction).
         let result = recover_streaming::<LedgerError, _>(
             wal_dir,
-            master_key,
+            None,
             verify_signatures,
             |tx| {
                 committed_count += 1;
@@ -538,8 +567,9 @@ impl LedgerStore {
                                 self.apply_account(account);
                             }
                             TABLE_ENTRIES => {
-                                let entry: JournalEntry = decode(&payload.row_data)?;
                                 if import_mode {
+                                    // Import mode: minimal state only.
+                                    let entry: JournalEntry = decode(&payload.row_data)?;
                                     if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
                                         self.next_sequence
                                             .store(entry.sequence + 1, Ordering::SeqCst);
@@ -549,7 +579,14 @@ impl LedgerStore {
                                         self.idempotency_keys.insert(key.clone());
                                     }
                                     self.next_entry_page += 1;
+                                } else if sqlite_is_current {
+                                    // SQLite fully current — skip decode entirely.
+                                    // sequence, chain_hash, and balance cache loaded
+                                    // from SQLite after WAL replay completes.
+                                    self.next_entry_page += 1;
                                 } else {
+                                    // New entries not yet in SQLite.
+                                    let entry: JournalEntry = decode(&payload.row_data)?;
                                     let already_in_sqlite = entry.sequence <= sqlite_max_seq;
 
                                     if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
@@ -589,20 +626,14 @@ impl LedgerStore {
                                             }
                                         }
                                         if let Err(e) = self.entry_db.insert(&entry) {
-                                            warn!(
-                                                sequence = entry.sequence,
-                                                "entry_db insert failed: {e}"
-                                            );
+                                            warn!(sequence = entry.sequence, "entry_db insert: {e}");
                                         } else {
                                             for line in &entry.lines {
                                                 if let Err(e) = self.entry_db.insert_account_entry(
                                                     &line.account_id,
                                                     entry.sequence,
                                                 ) {
-                                                    warn!(
-                                                        sequence = entry.sequence,
-                                                        "entry_db insert_account_entry: {e}"
-                                                    );
+                                                    warn!(sequence = entry.sequence, "insert_account_entry: {e}");
                                                 }
                                             }
                                             new_entry_count += 1;
@@ -645,6 +676,20 @@ impl LedgerStore {
             } else {
                 info!(new_entry_count, "SQLite index updated with new WAL entries");
             }
+        }
+
+        // ── Rebuild balance cache from SQLite when it is fully current ──────
+        if sqlite_is_current {
+            // Load sequence counter and chain tip from SQLite.
+            let max_seq = self.entry_db.max_sequence().unwrap_or(0);
+            self.next_sequence.store(max_seq + 1, Ordering::SeqCst);
+            if let Ok(Some(tip)) = self.entry_db.chain_tip() {
+                self.last_chain_hash = tip;
+            }
+
+            info!("Rebuilding balance cache from SQLite index...");
+            self.entry_db.rebuild_balance_cache(&self.accounts, &mut self.balance_cache)?;
+            info!("Balance cache rebuilt ({} accounts)", self.balance_cache.len());
         }
 
         info!(

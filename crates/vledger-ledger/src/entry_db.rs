@@ -473,6 +473,45 @@ impl EntryDb {
         Ok(())
     }
 
+    /// Rebuild the balance cache by streaming all entries from SQLite.
+    /// Entries are decoded one at a time and dropped immediately — constant RAM.
+    /// Account types are needed to determine the sign of each balance delta,
+    /// so the caller passes in the accounts map.
+    pub fn rebuild_balance_cache(
+        &self,
+        accounts: &std::collections::HashMap<uuid::Uuid, crate::account::Account>,
+        balance_cache: &mut std::collections::HashMap<uuid::Uuid, i128>,
+    ) -> Result<(), LedgerError> {
+        use crate::account::AccountType;
+        use crate::entry::{DrCr, EntryStatus};
+
+        self.stream_all(|entry| {
+            let affects = matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
+            if !affects {
+                return Ok(());
+            }
+            for line in &entry.lines {
+                let is_debit_normal = match accounts.get(&line.account_id) {
+                    Some(a) => matches!(a.account_type, AccountType::Asset | AccountType::Expense),
+                    None => return Ok(()), // account not in map yet — skip
+                };
+                let delta: i128 = if is_debit_normal {
+                    match line.dr_cr {
+                        DrCr::Debit => line.amount.as_i128(),
+                        DrCr::Credit => -line.amount.as_i128(),
+                    }
+                } else {
+                    match line.dr_cr {
+                        DrCr::Credit => line.amount.as_i128(),
+                        DrCr::Debit => -line.amount.as_i128(),
+                    }
+                };
+                *balance_cache.entry(line.account_id).or_insert(0) += delta;
+            }
+            Ok(())
+        })
+    }
+
     /// Rollback the current bulk transaction.
     pub fn rollback_bulk(&self) -> Result<(), LedgerError> {
         let conn = self.lock()?;
