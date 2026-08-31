@@ -76,7 +76,7 @@ jobs:
           echo "Remaining advisories: $(find /tmp/advisory-db -name '*.md' | wc -l)"
 
       - name: Run audit
-        run: cargo audit --db /tmp/advisory-db
+        run: cargo audit --no-fetch --db /tmp/advisory-db
 
   # ── Dependency review (PR-only) ─────────────────────────────────────────────
   # Flags newly introduced dependencies that have known vulnerabilities,

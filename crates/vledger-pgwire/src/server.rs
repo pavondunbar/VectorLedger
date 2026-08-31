@@ -968,7 +968,9 @@ fn check_plan_privilege(role: Role, plan: &LogicalPlan) -> Result<(), String> {
         CreateAccount(_) if !role.can_insert_accounts() => {
             Err(format!("role '{role}' cannot create accounts"))
         }
-        VerifyChain if !role.can_verify() => Err(format!("role '{role}' cannot run VERIFY_CHAIN")),
+        VerifyChain { .. } if !role.can_verify() => {
+            Err(format!("role '{role}' cannot run VERIFY_CHAIN"))
+        }
         ScanEntries { .. }
         | ScanAccounts { .. }
         | GetBalance { .. }
