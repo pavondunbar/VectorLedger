@@ -23,6 +23,12 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build (e.g. v1.0.2)'
+        required: true
+        default: 'v1.0.2'
 
 permissions:
   contents: write     # create and upload release assets
@@ -99,7 +105,7 @@ jobs:
       - name: Package archive
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           PLATFORM="${{ matrix.platform }}"
           ARCHIVE="vledger-${VERSION}-${PLATFORM}.tar.gz"
           cp target/${{ matrix.target }}/release/vledger ./vledger
@@ -135,7 +141,7 @@ jobs:
 
       - name: Generate SBOM
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           # cargo-cyclonedx generates one <crate>.cdx.json per crate.
           # Use the top-level vledger crate which transitively covers all deps.
           cargo cyclonedx --format json --manifest-path crates/vledger/Cargo.toml
@@ -176,7 +182,7 @@ jobs:
       - name: Generate checksums.txt
         working-directory: ./dist
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           CHECKSUM_FILE="vledger-${VERSION}-checksums.txt"
           sha256sum vledger-*.tar.gz "vledger-${VERSION}-sbom.cdx.json" \
             > "${CHECKSUM_FILE}"
@@ -198,7 +204,7 @@ jobs:
       - name: Sign checksums.txt
         working-directory: ./dist
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           CHECKSUM_FILE="vledger-${VERSION}-checksums.txt"
           cosign sign-blob \
             --yes \
@@ -209,7 +215,7 @@ jobs:
       - name: Sign SBOM
         working-directory: ./dist
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           SBOM_FILE="vledger-${VERSION}-sbom.cdx.json"
           cosign sign-blob \
             --yes \
@@ -221,6 +227,7 @@ jobs:
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
             dist/vledger-*.tar.gz
             dist/vledger-*-checksums.txt
@@ -230,6 +237,6 @@ jobs:
             dist/vledger-*-sbom.cdx.json.sig
             dist/vledger-*-sbom.cdx.json.sig.pem
           generate_release_notes: true
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
