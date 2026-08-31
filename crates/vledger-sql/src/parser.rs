@@ -261,11 +261,8 @@ mod tests {
         assert_eq!(sql.len(), MAX_SQL_BYTES);
         // Length guard passes; parser may succeed or return a parse error —
         // either way it must NOT return QueryTooLong.
-        match parse_one(&sql) {
-            Err(SqlError::QueryTooLong { .. }) => {
-                panic!("query exactly at limit must not be rejected by length guard");
-            }
-            _ => {} // ok — parser error or success are both fine here
+        if let Err(SqlError::QueryTooLong { .. }) = parse_one(&sql) {
+            panic!("query exactly at limit must not be rejected by length guard");
         }
     }
 

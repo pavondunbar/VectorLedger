@@ -10,10 +10,10 @@
 //! 1. Connects to the configured HSM backend.
 //! 2. For each active key slot (`vledger.table.<id>.encrypt`,
 //!    `vledger.wal.signing`, `vledger.commit.signing`):
-//!    a. Calls `HsmClient::rotate_key(key_id)` — the HSM archives the old
-//!       version and generates a new one; old ciphertext can still be
-//!       decrypted with the archived version.
-//!    b. Writes an `AuditEvent::KeyRotated` entry to the audit log.
+//!    - Calls `HsmClient::rotate_key(key_id)` — the HSM archives the old
+//!      version and generates a new one; old ciphertext can still be
+//!      decrypted with the archived version.
+//!    - Writes an `AuditEvent::KeyRotated` entry to the audit log.
 //! 3. Prints a summary of rotated keys.
 //!
 //! ## Safety

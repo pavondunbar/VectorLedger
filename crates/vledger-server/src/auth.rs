@@ -318,7 +318,7 @@ impl UserStore {
             eprintln!("║  VectorLedger — Initial Admin Credentials            ║");
             eprintln!("║                                                      ║");
             eprintln!("║  Credentials written to (mode 0o600):                ║");
-            eprintln!("║  {}  ║", format!("{:<50}", cred_path.display()));
+            eprintln!("║  {:<50}  ║", cred_path.display());
             eprintln!("║                                                      ║");
             eprintln!("║  Read the file, change the password, then delete it. ║");
             eprintln!("╚══════════════════════════════════════════════════════╝");
@@ -758,6 +758,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<(), ()> {
 ///
 /// Fix #7: operates on the *resolved* `LogicalPlan` variant, not raw SQL
 /// text — immune to whitespace/comment bypass.
+#[allow(non_snake_case)]
 pub fn check_plan_privilege(
     session: &Session,
     plan: &vledger_sql::planner::LogicalPlan,

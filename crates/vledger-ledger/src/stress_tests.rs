@@ -377,7 +377,7 @@ mod tests {
 
         let store = Arc::new(RwLock::new(LedgerStore::open(dir.path()).unwrap()));
 
-        let (cash_id, rev_id, original_entry_id) = {
+        let (cash_id, _rev_id, original_entry_id) = {
             let mut g = store.write().await;
             let c = g
                 .create_account(Account::new(

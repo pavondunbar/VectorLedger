@@ -515,7 +515,7 @@ mod tests {
         let segments: Vec<_> = std::fs::read_dir(&wal_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |x| x == "wal"))
+            .filter(|e| e.path().extension().is_some_and(|x| x == "wal"))
             .collect();
         assert!(!segments.is_empty());
         let seg_path = segments[0].path();

@@ -16,7 +16,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+
     use tempfile::TempDir;
 
     use crate::{
@@ -519,8 +519,6 @@ mod tests {
 
     #[test]
     fn inv11_unbalanced_entry_off_by_one_rejected() {
-        use crate::entry::DrCr;
-
         let (_dir, mut store) = setup();
         let cash = mk_account(&mut store, "CASH", AccountType::Asset);
         let rev = mk_account(&mut store, "REV", AccountType::Income);
@@ -584,10 +582,10 @@ mod tests {
         let (_dir, mut store) = setup();
 
         let cash = mk_account(&mut store, "CASH", AccountType::Asset);
-        let ar = mk_account(&mut store, "AR", AccountType::Asset);
+        let _ar = mk_account(&mut store, "AR", AccountType::Asset);
         let revenue = mk_account(&mut store, "REVENUE", AccountType::Income);
         let expense = mk_account(&mut store, "EXPENSE", AccountType::Expense);
-        let equity = mk_account(&mut store, "EQUITY", AccountType::Equity);
+        let _equity = mk_account(&mut store, "EQUITY", AccountType::Equity);
 
         // Post varied transactions
         for i in 1i64..=200 {
@@ -634,7 +632,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("wal")).unwrap();
         std::fs::create_dir_all(dir.path().join("pages")).unwrap();
 
-        let (n_entries, final_balance, last_chain_hash) = {
+        let (n_entries, _final_balance, last_chain_hash) = {
             let mut store = LedgerStore::open(dir.path()).unwrap();
             let cash = mk_account(&mut store, "CASH", AccountType::Asset);
             let rev = mk_account(&mut store, "REV", AccountType::Income);

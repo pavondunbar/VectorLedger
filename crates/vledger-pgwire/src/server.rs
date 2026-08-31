@@ -958,6 +958,7 @@ async fn execute_query(
 
 // ── Plan-level privilege check ────────────────────────────────────────────────
 
+#[allow(non_snake_case)]
 fn check_plan_privilege(role: Role, plan: &LogicalPlan) -> Result<(), String> {
     use vledger_sql::planner::LogicalPlan::*;
     match plan {

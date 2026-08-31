@@ -249,64 +249,62 @@ impl LogicalPlanBuilder {
 
         // ── Special function calls: BALANCE(…) and VERIFY_CHAIN() ─────────
         if body.from.is_empty() {
-            if let Some(item) = body.projection.first() {
-                if let SelectItem::UnnamedExpr(Expr::Function(f)) = item {
-                    let fname = f.name.to_string().to_uppercase();
-                    match fname.as_str() {
-                        "BALANCE" => {
-                            let arg = extract_function_string_arg(&f.args, "BALANCE")?;
-                            return Ok(LogicalPlan::GetBalance { account_ref: arg });
-                        }
-                        "VERIFY_CHAIN" => {
-                            let (from_seq, to_seq) = extract_optional_u64_range(&f.args)?;
-                            return Ok(LogicalPlan::VerifyChain { from_seq, to_seq });
-                        }
-                        "VERIFY_ENTRY" => {
-                            let (seq, _) = extract_optional_u64_range(&f.args)?;
-                            let sequence = seq.ok_or_else(|| {
-                                SqlError::MissingField(
-                                    "VERIFY_ENTRY() requires a sequence number argument".into(),
-                                )
-                            })?;
-                            return Ok(LogicalPlan::VerifyEntry { sequence });
-                        }
-                        "VERSION" => {
-                            return Ok(LogicalPlan::Constant {
-                                col: "version".into(),
-                                val: "PostgreSQL 15.0 (VectorLedger 1.0.0)".into(),
-                            });
-                        }
-                        "CURRENT_USER" => {
-                            return Ok(LogicalPlan::Constant {
-                                col: "current_user".into(),
-                                val: "vledger".into(),
-                            });
-                        }
-                        "CURRENT_DATABASE" => {
-                            return Ok(LogicalPlan::Constant {
-                                col: "current_database".into(),
-                                val: "vledger".into(),
-                            });
-                        }
-                        #[cfg(test)]
-                        "TAMPER_ENTRY" => {
-                            // TAMPER_ENTRY(seq, 'new_description')
-                            // Parse the integer sequence number directly
-                            // without going through extract_optional_u64_range
-                            // (which would try to parse the string arg as u64).
-                            let sequence = extract_nth_string_arg(&f.args, 0)
+            if let Some(SelectItem::UnnamedExpr(Expr::Function(f))) = body.projection.first() {
+                let fname = f.name.to_string().to_uppercase();
+                match fname.as_str() {
+                    "BALANCE" => {
+                        let arg = extract_function_string_arg(&f.args, "BALANCE")?;
+                        return Ok(LogicalPlan::GetBalance { account_ref: arg });
+                    }
+                    "VERIFY_CHAIN" => {
+                        let (from_seq, to_seq) = extract_optional_u64_range(&f.args)?;
+                        return Ok(LogicalPlan::VerifyChain { from_seq, to_seq });
+                    }
+                    "VERIFY_ENTRY" => {
+                        let (seq, _) = extract_optional_u64_range(&f.args)?;
+                        let sequence = seq.ok_or_else(|| {
+                            SqlError::MissingField(
+                                "VERIFY_ENTRY() requires a sequence number argument".into(),
+                            )
+                        })?;
+                        return Ok(LogicalPlan::VerifyEntry { sequence });
+                    }
+                    "VERSION" => {
+                        return Ok(LogicalPlan::Constant {
+                            col: "version".into(),
+                            val: "PostgreSQL 15.0 (VectorLedger 1.0.0)".into(),
+                        });
+                    }
+                    "CURRENT_USER" => {
+                        return Ok(LogicalPlan::Constant {
+                            col: "current_user".into(),
+                            val: "vledger".into(),
+                        });
+                    }
+                    "CURRENT_DATABASE" => {
+                        return Ok(LogicalPlan::Constant {
+                            col: "current_database".into(),
+                            val: "vledger".into(),
+                        });
+                    }
+                    #[cfg(test)]
+                    "TAMPER_ENTRY" => {
+                        // TAMPER_ENTRY(seq, 'new_description')
+                        // Parse the integer sequence number directly
+                        // without going through extract_optional_u64_range
+                        // (which would try to parse the string arg as u64).
+                        let sequence = extract_nth_string_arg(&f.args, 0)
                                 .and_then(|s| s.parse::<u64>().map_err(|_|
                                     SqlError::TypeError("TAMPER_ENTRY() first argument must be an integer sequence number".into())
                                 ))?;
-                            let new_description = extract_nth_string_arg(&f.args, 1)
-                                .unwrap_or_else(|_| "TAMPERED".to_string());
-                            return Ok(LogicalPlan::TamperEntry {
-                                sequence,
-                                new_description,
-                            });
-                        }
-                        _ => {}
+                        let new_description = extract_nth_string_arg(&f.args, 1)
+                            .unwrap_or_else(|_| "TAMPERED".to_string());
+                        return Ok(LogicalPlan::TamperEntry {
+                            sequence,
+                            new_description,
+                        });
                     }
+                    _ => {}
                 }
             }
         }
@@ -652,6 +650,7 @@ fn extract_optional_u64_range(
 }
 
 /// Extract the nth argument from a function call as a string.
+#[cfg(test)]
 fn extract_nth_string_arg(
     args: &sqlparser::ast::FunctionArguments,
     n: usize,

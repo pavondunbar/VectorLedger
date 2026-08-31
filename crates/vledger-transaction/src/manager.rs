@@ -124,6 +124,7 @@ impl TransactionManager {
     }
 
     /// Add a mutation to an active transaction.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_mutation(
         &mut self,
         tx_id: u64,

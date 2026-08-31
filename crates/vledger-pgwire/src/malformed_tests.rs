@@ -23,7 +23,6 @@
 #[cfg(test)]
 mod tests {
     use crate::messages::FrontendMessage;
-    use tokio::io::AsyncWriteExt;
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -187,15 +186,12 @@ mod tests {
         let payload = b"SELECT 1\0injected\0";
         let msg = FrontendMessage::parse(b'Q', payload);
         // Must return Unknown or a Query variant — but never panic.
-        match msg {
-            FrontendMessage::Query(sql) => {
-                // The SQL string must end at the first null byte.
-                assert!(
-                    !sql.contains('\0'),
-                    "null bytes must be stripped from query"
-                );
-            }
-            _ => {} // Unknown is also acceptable
+        if let FrontendMessage::Query(sql) = msg {
+            // The SQL string must end at the first null byte.
+            assert!(
+                !sql.contains('\0'),
+                "null bytes must be stripped from query"
+            );
         }
     }
 

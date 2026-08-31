@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn stage1_accounts_survive_crash_no_entries() {
         let dir = setup();
-        let (cash, rev) = {
+        let (_cash, _rev) = {
             let mut s = mk_store(&dir);
             mk_accounts(&mut s)
         }; // drop = simulated crash
@@ -166,7 +166,7 @@ mod tests {
     fn stage4_reversal_atomicity_survives_crash() {
         let dir = setup();
 
-        let (original_id, cash, rev) = {
+        let (original_id, cash, _rev) = {
             let mut s = mk_store(&dir);
             let (c, r) = mk_accounts(&mut s);
             post(&mut s, c, r, 5_000);
@@ -302,8 +302,6 @@ mod tests {
 
     #[test]
     fn stage8_truncated_wal_mid_record_recovers_cleanly() {
-        use std::io::Write;
-
         let dir = setup();
         let data_dir = dir.path();
         let wal_dir = data_dir.join("wal");
@@ -319,7 +317,7 @@ mod tests {
         let segs: Vec<_> = std::fs::read_dir(&wal_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |x| x == "wal"))
+            .filter(|e| e.path().extension().is_some_and(|x| x == "wal"))
             .collect();
         let seg_path = segs[0].path();
         let data = std::fs::read(&seg_path).unwrap();
@@ -342,7 +340,7 @@ mod tests {
         let data_dir = dir.path();
         let pages_dir = data_dir.join("pages");
 
-        let (cash, rev) = {
+        let (_cash, _rev) = {
             let mut s = LedgerStore::open(data_dir).unwrap();
             let ids = mk_accounts(&mut s);
             post(&mut s, ids.0, ids.1, 2_500);
@@ -352,7 +350,7 @@ mod tests {
         // Corrupt the page files
         if let Ok(entries) = std::fs::read_dir(&pages_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
-                if entry.path().extension().map_or(false, |x| x == "page") {
+                if entry.path().extension().is_some_and(|x| x == "page") {
                     let data = std::fs::read(entry.path()).unwrap_or_default();
                     if !data.is_empty() {
                         // Overwrite the middle of the page with garbage

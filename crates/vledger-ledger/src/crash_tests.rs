@@ -347,7 +347,7 @@ mod tests {
         let dir = setup_dir();
         let path = dir.path();
 
-        let (cash_id, rev_id) = {
+        let (cash_id, _rev_id) = {
             let mut store = LedgerStore::open(path).unwrap();
             let (c, r) = cash_and_revenue(&mut store);
             for i in 1u64..=20 {
@@ -405,7 +405,7 @@ mod tests {
         let dir = setup_dir();
         let path = dir.path();
 
-        let (cash_id, rev_id) = {
+        let (_cash_id, _rev_id) = {
             let mut store = LedgerStore::open(path).unwrap();
             let (c, r) = cash_and_revenue(&mut store);
             post_entry(&mut store, c, r, 1_000);

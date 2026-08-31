@@ -467,7 +467,7 @@ mod tests {
     fn unbalanced_entry_rejected() {
         let acct_a = Uuid::new_v4();
         let acct_b = Uuid::new_v4();
-        let mut entry = JournalEntryBuilder::new("Bad entry", "test")
+        let entry = JournalEntryBuilder::new("Bad entry", "test")
             .debit(acct_a, Amount::new(100).unwrap(), "USD")
             .credit(acct_b, Amount::new(99).unwrap(), "USD")
             .build();

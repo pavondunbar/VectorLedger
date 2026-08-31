@@ -22,9 +22,9 @@
 //!     within 30 seconds, freeing the semaphore slot.
 //!   - Subsequent frames: `IDLE_TIMEOUT` (5 min).  An authenticated but
 //!     idle connection is reaped after 5 minutes of silence.
-//!   In both cases the client receives a JSON error response before the
-//!   connection is dropped so it can distinguish a timeout from a server
-//!   crash.
+//!   - In both cases the client receives a JSON error response before the
+//!     connection is dropped so it can distinguish a timeout from a server
+//!     crash.
 //! - Fix #7: privilege is checked on the resolved `LogicalPlan` type, not
 //!   raw SQL text.
 //! - Fix #8: incoming line reads are bounded to `MAX_LINE_BYTES` to prevent

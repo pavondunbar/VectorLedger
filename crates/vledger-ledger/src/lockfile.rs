@@ -47,6 +47,7 @@ impl DataDirLock {
         let file = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .read(true)
             .open(&lock_path)
             .map_err(|e| LockError::CreateFailed {

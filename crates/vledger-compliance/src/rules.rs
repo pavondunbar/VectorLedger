@@ -33,11 +33,11 @@ pub fn evaluate(
 
 // ── SOC 2 ─────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::vec_init_then_push)]
 fn evaluate_soc2(
     data_dir: &Path,
     _range: &ReportDateRange,
 ) -> Result<Vec<Evidence>, ComplianceError> {
-    #[allow(clippy::vec_init_then_push)]
     let mut evidence = Vec::new();
 
     // CC6.1 — Logical and physical access controls
@@ -81,11 +81,11 @@ fn evaluate_soc2(
 
 // ── PCI-DSS ───────────────────────────────────────────────────────────────────
 
+#[allow(clippy::vec_init_then_push)]
 fn evaluate_pci_dss(
     data_dir: &Path,
     _range: &ReportDateRange,
 ) -> Result<Vec<Evidence>, ComplianceError> {
-    #[allow(clippy::vec_init_then_push)]
     let mut evidence = Vec::new();
 
     // Req 2.2 — System configuration standards
