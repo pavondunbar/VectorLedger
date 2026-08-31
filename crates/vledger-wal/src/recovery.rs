@@ -68,6 +68,122 @@ pub fn recover_verified(
     recover_with_options(wal_dir, master_key, true)
 }
 
+/// Streaming WAL recovery — calls `on_commit` for each committed transaction
+/// immediately as it is completed, instead of accumulating all transactions
+/// in RAM first.  Constant memory regardless of WAL size.
+///
+/// This is the correct recovery path for large datasets (millions of records).
+/// `recover()` / `recover_verified()` are kept for backwards compatibility with
+/// tests and tooling but should not be used on production-size WALs.
+pub fn recover_streaming<E, F>(
+    wal_dir: &Path,
+    master_key: Option<[u8; 32]>,
+    verify_signatures: bool,
+    mut on_commit: F,
+) -> Result<RecoveryResult, E>
+where
+    E: From<WalError>,
+    F: FnMut(CommittedTransaction) -> Result<(), E>,
+{
+    info!(
+        wal_dir             = %wal_dir.display(),
+        encrypted           = master_key.is_some(),
+        verify_signatures,
+        "Starting WAL recovery (streaming)"
+    );
+
+    let reader = WalReader::open_with_key(wal_dir, master_key)?;
+
+    let mut pending: HashMap<u64, Vec<WalRecord>> = HashMap::new();
+    let mut committed_count = 0usize;
+    let mut last_sequence = 0u64;
+    let mut torn_write_detected = false;
+
+    for result in reader {
+        match result {
+            Err(
+                WalError::ChecksumMismatch { .. }
+                | WalError::TruncatedRecord { .. }
+                | WalError::BadMagic
+                | WalError::Decryption,
+            ) => {
+                warn!("Torn write / end of valid WAL data — stopping recovery scan");
+                torn_write_detected = true;
+                break;
+            }
+            Err(e) => return Err(E::from(e)),
+            Ok(record) => {
+                if record.header.sequence > last_sequence {
+                    last_sequence = record.header.sequence;
+                }
+
+                let record_type = RecordType::try_from(record.header.record_type)
+                    .map_err(E::from)?;
+                let tx_id = record.header.tx_id;
+
+                match record_type {
+                    RecordType::Begin => {
+                        pending.entry(tx_id).or_default();
+                    }
+
+                    RecordType::Data => {
+                        pending.entry(tx_id).or_default().push(record);
+                    }
+
+                    RecordType::Commit => {
+                        if verify_signatures {
+                            let data_records =
+                                pending.get(&tx_id).map(|v| v.as_slice()).unwrap_or(&[]);
+                            verify_commit_full(&record, data_records).map_err(E::from)?;
+                        }
+
+                        let data_records = pending.remove(&tx_id).unwrap_or_default();
+                        let tx = CommittedTransaction {
+                            tx_id,
+                            commit_record: record,
+                            data_records,
+                        };
+                        // Process immediately — no accumulation in RAM.
+                        on_commit(tx)?;
+                        committed_count += 1;
+                    }
+
+                    RecordType::Rollback => {
+                        pending.remove(&tx_id);
+                    }
+
+                    RecordType::Checkpoint | RecordType::Schema | RecordType::SegmentHeader => {}
+                }
+            }
+        }
+    }
+
+    let discarded_tx_count = pending.len();
+    if discarded_tx_count > 0 {
+        warn!(
+            count = discarded_tx_count,
+            "Discarding uncommitted transactions after crash"
+        );
+    }
+
+    info!(
+        committed = committed_count,
+        discarded = discarded_tx_count,
+        last_sequence,
+        torn_write = torn_write_detected,
+        verify_signatures,
+        "WAL recovery complete"
+    );
+
+    Ok(RecoveryResult {
+        // committed vec is empty in streaming mode — caller processes via callback.
+        committed: Vec::new(),
+        discarded_tx_count,
+        last_sequence,
+        torn_write_detected,
+    })
+}
+
 fn recover_with_options(
     wal_dir: &Path,
     master_key: Option<[u8; 32]>,
@@ -118,20 +234,6 @@ fn recover_with_options(
                     }
 
                     RecordType::Commit => {
-                        // ── Ed25519 signature verification + tx_hash recomputation ──
-                        //
-                        // A valid commit requires ALL of the following:
-                        //
-                        //   1. record_count == number of Data records collected for this tx
-                        //   2. recomputed tx_hash (BLAKE3 of row_hash bytes in sequence)
-                        //      == CommitPayload.tx_hash
-                        //   3. Ed25519 signature over tx_hash || record_count.to_le_bytes()
-                        //      is valid (when signing is enabled)
-                        //
-                        // Step 2 is critical: without it, an attacker who can write to
-                        // the WAL file could replace Data records while keeping the
-                        // original (signed) Commit record.  Recomputing tx_hash from the
-                        // actual Data records ensures the signature covers the real data.
                         if verify_signatures {
                             let data_records =
                                 pending.get(&tx_id).map(|v| v.as_slice()).unwrap_or(&[]);

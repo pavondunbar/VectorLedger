@@ -488,35 +488,13 @@ impl LedgerStore {
         import_mode: bool,
     ) -> Result<(), LedgerError> {
         use vledger_wal::record::MutationKind;
-        use vledger_wal::recovery::{decode_data_payload, recover, recover_verified};
-
-        let result = if self.tx_manager.signing_pubkey().is_some() {
-            recover_verified(wal_dir, None)?
-        } else {
-            recover(wal_dir)?
-        };
-        info!(
-            committed = result.committed.len(),
-            discarded = result.discarded_tx_count,
-            verify_signatures = self.tx_manager.signing_pubkey().is_some(),
-            "Replaying WAL into LedgerStore"
-        );
+        use vledger_wal::recovery::{decode_data_payload, recover_streaming};
 
         // ── SQLite fast-path ────────────────────────────────────────────────
-        // The SQLite index was populated during the previous run (import or
-        // normal operation).  Any entry with sequence ≤ sqlite_max_seq is
-        // already in the index — skip the insert, just update in-memory state.
-        // Only entries with sequence > sqlite_max_seq need to be written to
-        // SQLite.  In the common startup case (no new entries since last run)
-        // this means ZERO SQLite inserts, making startup O(WAL records) in
-        // decode time only — no I/O beyond reading the WAL.
-        //
-        // For the idempotency_keys HashSet: we only load keys for entries
-        // that are NOT yet in SQLite.  For entries already in SQLite, dedup
-        // is handled by entry_db.idempotency_key_exists() at post time.
-        // This keeps the HashSet small (typically empty on a clean restart).
+        // Check what's already in SQLite so we can skip re-inserting those
+        // entries during replay.
         let sqlite_max_seq = if import_mode {
-            0u64 // import mode never uses SQLite
+            0u64
         } else {
             self.entry_db.max_sequence().unwrap_or(0)
         };
@@ -528,139 +506,139 @@ impl LedgerStore {
             );
         }
 
-        // Ensure tables exist before any inserts.
         if !import_mode {
             if let Err(e) = self.entry_db.ensure_account_entries_table() {
                 warn!("ensure_account_entries_table: {e}");
             }
         }
 
-        // Begin a bulk SQLite transaction for any new entries that need
-        // inserting (sequence > sqlite_max_seq).  Committed in one shot at
-        // the end — dramatically faster than per-row autocommit.
+        let verify_signatures = self.tx_manager.signing_pubkey().is_some();
+        let master_key = None; // non-encrypted path; encrypted handled by tx_manager
+
         let mut bulk_open = false;
         let mut new_entry_count = 0u64;
+        let mut committed_count = 0usize;
 
-        for tx in result.committed {
-            for record in &tx.data_records {
-                let payload = decode_data_payload(record)?;
-                match payload.mutation {
-                    MutationKind::Insert | MutationKind::Update => match payload.table_id {
-                        TABLE_ACCOUNTS => {
-                            let account: Account = decode(&payload.row_data)?;
-                            self.apply_account(account);
-                        }
-                        TABLE_ENTRIES => {
-                            let entry: JournalEntry = decode(&payload.row_data)?;
-                            if import_mode {
-                                // Import mode: only chain state + idempotency keys.
-                                if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
-                                    self.next_sequence
-                                        .store(entry.sequence + 1, Ordering::SeqCst);
-                                }
-                                self.last_chain_hash = entry.chain_hash;
-                                if let Some(ref key) = entry.idempotency_key {
-                                    self.idempotency_keys.insert(key.clone());
-                                }
-                                self.next_entry_page += 1;
-                            } else {
-                                // Normal mode.
-                                let already_in_sqlite = entry.sequence <= sqlite_max_seq;
-
-                                // Always update in-memory state (sequence, chain,
-                                // balance cache) regardless of SQLite status.
-                                if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
-                                    self.next_sequence
-                                        .store(entry.sequence + 1, Ordering::SeqCst);
-                                }
-                                self.last_chain_hash = entry.chain_hash;
-
-                                // Only load idempotency key into RAM for entries
-                                // NOT already in SQLite.  For existing entries
-                                // the SQLite index handles dedup at post time.
-                                if !already_in_sqlite {
+        // ── Streaming recovery — O(1) RAM regardless of WAL size ───────────
+        // Each committed transaction is processed immediately and discarded.
+        // The pending map inside recover_streaming holds at most one in-flight
+        // transaction at a time (each entry is one WAL transaction).
+        let result = recover_streaming::<LedgerError, _>(
+            wal_dir,
+            master_key,
+            verify_signatures,
+            |tx| {
+                committed_count += 1;
+                for record in &tx.data_records {
+                    let payload = decode_data_payload(record)?;
+                    match payload.mutation {
+                        MutationKind::Insert | MutationKind::Update => match payload.table_id {
+                            TABLE_ACCOUNTS => {
+                                let account: Account = decode(&payload.row_data)?;
+                                self.apply_account(account);
+                            }
+                            TABLE_ENTRIES => {
+                                let entry: JournalEntry = decode(&payload.row_data)?;
+                                if import_mode {
+                                    if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
+                                        self.next_sequence
+                                            .store(entry.sequence + 1, Ordering::SeqCst);
+                                    }
+                                    self.last_chain_hash = entry.chain_hash;
                                     if let Some(ref key) = entry.idempotency_key {
                                         self.idempotency_keys.insert(key.clone());
                                     }
-                                }
+                                    self.next_entry_page += 1;
+                                } else {
+                                    let already_in_sqlite = entry.sequence <= sqlite_max_seq;
 
-                                // Balance cache: always rebuild from WAL — it is
-                                // the authoritative source of truth.
-                                let affects_balance = matches!(
-                                    entry.status,
-                                    EntryStatus::Posted | EntryStatus::Reversal
-                                );
-                                for line in &entry.lines {
-                                    if affects_balance {
-                                        self.update_balance_cache(
-                                            line.account_id,
-                                            line.amount.as_i128(),
-                                            line.dr_cr,
-                                        );
+                                    if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
+                                        self.next_sequence
+                                            .store(entry.sequence + 1, Ordering::SeqCst);
                                     }
-                                }
+                                    self.last_chain_hash = entry.chain_hash;
 
-                                self.next_entry_page += 1;
-
-                                // Insert into SQLite only if not already there.
-                                if !already_in_sqlite {
-                                    if !bulk_open {
-                                        if let Err(e) = self.entry_db.begin_bulk() {
-                                            warn!("begin_bulk during replay: {e}");
-                                        } else {
-                                            bulk_open = true;
+                                    if !already_in_sqlite {
+                                        if let Some(ref key) = entry.idempotency_key {
+                                            self.idempotency_keys.insert(key.clone());
                                         }
                                     }
-                                    if let Err(e) = self.entry_db.insert(&entry) {
-                                        warn!(
-                                            sequence = entry.sequence,
-                                            "entry_db insert failed: {e}"
-                                        );
-                                    } else {
-                                        for line in &entry.lines {
-                                            if let Err(e) = self.entry_db.insert_account_entry(
-                                                &line.account_id,
-                                                entry.sequence,
-                                            ) {
-                                                warn!(
-                                                    sequence = entry.sequence,
-                                                    "entry_db insert_account_entry failed: {e}"
-                                                );
+
+                                    let affects_balance = matches!(
+                                        entry.status,
+                                        EntryStatus::Posted | EntryStatus::Reversal
+                                    );
+                                    for line in &entry.lines {
+                                        if affects_balance {
+                                            self.update_balance_cache(
+                                                line.account_id,
+                                                line.amount.as_i128(),
+                                                line.dr_cr,
+                                            );
+                                        }
+                                    }
+
+                                    self.next_entry_page += 1;
+
+                                    if !already_in_sqlite {
+                                        if !bulk_open {
+                                            if let Err(e) = self.entry_db.begin_bulk() {
+                                                warn!("begin_bulk during replay: {e}");
+                                            } else {
+                                                bulk_open = true;
                                             }
                                         }
-                                        new_entry_count += 1;
+                                        if let Err(e) = self.entry_db.insert(&entry) {
+                                            warn!(
+                                                sequence = entry.sequence,
+                                                "entry_db insert failed: {e}"
+                                            );
+                                        } else {
+                                            for line in &entry.lines {
+                                                if let Err(e) = self.entry_db.insert_account_entry(
+                                                    &line.account_id,
+                                                    entry.sequence,
+                                                ) {
+                                                    warn!(
+                                                        sequence = entry.sequence,
+                                                        "entry_db insert_account_entry: {e}"
+                                                    );
+                                                }
+                                            }
+                                            new_entry_count += 1;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        TABLE_REVERSAL_EVENTS => {
-                            let event: ReversalEvent = decode(&payload.row_data)?;
-                            self.reversal_event_index
-                                .insert(event.original_entry_id, event.reversal_entry_id);
-                        }
-                        TABLE_SETTLEMENT_EVENTS => {
-                            let event: SettlementEvent = decode(&payload.row_data)?;
-                            self.settlement_event_index
-                                .insert(event.entry_id, event.new_status);
-                        }
-                        _ => {}
-                    },
-                    MutationKind::Delete => {
-                        if payload.table_id == TABLE_ACCOUNTS {
-                            let account: Account = decode(&payload.row_data)?;
-                            if account.legal_hold {
-                                self.legal_hold_accounts.insert(account.id);
-                            } else {
-                                self.legal_hold_accounts.remove(&account.id);
+                            TABLE_REVERSAL_EVENTS => {
+                                let event: ReversalEvent = decode(&payload.row_data)?;
+                                self.reversal_event_index
+                                    .insert(event.original_entry_id, event.reversal_entry_id);
                             }
-                            self.accounts.insert(account.id, account);
+                            TABLE_SETTLEMENT_EVENTS => {
+                                let event: SettlementEvent = decode(&payload.row_data)?;
+                                self.settlement_event_index
+                                    .insert(event.entry_id, event.new_status);
+                            }
+                            _ => {}
+                        },
+                        MutationKind::Delete => {
+                            if payload.table_id == TABLE_ACCOUNTS {
+                                let account: Account = decode(&payload.row_data)?;
+                                if account.legal_hold {
+                                    self.legal_hold_accounts.insert(account.id);
+                                } else {
+                                    self.legal_hold_accounts.remove(&account.id);
+                                }
+                                self.accounts.insert(account.id, account);
+                            }
                         }
                     }
                 }
-            }
-        }
+                Ok(())
+            },
+        )?;
 
-        // Commit any new entries that were inserted into SQLite.
         if bulk_open {
             if let Err(e) = self.entry_db.commit_bulk() {
                 warn!("commit_bulk during replay: {e}");
@@ -668,6 +646,13 @@ impl LedgerStore {
                 info!(new_entry_count, "SQLite index updated with new WAL entries");
             }
         }
+
+        info!(
+            committed = committed_count,
+            discarded = result.discarded_tx_count,
+            verify_signatures,
+            "WAL replay complete"
+        );
 
         Ok(())
     }
