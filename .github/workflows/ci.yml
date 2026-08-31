@@ -67,12 +67,13 @@ jobs:
       - name: Clone advisory DB and patch broken CVSS 4.0 advisory
         # cargo-audit 0.21.2 cannot parse CVSS 4.0 advisory files — it
         # crashes the loader before any --ignore flags take effect.
-        # Clone the DB then surgically remove the one broken file.
+        # Clone the DB then remove all advisories containing CVSS 4.0 strings.
         run: |
           git clone --depth 1 \
             https://github.com/rustsec/advisory-db.git \
             /tmp/advisory-db
-          find /tmp/advisory-db -name "RUSTSEC-2026-0038.md" -delete
+          grep -rl 'cvss = "CVSS:4.0' /tmp/advisory-db || true
+          grep -rl 'cvss = "CVSS:4.0' /tmp/advisory-db | xargs rm -f || true
           echo "Remaining advisories: $(find /tmp/advisory-db -name '*.md' | wc -l)"
 
       - name: Run audit
