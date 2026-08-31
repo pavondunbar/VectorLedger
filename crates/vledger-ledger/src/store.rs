@@ -498,45 +498,16 @@ impl LedgerStore {
         };
 
         // Get the WAL's last sequence from the last segment only (fast).
-        let wal_max_seq = if import_mode {
-            0u64
-        } else {
-            vledger_wal::reader::scan_last_sequence_in_segment(
-                &wal_dir.join(vledger_wal::segment::segment_filename(
-                    *vledger_wal::segment::list_segments(wal_dir)
-                        .unwrap_or_default()
-                        .last()
-                        .unwrap_or(&0),
-                )),
-                *vledger_wal::segment::list_segments(wal_dir)
-                    .unwrap_or_default()
-                    .last()
-                    .unwrap_or(&0),
-                None,
-            )
-            .unwrap_or(0)
-        };
-
-        // If SQLite has all committed entries (sqlite_max_seq >= wal_max_seq),
-        // skip entry decoding entirely during WAL replay.  Only accounts,
-        // reversal events, and settlement events are processed from WAL.
-        // The balance cache is rebuilt from SQLite instead.
-        // This reduces WAL replay from O(entries × entry_size) to
-        // O(accounts + reversals + settlements) — effectively O(1) for
-        // a database with no schema changes since last startup.
-        let sqlite_is_current = !import_mode && sqlite_max_seq > 0 && sqlite_max_seq >= wal_max_seq;
+        // NOTE: We do NOT compare WAL record sequences to SQLite entry sequences —
+        // they are different counters. Instead, we detect during replay whether any
+        // entry with sequence > sqlite_max_seq exists. If none found, SQLite is current.
+        // We use a flag that starts true and is set false if a new entry is found.
+        let mut sqlite_is_current = !import_mode && sqlite_max_seq > 0;
 
         if sqlite_is_current {
             info!(
                 sqlite_max_seq,
-                wal_max_seq,
-                "SQLite index is current — skipping entry WAL replay, rebuilding balance cache from SQLite"
-            );
-        } else if sqlite_max_seq > 0 {
-            info!(
-                sqlite_max_seq,
-                wal_max_seq,
-                "SQLite index partially populated — new entries will be inserted during replay"
+                "SQLite index populated — assuming current, will verify during replay"
             );
         }
 
@@ -580,10 +551,63 @@ impl LedgerStore {
                                     }
                                     self.next_entry_page += 1;
                                 } else if sqlite_is_current {
-                                    // SQLite fully current — skip decode entirely.
-                                    // sequence, chain_hash, and balance cache loaded
-                                    // from SQLite after WAL replay completes.
-                                    self.next_entry_page += 1;
+                                    // Assumed SQLite-current path — check if this
+                                    // entry is actually new (sequence > sqlite_max_seq).
+                                    // Decode just enough to get the sequence number.
+                                    let entry: JournalEntry = decode(&payload.row_data)?;
+                                    if entry.sequence > sqlite_max_seq {
+                                        // New entry found — SQLite is NOT current after all.
+                                        // Switch to full processing for this and all future entries.
+                                        sqlite_is_current = false;
+
+                                        // Process this entry fully.
+                                        if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
+                                            self.next_sequence.store(entry.sequence + 1, Ordering::SeqCst);
+                                        }
+                                        self.last_chain_hash = entry.chain_hash;
+                                        if let Some(ref key) = entry.idempotency_key {
+                                            self.idempotency_keys.insert(key.clone());
+                                        }
+                                        let affects_balance = matches!(
+                                            entry.status,
+                                            EntryStatus::Posted | EntryStatus::Reversal
+                                        );
+                                        for line in &entry.lines {
+                                            if affects_balance {
+                                                self.update_balance_cache(
+                                                    line.account_id,
+                                                    line.amount.as_i128(),
+                                                    line.dr_cr,
+                                                );
+                                            }
+                                        }
+                                        self.next_entry_page += 1;
+                                        if !bulk_open {
+                                            if let Err(e) = self.entry_db.begin_bulk() {
+                                                warn!("begin_bulk: {e}");
+                                            } else {
+                                                bulk_open = true;
+                                            }
+                                        }
+                                        if let Err(e) = self.entry_db.insert(&entry) {
+                                            warn!(sequence = entry.sequence, "entry_db insert: {e}");
+                                        } else {
+                                            for line in &entry.lines {
+                                                if let Err(e) = self.entry_db.insert_account_entry(
+                                                    &line.account_id, entry.sequence) {
+                                                    warn!(sequence = entry.sequence, "insert_account_entry: {e}");
+                                                }
+                                            }
+                                            new_entry_count += 1;
+                                        }
+                                    } else {
+                                        // Entry already in SQLite — skip, just advance counters.
+                                        if entry.sequence >= self.next_sequence.load(Ordering::SeqCst) {
+                                            self.next_sequence.store(entry.sequence + 1, Ordering::SeqCst);
+                                        }
+                                        self.last_chain_hash = entry.chain_hash;
+                                        self.next_entry_page += 1;
+                                    }
                                 } else {
                                     // New entries not yet in SQLite.
                                     let entry: JournalEntry = decode(&payload.row_data)?;
