@@ -424,3 +424,33 @@ pub fn scan_last_sequence(wal_dir: &Path, master_key: Option<&[u8; 32]>) -> Resu
     }
     Ok(last_seq)
 }
+
+/// Scans a single segment file to find the highest sequence number in it.
+/// Much faster than scanning the whole WAL — used at startup to seed the
+/// sequence counter without reading all 20+ GB of historical WAL data.
+pub fn scan_last_sequence_in_segment(
+    segment_path: &Path,
+    segment_index: u64,
+    master_key: Option<&[u8; 32]>,
+) -> Result<u64, WalError> {
+    let mut last_seq = 0u64;
+    let mut reader = SegmentReader::open(segment_path, segment_index, master_key.copied())?;
+    loop {
+        match reader.next_record() {
+            None => break,
+            Some(Ok(record)) => {
+                if record.header.sequence > last_seq {
+                    last_seq = record.header.sequence;
+                }
+            }
+            Some(Err(
+                WalError::ChecksumMismatch { .. }
+                | WalError::TruncatedRecord { .. }
+                | WalError::BadMagic
+                | WalError::Decryption,
+            )) => break,
+            Some(Err(e)) => return Err(e),
+        }
+    }
+    Ok(last_seq)
+}

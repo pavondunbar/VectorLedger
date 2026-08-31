@@ -209,7 +209,16 @@ impl WalWriter {
             let path = wal_dir.join(crate::segment::segment_filename(last_idx));
             info!(segment = last_idx, "Resuming WAL from existing segment");
             let seg = Segment::open(path, last_idx, segment_max_size, false)?;
-            let last_seq = crate::reader::scan_last_sequence(wal_dir, master_key.as_ref())?;
+            // Scan only the last segment for the last sequence number.
+            // The full sequence is rebuilt during WAL replay — we only need
+            // a value high enough that new records don't collide with old ones.
+            // Scanning only the last segment keeps this O(segment_size) instead
+            // of O(all_segments) which would read the entire WAL into RAM.
+            let last_seq = crate::reader::scan_last_sequence_in_segment(
+                &wal_dir.join(crate::segment::segment_filename(last_idx)),
+                last_idx,
+                master_key.as_ref(),
+            ).unwrap_or(0);
             (seg, last_idx + 1, last_seq)
         };
 
