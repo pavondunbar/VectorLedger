@@ -527,6 +527,7 @@ impl LedgerStore {
             wal_dir,
             None,
             verify_signatures,
+            None, // row_data needed for non-sqlite_is_current entries
             |tx| {
                 committed_count += 1;
                 for payload in tx.data_payloads {

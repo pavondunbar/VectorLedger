@@ -83,6 +83,7 @@ pub fn recover_streaming<E, F>(
     wal_dir: &Path,
     master_key: Option<[u8; 32]>,
     verify_signatures: bool,
+    skip_row_data_for_table: Option<u32>,
     mut on_commit: F,
 ) -> Result<RecoveryResult, E>
 where
@@ -98,13 +99,7 @@ where
 
     let reader = WalReader::open_with_key(wal_dir, master_key)?;
 
-    // pending_payloads: decoded DataPayloads (much smaller than raw WalRecords).
-    // We keep the raw WalRecords only when verify_signatures=true (signature
-    // verification needs the raw bytes). When false, we decode immediately and
-    // drop the raw bytes — this keeps the pending map at ~100 bytes per entry
-    // instead of ~500 bytes, preventing the allocator from growing to 7+ GB.
     let mut pending_payloads: HashMap<u64, Vec<DataPayload>> = HashMap::new();
-    // Only used when verify_signatures=true.
     let mut pending_raw: HashMap<u64, Vec<WalRecord>> = HashMap::new();
 
     let mut committed_count = 0usize;
@@ -146,14 +141,32 @@ where
                         if verify_signatures {
                             pending_raw.entry(tx_id).or_default().push(record);
                         } else {
-                            // Decode immediately and drop the raw bytes.
-                            // This keeps allocator pressure low for large WALs.
-                            match decode_data_payload(&record) {
-                                Ok(payload) => {
-                                    pending_payloads.entry(tx_id).or_default().push(payload);
-                                }
-                                Err(e) => {
-                                    warn!(tx_id, "Failed to decode DataPayload, skipping: {e}");
+                            // Peek table_id from first 4 bytes — no heap alloc.
+                            let table_id = decode_table_id_only(&record.payload);
+                            let skip = skip_row_data_for_table
+                                .is_some_and(|s| table_id == Some(s));
+
+                            if skip {
+                                // Store a zero-allocation sentinel payload.
+                                // row_data is empty — the callback must not
+                                // try to decode it for this table_id.
+                                pending_payloads.entry(tx_id).or_default().push(DataPayload {
+                                    table_id: table_id.unwrap_or(0),
+                                    page_id: 0,
+                                    slot_id: 0,
+                                    mutation: crate::record::MutationKind::Insert,
+                                    row_data: Vec::new(),
+                                    row_hash: [0u8; 32],
+                                    prev_hash: None,
+                                });
+                            } else {
+                                match decode_data_payload(&record) {
+                                    Ok(payload) => {
+                                        pending_payloads.entry(tx_id).or_default().push(payload);
+                                    }
+                                    Err(e) => {
+                                        warn!(tx_id, "Failed to decode DataPayload: {e}");
+                                    }
                                 }
                             }
                         }
@@ -453,12 +466,31 @@ fn verify_commit_signature(commit_record: &WalRecord) -> Result<(), WalError> {
 
 /// Decode a [`DataPayload`] from a WAL record's raw payload bytes.
 pub fn decode_data_payload(record: &WalRecord) -> Result<DataPayload, WalError> {
+    decode_data_payload_from_bytes(&record.payload)
+}
+
+/// Decode a [`DataPayload`] from raw bytes.
+pub fn decode_data_payload_from_bytes(bytes: &[u8]) -> Result<DataPayload, WalError> {
     bincode::serde::decode_from_slice(
-        &record.payload,
+        bytes,
         bincode::config::standard().with_fixed_int_encoding(),
     )
     .map(|(p, _)| p)
     .map_err(|e: bincode::error::DecodeError| WalError::Serialization(e.to_string()))
+}
+
+/// Decode only the `table_id` from a raw DataPayload byte slice.
+/// `table_id` is the first field — 4 bytes LE u32. No heap allocation.
+pub fn decode_table_id_only(payload_bytes: &[u8]) -> Option<u32> {
+    if payload_bytes.len() < 4 {
+        return None;
+    }
+    Some(u32::from_le_bytes([
+        payload_bytes[0],
+        payload_bytes[1],
+        payload_bytes[2],
+        payload_bytes[3],
+    ]))
 }
 
 /// Decode a [`CommitPayload`] from a WAL record's raw payload bytes.

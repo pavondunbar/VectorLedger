@@ -60,7 +60,7 @@ pub use error::WalError;
 pub use key_rotation::{rotate_wal_key, KeyRotationResult};
 pub use reader::WalReader;
 pub use record::{RecordType, WalRecord};
-pub use recovery::{recover, recover_streaming, recover_verified};
+pub use recovery::{recover, recover_streaming, recover_verified, decode_table_id_only};
 pub use writer::{spawn_group_commit_flusher, FlushState, WalSyncMode, WalWriter};
 
 /// WAL magic number — spells "VectorLedger" in hex.
