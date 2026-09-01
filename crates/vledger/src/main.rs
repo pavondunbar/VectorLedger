@@ -3,6 +3,14 @@
 //! Cryptographically verifiable financial database engine.
 //! Built by VectorGuard Labs.
 
+// Use jemalloc as the global allocator on Linux/macOS.
+// jemalloc aggressively returns freed memory to the OS (unlike ptmalloc),
+// preventing the ~7 GB RSS accumulation that occurs during WAL recovery
+// when 25M+ records are processed and freed one at a time.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod audit_package;
 mod backup;
 mod key_rotation;
