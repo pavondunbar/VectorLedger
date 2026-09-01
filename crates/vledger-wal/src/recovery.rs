@@ -84,6 +84,7 @@ pub fn recover_streaming<E, F>(
     master_key: Option<[u8; 32]>,
     verify_signatures: bool,
     skip_row_data_for_table: Option<u32>,
+    start_segment: u64,
     mut on_commit: F,
 ) -> Result<RecoveryResult, E>
 where
@@ -94,10 +95,11 @@ where
         wal_dir             = %wal_dir.display(),
         encrypted           = master_key.is_some(),
         verify_signatures,
+        start_segment,
         "Starting WAL recovery (streaming)"
     );
 
-    let reader = WalReader::open_with_key(wal_dir, master_key)?;
+    let reader = WalReader::open_with_key_from_segment(wal_dir, master_key, start_segment)?;
 
     let mut pending_payloads: HashMap<u64, Vec<DataPayload>> = HashMap::new();
     let mut pending_raw: HashMap<u64, Vec<WalRecord>> = HashMap::new();

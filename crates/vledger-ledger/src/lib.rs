@@ -37,6 +37,7 @@ mod proptest_invariants;
 pub mod store;
 #[cfg(test)]
 mod stress_tests;
+pub mod wal_checkpoint;
 
 pub use account::{Account, AccountId, AccountType};
 pub use amount::Amount;

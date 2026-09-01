@@ -352,7 +352,21 @@ impl WalReader {
 
     /// Open with an optional master key for decrypting encrypted segments.
     pub fn open_with_key(wal_dir: &Path, master_key: Option<[u8; 32]>) -> Result<Self, WalError> {
-        let indices = list_segments(wal_dir)?;
+        Self::open_with_key_from_segment(wal_dir, master_key, 0)
+    }
+
+    /// Open starting from a specific segment index, skipping earlier segments.
+    /// Used at startup to skip WAL history already captured in the SQLite index.
+    pub fn open_with_key_from_segment(
+        wal_dir: &Path,
+        master_key: Option<[u8; 32]>,
+        start_segment: u64,
+    ) -> Result<Self, WalError> {
+        let all_indices = list_segments(wal_dir)?;
+        let indices: Vec<u64> = all_indices
+            .into_iter()
+            .filter(|&i| i >= start_segment)
+            .collect();
         Ok(Self {
             wal_dir: wal_dir.to_path_buf(),
             segment_indices: indices,

@@ -58,6 +58,7 @@ use crate::entry::{DrCr, EntryStatus, JournalEntry, JournalLine};
 use crate::entry_db::EntryDb;
 use crate::error::LedgerError;
 use crate::lockfile::DataDirLock;
+use crate::wal_checkpoint::WalCheckpoint;
 
 // ── Table IDs ────────────────────────────────────────────────────────────────
 // Each logical table maps to a dedicated page file in PageStore.
@@ -261,6 +262,27 @@ impl LedgerStore {
         };
 
         store.replay_from_wal(&wal_dir)?;
+
+        // Write a WAL startup checkpoint so the next open() can skip
+        // WAL segments that are already fully captured in SQLite.
+        let sqlite_max = store.entry_db.max_sequence().unwrap_or(0);
+        let segments = vledger_wal::segment::list_segments(&wal_dir).unwrap_or_default();
+        let last_seg = segments.last().copied().unwrap_or(0);
+        if sqlite_max > 0 {
+            let cp = WalCheckpoint {
+                sqlite_max_sequence: sqlite_max,
+                first_needed_segment: last_seg,
+            };
+            if let Err(e) = WalCheckpoint::write(data_dir, &cp) {
+                warn!("Failed to write WAL checkpoint: {e}");
+            } else {
+                info!(
+                    sqlite_max_sequence = sqlite_max,
+                    first_needed_segment = last_seg,
+                    "WAL startup checkpoint written"
+                );
+            }
+        }
 
         info!(
             accounts = store.accounts.len(),
@@ -490,6 +512,32 @@ impl LedgerStore {
         use vledger_wal::record::MutationKind;
         use vledger_wal::recovery::recover_streaming;
 
+        // ── WAL startup checkpoint — skip segments already in SQLite ────────
+        // Read the checkpoint written by the previous open(). If present,
+        // skip all WAL segments before first_needed_segment. This turns
+        // 20 GB of WAL replay into reading 1-2 segments (128 MB) on restart.
+        let data_dir_opt = self.data_dir.clone();
+        let start_segment = if import_mode {
+            0u64
+        } else if let Some(ref dd) = data_dir_opt {
+            match WalCheckpoint::read(dd) {
+                Some(cp) => {
+                    info!(
+                        sqlite_max_sequence = cp.sqlite_max_sequence,
+                        first_needed_segment = cp.first_needed_segment,
+                        "WAL startup checkpoint found — skipping earlier segments"
+                    );
+                    cp.first_needed_segment
+                }
+                None => {
+                    info!("No WAL startup checkpoint — replaying full WAL");
+                    0u64
+                }
+            }
+        } else {
+            0u64
+        };
+
         // ── SQLite fast-path ────────────────────────────────────────────────
         let sqlite_max_seq = if import_mode {
             0u64
@@ -497,16 +545,12 @@ impl LedgerStore {
             self.entry_db.max_sequence().unwrap_or(0)
         };
 
-        // Get the WAL's last sequence from the last segment only (fast).
-        // NOTE: We do NOT compare WAL record sequences to SQLite entry sequences —
-        // they are different counters. Instead, we detect during replay whether any
-        // entry with sequence > sqlite_max_seq exists. If none found, SQLite is current.
-        // We use a flag that starts true and is set false if a new entry is found.
         let mut sqlite_is_current = !import_mode && sqlite_max_seq > 0;
 
         if sqlite_is_current {
             info!(
                 sqlite_max_seq,
+                start_segment,
                 "SQLite index populated — assuming current, will verify during replay"
             );
         }
@@ -527,7 +571,8 @@ impl LedgerStore {
             wal_dir,
             None,
             verify_signatures,
-            None, // row_data needed for non-sqlite_is_current entries
+            None,
+            start_segment,
             |tx| {
                 committed_count += 1;
                 for payload in tx.data_payloads {
