@@ -350,6 +350,16 @@ enum Commands {
     /// Show the active license tier, features, and expiry.
     #[command(name = "license")]
     License,
+
+    /// One-time migration: populate the SQLite entry index from the WAL.
+    ///
+    /// Run this if the SQLite index (vledger.db) is empty after a large import.
+    /// Reads the WAL in batches and writes entries to SQLite incrementally.
+    /// Progress is printed every 100,000 entries so you can see it working.
+    /// Safe to interrupt and re-run — already-indexed entries are skipped.
+    /// Writes wal-checkpoint.json when complete so future startups are fast.
+    #[command(name = "migrate-to-sqlite")]
+    MigrateToSqlite,
     /// Generate a portable, self-contained audit evidence package (JSON).
     ///
     /// Default (commitment-only): computes the Merkle root over all entries,
@@ -848,6 +858,7 @@ async fn main() -> Result<()> {
             cmd_user(&cli.data_dir, action, ca_cert.as_deref()).await
         }
         Commands::License => cmd_license(&cli.data_dir),
+        Commands::MigrateToSqlite => cmd_migrate_to_sqlite(&cli.data_dir).await,
         Commands::BackupVerify { from, decrypt } => {
             cmd_backup_verify(&cli.data_dir, &from, decrypt).await
         }
@@ -5710,4 +5721,173 @@ fn row_from_map(
         raw: raw.to_string(),
         raw_fields,
     })
+}
+
+
+// ── migrate-to-sqlite ─────────────────────────────────────────────────────────
+
+/// One-time migration: read WAL records and populate the SQLite entry index.
+///
+/// This is needed when the SQLite index is empty (e.g. after a large import
+/// that used open_for_import which bypasses SQLite). The server cannot start
+/// until SQLite is populated because WAL replay itself requires reading 20 GB.
+///
+/// After completion, writes wal-checkpoint.json so future startups skip all
+/// historical WAL segments.
+async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    use vledger_ledger::entry_db::EntryDb;
+    use vledger_ledger::wal_checkpoint::WalCheckpoint;
+    use vledger_wal::recovery::{decode_data_payload_from_bytes, recover_streaming};
+    use vledger_wal::record::MutationKind;
+
+    println!("── VectorLedger SQLite Migration ──────────────────────");
+    println!("  Populating SQLite index from WAL records.");
+    println!("  This is a one-time operation. Safe to interrupt.");
+    println!();
+
+    let wal_dir = data_dir.join("wal");
+    let db_path = data_dir.join("vledger.db");
+
+    // Open SQLite index directly (no LedgerStore — avoids WAL replay).
+    let entry_db = EntryDb::open(&db_path)
+        .map_err(|e| anyhow::anyhow!("Cannot open SQLite index: {e}"))?;
+    entry_db
+        .ensure_account_entries_table()
+        .map_err(|e| anyhow::anyhow!("Cannot create tables: {e}"))?;
+
+    let already_indexed = entry_db.count().unwrap_or(0);
+    println!("  Already indexed : {already_indexed} entries");
+
+    // Find the highest sequence already in SQLite so we can skip those.
+    let start_seq = entry_db.max_sequence().unwrap_or(0);
+    println!("  Resuming from   : sequence {}", start_seq + 1);
+    println!();
+
+    let segments = vledger_wal::segment::list_segments(&wal_dir)
+        .map_err(|e| anyhow::anyhow!("Cannot list WAL segments: {e}"))?;
+    let total_segments = segments.len();
+    println!("  WAL segments    : {total_segments}");
+    println!("  Reading WAL...");
+
+    let mut indexed: u64 = 0;
+    let mut skipped: u64 = 0;
+    let mut last_seq: u64 = 0;
+    let batch_size: u64 = 10_000;
+    let mut batch_count: u64 = 0;
+    let start = std::time::Instant::now();
+
+    // Begin first bulk transaction.
+    entry_db
+        .begin_bulk()
+        .map_err(|e| anyhow::anyhow!("begin_bulk: {e}"))?;
+
+    let result = recover_streaming::<anyhow::Error, _>(
+        &wal_dir,
+        None,
+        false,
+        None,
+        0, // start from segment 0 — we filter by sequence instead
+        |tx| {
+            for payload in tx.data_payloads {
+                match payload.mutation {
+                    MutationKind::Insert | MutationKind::Update => {
+                        if payload.table_id == 1 {
+                            // TABLE_ENTRIES = 1
+                            if payload.row_data.is_empty() {
+                                continue;
+                            }
+                            let entry: vledger_ledger::entry::JournalEntry =
+                                bincode::serde::decode_from_slice(
+                                    &payload.row_data,
+                                    bincode::config::standard(),
+                                )
+                                .map(|(e, _)| e)
+                                .map_err(|e| anyhow::anyhow!("decode entry: {e}"))?;
+
+                            if entry.sequence <= start_seq {
+                                skipped += 1;
+                                continue;
+                            }
+
+                            last_seq = last_seq.max(entry.sequence);
+
+                            entry_db
+                                .insert(&entry)
+                                .map_err(|e| anyhow::anyhow!("insert: {e}"))?;
+
+                            for line in &entry.lines {
+                                entry_db
+                                    .insert_account_entry(&line.account_id, entry.sequence)
+                                    .map_err(|e| anyhow::anyhow!("insert_account_entry: {e}"))?;
+                            }
+
+                            indexed += 1;
+                            batch_count += 1;
+
+                            if batch_count >= batch_size {
+                                entry_db
+                                    .commit_bulk()
+                                    .map_err(|e| anyhow::anyhow!("commit_bulk: {e}"))?;
+                                entry_db
+                                    .begin_bulk()
+                                    .map_err(|e| anyhow::anyhow!("begin_bulk: {e}"))?;
+                                batch_count = 0;
+
+                                if indexed % 100_000 == 0 {
+                                    let elapsed = start.elapsed().as_secs_f64();
+                                    let tps = indexed as f64 / elapsed;
+                                    eprint!(
+                                        "\r  Indexed: {:>10}  skipped: {:>10}  ({:.0} entries/sec)",
+                                        indexed, skipped, tps
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        },
+    );
+
+    // Commit final batch regardless of error.
+    let _ = entry_db.commit_bulk();
+
+    result?;
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let total = already_indexed + indexed;
+    println!(
+        "\r  Indexed: {:>10}  skipped: {:>10}  ({:.0} entries/sec)",
+        indexed,
+        skipped,
+        if elapsed > 0.0 { indexed as f64 / elapsed } else { 0.0 }
+    );
+    println!();
+    println!("── Migration Complete ──────────────────────────────────");
+    println!("  Total entries in SQLite : {total}");
+    println!("  Elapsed                 : {:.1}s", elapsed);
+
+    // Write the WAL checkpoint so future startups skip historical segments.
+    let segs = vledger_wal::segment::list_segments(&wal_dir).unwrap_or_default();
+    let last_seg = segs.last().copied().unwrap_or(0);
+    let final_max = entry_db.max_sequence().unwrap_or(0);
+    let cp = WalCheckpoint {
+        sqlite_max_sequence: final_max,
+        first_needed_segment: last_seg,
+    };
+    WalCheckpoint::write(data_dir, &cp)
+        .map_err(|e| anyhow::anyhow!("Failed to write checkpoint: {e}"))?;
+
+    println!(
+        "  WAL checkpoint written  : skip to segment {} on next start",
+        last_seg
+    );
+    println!("──────────────────────────────────────────────────────");
+    println!();
+    println!("✓ Migration complete. You can now start the server:");
+    println!("  nohup vledger start --data-dir {} --with-proofs &", data_dir.display());
+
+    Ok(())
 }
