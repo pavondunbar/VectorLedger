@@ -5772,7 +5772,7 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
     println!("  WAL segments    : {}", total_segments);
     println!("  Est. entries    : ~{}", est_total);
     println!("  Batch size      : 100,000 entries per transaction");
-    println!("  Mode            : bulk (journal=OFF, sync=OFF)");
+    println!("  Mode            : WAL + crash-safe (journal=WAL, sync=NORMAL)");
     println!();
     println!("  Reading WAL and indexing entries...");
     println!();

@@ -198,6 +198,9 @@ impl EntryDb {
             return Ok(0);
         }
         let conn = self.lock()?;
+        // Rollback any lingering transaction before starting a new one.
+        // This handles the case where a previous run was interrupted.
+        let _ = conn.execute_batch("ROLLBACK");
         conn.execute_batch("BEGIN")
             .map_err(|e| LedgerError::Serialization(format!("BEGIN: {e}")))?;
 
