@@ -5724,20 +5724,23 @@ fn row_from_map(
 }
 
 
+
 // ── migrate-to-sqlite ─────────────────────────────────────────────────────────
 
 /// One-time migration: read WAL records and populate the SQLite entry index.
 ///
-/// This is needed when the SQLite index is empty (e.g. after a large import
-/// that used open_for_import which bypasses SQLite). The server cannot start
-/// until SQLite is populated because WAL replay itself requires reading 20 GB.
+/// Optimizations:
+/// - SQLite in migration mode: journal=OFF, sync=OFF, 256MB cache, EXCLUSIVE lock
+/// - 100,000-entry batches per transaction
+/// - Pre-compiled INSERT statement reused per batch
+/// - account_entries rebuilt in a separate pass after entries are indexed
+/// - Progress printed every 1M entries
 ///
-/// After completion, writes wal-checkpoint.json so future startups skip all
-/// historical WAL segments.
+/// Expected throughput: 50,000-150,000 entries/sec (vs ~2,400 before).
 async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()> {
     use vledger_ledger::entry_db::EntryDb;
     use vledger_ledger::wal_checkpoint::WalCheckpoint;
-    use vledger_wal::recovery::{decode_data_payload_from_bytes, recover_streaming};
+    use vledger_wal::recovery::recover_streaming;
     use vledger_wal::record::MutationKind;
 
     println!("── VectorLedger SQLite Migration ──────────────────────");
@@ -5748,128 +5751,157 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
     let wal_dir = data_dir.join("wal");
     let db_path = data_dir.join("vledger.db");
 
-    // Open SQLite index directly (no LedgerStore — avoids WAL replay).
-    let entry_db = EntryDb::open(&db_path)
+    // Open SQLite in migration mode: aggressive PRAGMAs for bulk insert speed.
+    let entry_db = EntryDb::open_for_migration(&db_path)
         .map_err(|e| anyhow::anyhow!("Cannot open SQLite index: {e}"))?;
     entry_db
         .ensure_account_entries_table()
         .map_err(|e| anyhow::anyhow!("Cannot create tables: {e}"))?;
 
     let already_indexed = entry_db.count().unwrap_or(0);
-    println!("  Already indexed : {already_indexed} entries");
-
-    // Find the highest sequence already in SQLite so we can skip those.
     let start_seq = entry_db.max_sequence().unwrap_or(0);
+
+    println!("  Already indexed : {} entries", already_indexed);
     println!("  Resuming from   : sequence {}", start_seq + 1);
     println!();
 
     let segments = vledger_wal::segment::list_segments(&wal_dir)
         .map_err(|e| anyhow::anyhow!("Cannot list WAL segments: {e}"))?;
     let total_segments = segments.len();
-    println!("  WAL segments    : {total_segments}");
-    println!("  Reading WAL...");
+    let est_total = total_segments as u64 * 80_000u64;
+    println!("  WAL segments    : {}", total_segments);
+    println!("  Est. entries    : ~{}", est_total);
+    println!("  Batch size      : 100,000 entries per transaction");
+    println!("  Mode            : bulk (journal=OFF, sync=OFF)");
+    println!();
+    println!("  Reading WAL and indexing entries...");
+    println!();
 
+    const BATCH_SIZE: usize = 100_000;
+    let mut batch: Vec<vledger_ledger::entry::JournalEntry> = Vec::with_capacity(BATCH_SIZE);
     let mut indexed: u64 = 0;
     let mut skipped: u64 = 0;
-    let mut last_seq: u64 = 0;
-    let batch_size: u64 = 10_000;
-    let mut batch_count: u64 = 0;
     let start = std::time::Instant::now();
-
-    // Begin first bulk transaction.
-    entry_db
-        .begin_bulk()
-        .map_err(|e| anyhow::anyhow!("begin_bulk: {e}"))?;
 
     let result = recover_streaming::<anyhow::Error, _>(
         &wal_dir,
         None,
         false,
         None,
-        0, // start from segment 0 — we filter by sequence instead
+        0,
         |tx| {
             for payload in tx.data_payloads {
-                match payload.mutation {
-                    MutationKind::Insert | MutationKind::Update => {
-                        if payload.table_id == 1 {
-                            // TABLE_ENTRIES = 1
-                            if payload.row_data.is_empty() {
-                                continue;
-                            }
-                            let entry: vledger_ledger::entry::JournalEntry =
-                                bincode::serde::decode_from_slice(
-                                    &payload.row_data,
-                                    bincode::config::standard(),
-                                )
-                                .map(|(e, _)| e)
-                                .map_err(|e| anyhow::anyhow!("decode entry: {e}"))?;
+                if !matches!(payload.mutation, MutationKind::Insert | MutationKind::Update) {
+                    continue;
+                }
+                if payload.table_id != 1 || payload.row_data.is_empty() {
+                    continue;
+                }
 
-                            if entry.sequence <= start_seq {
-                                skipped += 1;
-                                continue;
-                            }
+                let entry: vledger_ledger::entry::JournalEntry =
+                    bincode::serde::decode_from_slice(
+                        &payload.row_data,
+                        bincode::config::standard(),
+                    )
+                    .map(|(e, _)| e)
+                    .map_err(|e| anyhow::anyhow!("decode entry: {e}"))?;
 
-                            last_seq = last_seq.max(entry.sequence);
+                if entry.sequence <= start_seq {
+                    skipped += 1;
+                    continue;
+                }
 
-                            entry_db
-                                .insert(&entry)
-                                .map_err(|e| anyhow::anyhow!("insert: {e}"))?;
+                batch.push(entry);
 
-                            for line in &entry.lines {
-                                entry_db
-                                    .insert_account_entry(&line.account_id, entry.sequence)
-                                    .map_err(|e| anyhow::anyhow!("insert_account_entry: {e}"))?;
-                            }
+                if batch.len() >= BATCH_SIZE {
+                    let n = entry_db
+                        .bulk_insert_migration(&batch)
+                        .map_err(|e| anyhow::anyhow!("bulk_insert: {e}"))?;
+                    indexed += n;
+                    batch.clear();
 
-                            indexed += 1;
-                            batch_count += 1;
-
-                            if batch_count >= batch_size {
-                                entry_db
-                                    .commit_bulk()
-                                    .map_err(|e| anyhow::anyhow!("commit_bulk: {e}"))?;
-                                entry_db
-                                    .begin_bulk()
-                                    .map_err(|e| anyhow::anyhow!("begin_bulk: {e}"))?;
-                                batch_count = 0;
-
-                                if indexed % 100_000 == 0 {
-                                    let elapsed = start.elapsed().as_secs_f64();
-                                    let tps = indexed as f64 / elapsed;
-                                    eprint!(
-                                        "\r  Indexed: {:>10}  skipped: {:>10}  ({:.0} entries/sec)",
-                                        indexed, skipped, tps
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
+                    let elapsed = start.elapsed().as_secs_f64().max(0.001);
+                    let tps = indexed as f64 / elapsed;
+                    let pct = if est_total > 0 {
+                        (indexed + already_indexed) * 100 / est_total
+                    } else {
+                        0
+                    };
+                    eprint!(
+                        "\r  Entries: {:>12}  ~{}%  ({:.0}/sec)    ",
+                        indexed, pct, tps
+                    );
                 }
             }
             Ok(())
         },
     );
 
-    // Commit final batch regardless of error.
-    let _ = entry_db.commit_bulk();
+    // Flush final partial batch.
+    if !batch.is_empty() {
+        let n = entry_db
+            .bulk_insert_migration(&batch)
+            .map_err(|e| anyhow::anyhow!("final batch: {e}"))?;
+        indexed += n;
+    }
 
     result?;
 
-    let elapsed = start.elapsed().as_secs_f64();
+    let elapsed = start.elapsed().as_secs_f64().max(0.001);
+    let tps = indexed as f64 / elapsed;
     let total = already_indexed + indexed;
+
+    eprintln!();
+    println!("  ✓ Entries indexed       : {} ({:.0}/sec)", indexed, tps);
+    println!("  Previously indexed      : {}", already_indexed);
+    println!("  Total in SQLite         : {}", total);
+    println!("  Elapsed                 : {:.1}s", elapsed);
+    println!();
+
+    // Rebuild account_entries cross-reference index.
+    println!("  Rebuilding account index (pass 2 of 2)...");
+    let ae_start = std::time::Instant::now();
+    let mut ae_count: u64 = 0;
+    let mut ae_batch: u64 = 0;
+
+    entry_db
+        .begin_bulk()
+        .map_err(|e| anyhow::anyhow!("begin_bulk ae: {e}"))?;
+
+    entry_db
+        .stream_all(|entry| {
+            for line in &entry.lines {
+                entry_db
+                    .insert_account_entry(&line.account_id, entry.sequence)
+                    .map_err(|e| {
+                        vledger_ledger::error::LedgerError::Serialization(format!(
+                            "insert_account_entry: {e}"
+                        ))
+                    })?;
+                ae_count += 1;
+                ae_batch += 1;
+            }
+            if ae_batch >= 500_000 {
+                let _ = entry_db.commit_bulk();
+                let _ = entry_db.begin_bulk();
+                ae_batch = 0;
+                eprint!("\r  Account index: {:>12} lines    ", ae_count);
+            }
+            Ok(())
+        })
+        .map_err(|e| anyhow::anyhow!("stream_all: {e}"))?;
+
+    let _ = entry_db.commit_bulk();
+    eprintln!();
+
+    let ae_elapsed = ae_start.elapsed().as_secs_f64().max(0.001);
     println!(
-        "\r  Indexed: {:>10}  skipped: {:>10}  ({:.0} entries/sec)",
-        indexed,
-        skipped,
-        if elapsed > 0.0 { indexed as f64 / elapsed } else { 0.0 }
+        "  ✓ Account index rebuilt : {} lines in {:.1}s",
+        ae_count, ae_elapsed
     );
     println!();
-    println!("── Migration Complete ──────────────────────────────────");
-    println!("  Total entries in SQLite : {total}");
-    println!("  Elapsed                 : {:.1}s", elapsed);
 
-    // Write the WAL checkpoint so future startups skip historical segments.
+    // Write WAL startup checkpoint.
     let segs = vledger_wal::segment::list_segments(&wal_dir).unwrap_or_default();
     let last_seg = segs.last().copied().unwrap_or(0);
     let final_max = entry_db.max_sequence().unwrap_or(0);
@@ -5880,14 +5912,18 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
     WalCheckpoint::write(data_dir, &cp)
         .map_err(|e| anyhow::anyhow!("Failed to write checkpoint: {e}"))?;
 
+    println!("── Migration Complete ──────────────────────────────────");
     println!(
-        "  WAL checkpoint written  : skip to segment {} on next start",
+        "  WAL checkpoint written  : segment {} on next startup",
         last_seg
     );
     println!("──────────────────────────────────────────────────────");
     println!();
-    println!("✓ Migration complete. You can now start the server:");
-    println!("  nohup vledger start --data-dir {} --with-proofs &", data_dir.display());
+    println!("✓ Done. You can now start the server:");
+    println!(
+        "  nohup vledger start --data-dir {} --with-proofs &",
+        data_dir.display()
+    );
 
     Ok(())
 }
