@@ -5858,8 +5858,22 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
     println!("  Elapsed                 : {:.1}s", elapsed);
     println!();
 
-    // Rebuild account_entries cross-reference index.
-    println!("  Rebuilding account index (pass 2 of 2)...");
+    // Pass 2: build secondary indexes (domain, status, external_ref, idem_key).
+    // Doing this after all rows are inserted is a single sorted scan per index —
+    // much faster than maintaining the B-tree incrementally during insertion.
+    println!("  Building secondary indexes (pass 2 of 3)...");
+    let idx_start = std::time::Instant::now();
+    entry_db
+        .build_indexes_after_migration()
+        .map_err(|e| anyhow::anyhow!("build indexes: {e}"))?;
+    println!(
+        "  ✓ Secondary indexes built in {:.1}s",
+        idx_start.elapsed().as_secs_f64()
+    );
+    println!();
+
+    // Pass 3: rebuild account_entries cross-reference.
+    println!("  Building account index (pass 3 of 3)...");
     let ae_start = std::time::Instant::now();
     let mut ae_count: u64 = 0;
     let mut ae_batch: u64 = 0;
@@ -5894,10 +5908,10 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
     let _ = entry_db.commit_bulk();
     eprintln!();
 
-    let ae_elapsed = ae_start.elapsed().as_secs_f64().max(0.001);
     println!(
-        "  ✓ Account index rebuilt : {} lines in {:.1}s",
-        ae_count, ae_elapsed
+        "  ✓ Account index built   : {} lines in {:.1}s",
+        ae_count,
+        ae_start.elapsed().as_secs_f64()
     );
     println!();
 

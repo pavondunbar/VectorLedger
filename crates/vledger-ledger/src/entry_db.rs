@@ -89,54 +89,95 @@ impl EntryDb {
             .map_err(|e| LedgerError::Serialization(format!("SQLite open error: {e}")))?;
 
         if migration_mode {
-            // Maximum bulk-insert throughput: disable fsync, use DELETE journal
-            // (simpler than WAL for pure-write workloads), huge cache.
-            // Safe only for offline migration — any crash requires re-running migrate.
+            // Migration mode: WAL journal (crash-safe) + NORMAL sync + huge cache.
+            // Secondary indexes are NOT created here — they are built in one pass
+            // after all rows are inserted via build_indexes_after_migration().
+            // Inserting without secondary indexes is ~3x faster; building indexes
+            // in one sorted scan at the end is faster than 25M incremental updates.
             conn.execute_batch(
-                "PRAGMA journal_mode=OFF;
-                 PRAGMA synchronous=OFF;
-                 PRAGMA cache_size=-262144;
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 PRAGMA cache_size=-524288;
                  PRAGMA temp_store=MEMORY;
                  PRAGMA locking_mode=EXCLUSIVE;
-                 PRAGMA mmap_size=34359738368;",
+                 PRAGMA mmap_size=34359738368;
+                 PRAGMA wal_autocheckpoint=10000;",
             )
             .map_err(|e| LedgerError::Serialization(format!("SQLite pragma error: {e}")))?;
+
+            // Create entries table WITHOUT secondary indexes.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS entries (
+                    sequence        INTEGER PRIMARY KEY,
+                    id              TEXT    NOT NULL,
+                    status          TEXT    NOT NULL,
+                    domain          TEXT    NOT NULL,
+                    external_ref    TEXT,
+                    idempotency_key TEXT,
+                    content_hash    TEXT    NOT NULL,
+                    chain_hash      TEXT    NOT NULL,
+                    effective_at    TEXT    NOT NULL,
+                    posted_at       TEXT    NOT NULL,
+                    data            BLOB    NOT NULL
+                );",
+            )
+            .map_err(|e| LedgerError::Serialization(format!("SQLite schema error: {e}")))?;
         } else {
             // Normal mode: WAL + NORMAL sync for concurrent read safety.
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
                 .map_err(|e| LedgerError::Serialization(format!("SQLite pragma error: {e}")))?;
             conn.execute_batch("PRAGMA cache_size=-16384;")
                 .map_err(|e| LedgerError::Serialization(format!("SQLite pragma error: {e}")))?;
+
+            // Normal open: create table + all indexes.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS entries (
+                    sequence        INTEGER PRIMARY KEY,
+                    id              TEXT    NOT NULL,
+                    status          TEXT    NOT NULL,
+                    domain          TEXT    NOT NULL,
+                    external_ref    TEXT,
+                    idempotency_key TEXT,
+                    content_hash    TEXT    NOT NULL,
+                    chain_hash      TEXT    NOT NULL,
+                    effective_at    TEXT    NOT NULL,
+                    posted_at       TEXT    NOT NULL,
+                    data            BLOB    NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_entries_domain
+                    ON entries(domain);
+                CREATE INDEX IF NOT EXISTS idx_entries_status
+                    ON entries(status);
+                CREATE INDEX IF NOT EXISTS idx_entries_external_ref
+                    ON entries(external_ref) WHERE external_ref IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_entries_idem_key
+                    ON entries(idempotency_key) WHERE idempotency_key IS NOT NULL;",
+            )
+            .map_err(|e| LedgerError::Serialization(format!("SQLite schema error: {e}")))?;
         }
 
+        Ok(Self { conn: Mutex::new(conn) })
+    }
+
+    /// Build secondary indexes after bulk migration insert is complete.
+    /// Called once after all rows are in the entries table.
+    /// Much faster than maintaining indexes incrementally during insertion.
+    pub fn build_indexes_after_migration(&self) -> Result<(), LedgerError> {
+        let conn = self.lock()?;
+        // These are expensive but run as single sorted scans — far faster
+        // than 25M individual B-tree insertions during row inserts.
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS entries (
-                sequence        INTEGER PRIMARY KEY,
-                id              TEXT    NOT NULL,
-                status          TEXT    NOT NULL,
-                domain          TEXT    NOT NULL,
-                external_ref    TEXT,
-                idempotency_key TEXT,
-                content_hash    TEXT    NOT NULL,
-                chain_hash      TEXT    NOT NULL,
-                effective_at    TEXT    NOT NULL,
-                posted_at       TEXT    NOT NULL,
-                data            BLOB    NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_entries_domain
+            "CREATE INDEX IF NOT EXISTS idx_entries_domain
                 ON entries(domain);
-            CREATE INDEX IF NOT EXISTS idx_entries_status
+             CREATE INDEX IF NOT EXISTS idx_entries_status
                 ON entries(status);
-            CREATE INDEX IF NOT EXISTS idx_entries_external_ref
+             CREATE INDEX IF NOT EXISTS idx_entries_external_ref
                 ON entries(external_ref) WHERE external_ref IS NOT NULL;
-            CREATE INDEX IF NOT EXISTS idx_entries_idem_key
+             CREATE INDEX IF NOT EXISTS idx_entries_idem_key
                 ON entries(idempotency_key) WHERE idempotency_key IS NOT NULL;",
         )
-        .map_err(|e| LedgerError::Serialization(format!("SQLite schema error: {e}")))?;
-
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        .map_err(|e| LedgerError::Serialization(format!("build indexes: {e}")))?;
+        Ok(())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, LedgerError> {
