@@ -488,7 +488,7 @@ impl LedgerStore {
         import_mode: bool,
     ) -> Result<(), LedgerError> {
         use vledger_wal::record::MutationKind;
-        use vledger_wal::recovery::{decode_data_payload, recover_streaming};
+        use vledger_wal::recovery::recover_streaming;
 
         // ── SQLite fast-path ────────────────────────────────────────────────
         let sqlite_max_seq = if import_mode {
@@ -529,8 +529,7 @@ impl LedgerStore {
             verify_signatures,
             |tx| {
                 committed_count += 1;
-                for record in &tx.data_records {
-                    let payload = decode_data_payload(record)?;
+                for payload in tx.data_payloads {
                     match payload.mutation {
                         MutationKind::Insert | MutationKind::Update => match payload.table_id {
                             TABLE_ACCOUNTS => {

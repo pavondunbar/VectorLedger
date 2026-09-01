@@ -31,7 +31,11 @@ pub struct CommittedTransaction {
     pub tx_id: u64,
     /// The Commit record itself (contains tx_hash and Ed25519 signature).
     pub commit_record: WalRecord,
-    /// Data records in sequence order.
+    /// Decoded data payloads in sequence order.
+    /// Stored as decoded payloads (not raw WalRecords) to minimize heap usage
+    /// during streaming recovery of large WALs.
+    pub data_payloads: Vec<DataPayload>,
+    /// Raw data records — only populated when verify_signatures=true.
     pub data_records: Vec<WalRecord>,
 }
 
@@ -94,7 +98,15 @@ where
 
     let reader = WalReader::open_with_key(wal_dir, master_key)?;
 
-    let mut pending: HashMap<u64, Vec<WalRecord>> = HashMap::new();
+    // pending_payloads: decoded DataPayloads (much smaller than raw WalRecords).
+    // We keep the raw WalRecords only when verify_signatures=true (signature
+    // verification needs the raw bytes). When false, we decode immediately and
+    // drop the raw bytes — this keeps the pending map at ~100 bytes per entry
+    // instead of ~500 bytes, preventing the allocator from growing to 7+ GB.
+    let mut pending_payloads: HashMap<u64, Vec<DataPayload>> = HashMap::new();
+    // Only used when verify_signatures=true.
+    let mut pending_raw: HashMap<u64, Vec<WalRecord>> = HashMap::new();
+
     let mut committed_count = 0usize;
     let mut last_sequence = 0u64;
     let mut torn_write_detected = false;
@@ -123,33 +135,57 @@ where
 
                 match record_type {
                     RecordType::Begin => {
-                        pending.entry(tx_id).or_default();
+                        if verify_signatures {
+                            pending_raw.entry(tx_id).or_default();
+                        } else {
+                            pending_payloads.entry(tx_id).or_default();
+                        }
                     }
 
                     RecordType::Data => {
-                        pending.entry(tx_id).or_default().push(record);
+                        if verify_signatures {
+                            pending_raw.entry(tx_id).or_default().push(record);
+                        } else {
+                            // Decode immediately and drop the raw bytes.
+                            // This keeps allocator pressure low for large WALs.
+                            match decode_data_payload(&record) {
+                                Ok(payload) => {
+                                    pending_payloads.entry(tx_id).or_default().push(payload);
+                                }
+                                Err(e) => {
+                                    warn!(tx_id, "Failed to decode DataPayload, skipping: {e}");
+                                }
+                            }
+                        }
                     }
 
                     RecordType::Commit => {
-                        if verify_signatures {
-                            let data_records =
-                                pending.get(&tx_id).map(|v| v.as_slice()).unwrap_or(&[]);
-                            verify_commit_full(&record, data_records).map_err(E::from)?;
-                        }
+                        let (data_records, data_payloads) = if verify_signatures {
+                            let raw = pending_raw.get(&tx_id).map(|v| v.as_slice()).unwrap_or(&[]);
+                            verify_commit_full(&record, raw).map_err(E::from)?;
+                            let records = pending_raw.remove(&tx_id).unwrap_or_default();
+                            let payloads = records.iter()
+                                .filter_map(|r| decode_data_payload(r).ok())
+                                .collect();
+                            (records, payloads)
+                        } else {
+                            let payloads = pending_payloads.remove(&tx_id).unwrap_or_default();
+                            (Vec::new(), payloads)
+                        };
 
-                        let data_records = pending.remove(&tx_id).unwrap_or_default();
                         let tx = CommittedTransaction {
                             tx_id,
                             commit_record: record,
                             data_records,
+                            data_payloads,
                         };
-                        // Process immediately — no accumulation in RAM.
                         on_commit(tx)?;
                         committed_count += 1;
                     }
 
                     RecordType::Rollback => {
-                        pending.remove(&tx_id);
+                        pending_payloads.remove(&tx_id);
+                        pending_raw.remove(&tx_id);
                     }
 
                     RecordType::Checkpoint | RecordType::Schema | RecordType::SegmentHeader => {}
@@ -158,7 +194,7 @@ where
         }
     }
 
-    let discarded_tx_count = pending.len();
+    let discarded_tx_count = pending_payloads.len() + pending_raw.len();
     if discarded_tx_count > 0 {
         warn!(
             count = discarded_tx_count,
@@ -176,7 +212,6 @@ where
     );
 
     Ok(RecoveryResult {
-        // committed vec is empty in streaming mode — caller processes via callback.
         committed: Vec::new(),
         discarded_tx_count,
         last_sequence,
@@ -241,10 +276,14 @@ fn recover_with_options(
                         }
 
                         let data_records = pending.remove(&tx_id).unwrap_or_default();
+                        let data_payloads = data_records.iter()
+                            .filter_map(|r| decode_data_payload(r).ok())
+                            .collect();
                         committed.push(CommittedTransaction {
                             tx_id,
                             commit_record: record,
                             data_records,
+                            data_payloads,
                         });
                     }
 
