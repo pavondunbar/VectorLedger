@@ -5772,7 +5772,7 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
     println!("  WAL segments    : {}", total_segments);
     println!("  Est. entries    : ~{}", est_total);
     println!("  Batch size      : 100,000 entries per transaction");
-    println!("  Mode            : WAL + crash-safe (journal=WAL, sync=NORMAL)");
+    println!("  Mode            : DELETE journal (no WAL accumulation, crash-safe)");
     println!();
     println!("  Reading WAL and indexing entries...");
     println!();
@@ -5896,6 +5896,14 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
     let segs = vledger_wal::segment::list_segments(&wal_dir).unwrap_or_default();
     let last_seg = segs.last().copied().unwrap_or(0);
     let final_max = entry_db.max_sequence().unwrap_or(0);
+
+    if final_max == 0 {
+        return Err(anyhow::anyhow!(
+            "SQLite max_sequence is 0 — migration may not have completed correctly. \
+             Check that entries were inserted in pass 1."
+        ));
+    }
+
     let cp = WalCheckpoint {
         sqlite_max_sequence: final_max,
         first_needed_segment: last_seg,

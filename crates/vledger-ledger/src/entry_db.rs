@@ -89,19 +89,20 @@ impl EntryDb {
             .map_err(|e| LedgerError::Serialization(format!("SQLite open error: {e}")))?;
 
         if migration_mode {
-            // Migration mode: WAL journal (crash-safe) + NORMAL sync + huge cache.
-            // Secondary indexes are NOT created here — they are built in one pass
-            // after all rows are inserted via build_indexes_after_migration().
-            // Inserting without secondary indexes is ~3x faster; building indexes
-            // in one sorted scan at the end is faster than 25M incremental updates.
+            // Migration mode: DELETE journal (writes directly to db file, no WAL
+            // accumulation), NORMAL sync (crash-safe), huge cache.
+            // WAL journal mode caused a 63 GB .db-wal file with 25M entries because
+            // WAL accumulates all writes until checkpointed — impossible on 8 GB RAM.
+            // DELETE journal writes directly to the main db file, keeping disk usage
+            // proportional to actual data size (~20 GB for 25M entries).
             conn.execute_batch(
-                "PRAGMA journal_mode=WAL;
+                "PRAGMA journal_mode=DELETE;
                  PRAGMA synchronous=NORMAL;
                  PRAGMA cache_size=-524288;
                  PRAGMA temp_store=MEMORY;
                  PRAGMA locking_mode=EXCLUSIVE;
                  PRAGMA mmap_size=34359738368;
-                 PRAGMA wal_autocheckpoint=10000;",
+                 PRAGMA page_size=8192;",
             )
             .map_err(|e| LedgerError::Serialization(format!("SQLite pragma error: {e}")))?;
 
@@ -240,9 +241,8 @@ impl EntryDb {
     }
 
     /// Rebuild the account_entries table in one fast pass.
-    /// Streams all entries from SQLite and inserts account→sequence mappings
-    /// using a single held connection lock and pre-compiled statement.
-    /// Reports progress via the `on_progress` callback every `report_every` rows.
+    /// Drops the secondary index before inserting and rebuilds it after —
+    /// same deferred-index technique as bulk_insert_migration.
     pub fn rebuild_account_entries_fast<F>(
         &self,
         report_every: u64,
@@ -253,20 +253,19 @@ impl EntryDb {
     {
         let conn = self.lock()?;
 
-        // Truncate and recreate the table for a clean rebuild.
+        // Drop the index and truncate — inserting without the index is ~3x faster.
         conn.execute_batch(
-            "DELETE FROM account_entries;",
+            "DROP INDEX IF EXISTS idx_ae_account;
+             DELETE FROM account_entries;",
         )
-        .map_err(|e| LedgerError::Serialization(format!("truncate account_entries: {e}")))?;
+        .map_err(|e| LedgerError::Serialization(format!("drop/truncate: {e}")))?;
 
-        // Pre-compile the insert statement — reused for every row.
         let mut insert_stmt = conn
             .prepare(
                 "INSERT OR IGNORE INTO account_entries (account_id, sequence) VALUES (?1, ?2)",
             )
-            .map_err(|e| LedgerError::Serialization(format!("prepare: {e}")))?;
+            .map_err(|e| LedgerError::Serialization(format!("prepare insert: {e}")))?;
 
-        // Pre-compile the entries scan.
         let mut scan_stmt = conn
             .prepare("SELECT data FROM entries ORDER BY sequence")
             .map_err(|e| LedgerError::Serialization(format!("prepare scan: {e}")))?;
@@ -307,6 +306,12 @@ impl EntryDb {
 
         conn.execute_batch("COMMIT")
             .map_err(|e| LedgerError::Serialization(format!("final COMMIT: {e}")))?;
+
+        // Build the index in one sorted scan after all rows are inserted.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_ae_account ON account_entries(account_id);",
+        )
+        .map_err(|e| LedgerError::Serialization(format!("rebuild index: {e}")))?;
 
         Ok(count)
     }
