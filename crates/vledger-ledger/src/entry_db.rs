@@ -239,27 +239,76 @@ impl EntryDb {
         Ok(inserted)
     }
 
-    /// Rebuild the account_entries cross-reference table from the entries table.
-    /// Called after bulk migration to populate the secondary index.
-    pub fn rebuild_account_entries_index(&self) -> Result<u64, LedgerError> {
+    /// Rebuild the account_entries table in one fast pass.
+    /// Streams all entries from SQLite and inserts account→sequence mappings
+    /// using a single held connection lock and pre-compiled statement.
+    /// Reports progress via the `on_progress` callback every `report_every` rows.
+    pub fn rebuild_account_entries_fast<F>(
+        &self,
+        report_every: u64,
+        mut on_progress: F,
+    ) -> Result<u64, LedgerError>
+    where
+        F: FnMut(u64),
+    {
         let conn = self.lock()?;
-        // Drop and recreate for speed (avoids INSERT OR IGNORE overhead).
-        conn.execute_batch(
-            "DROP TABLE IF EXISTS account_entries;
-             CREATE TABLE account_entries (
-                 account_id TEXT NOT NULL,
-                 sequence   INTEGER NOT NULL,
-                 PRIMARY KEY (account_id, sequence)
-             );
-             CREATE INDEX IF NOT EXISTS idx_ae_account ON account_entries(account_id);",
-        )
-        .map_err(|e| LedgerError::Serialization(format!("recreate account_entries: {e}")))?;
 
-        // We can't do this in pure SQL since account_id is inside the BLOB.
-        // Return 0 — callers stream entries and call insert_account_entry.
-        // For migration purposes the account_entries table can be rebuilt
-        // lazily on first query.
-        Ok(0)
+        // Truncate and recreate the table for a clean rebuild.
+        conn.execute_batch(
+            "DELETE FROM account_entries;",
+        )
+        .map_err(|e| LedgerError::Serialization(format!("truncate account_entries: {e}")))?;
+
+        // Pre-compile the insert statement — reused for every row.
+        let mut insert_stmt = conn
+            .prepare(
+                "INSERT OR IGNORE INTO account_entries (account_id, sequence) VALUES (?1, ?2)",
+            )
+            .map_err(|e| LedgerError::Serialization(format!("prepare: {e}")))?;
+
+        // Pre-compile the entries scan.
+        let mut scan_stmt = conn
+            .prepare("SELECT data FROM entries ORDER BY sequence")
+            .map_err(|e| LedgerError::Serialization(format!("prepare scan: {e}")))?;
+
+        let mut count: u64 = 0;
+        let mut batch: u64 = 0;
+
+        conn.execute_batch("BEGIN")
+            .map_err(|e| LedgerError::Serialization(format!("BEGIN: {e}")))?;
+
+        let rows = scan_stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|e| LedgerError::Serialization(format!("scan: {e}")))?;
+
+        for row in rows {
+            let data = row
+                .map_err(|e| LedgerError::Serialization(format!("row: {e}")))?;
+            let entry = decode_entry(&data)?;
+
+            for line in &entry.lines {
+                insert_stmt
+                    .execute(rusqlite::params![
+                        line.account_id.to_string(),
+                        entry.sequence as i64,
+                    ])
+                    .map_err(|e| LedgerError::Serialization(format!("insert: {e}")))?;
+                count += 1;
+                batch += 1;
+            }
+
+            if batch >= 500_000 {
+                conn.execute_batch("COMMIT; BEGIN")
+                    .map_err(|e| LedgerError::Serialization(format!("COMMIT/BEGIN: {e}")))?;
+                batch = 0;
+                on_progress(count);
+            }
+        }
+
+        conn.execute_batch("COMMIT")
+            .map_err(|e| LedgerError::Serialization(format!("final COMMIT: {e}")))?;
+
+        Ok(count)
     }
     pub fn insert(&self, entry: &JournalEntry) -> Result<(), LedgerError> {
         let data = encode_entry(entry)?;

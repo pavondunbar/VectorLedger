@@ -5872,40 +5872,17 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
     );
     println!();
 
-    // Pass 3: rebuild account_entries cross-reference.
+    // Pass 3: rebuild account_entries cross-reference using fast single-lock method.
+    // Holds the SQLite connection lock for the entire pass — no per-row Mutex overhead.
     println!("  Building account index (pass 3 of 3)...");
     let ae_start = std::time::Instant::now();
-    let mut ae_count: u64 = 0;
-    let mut ae_batch: u64 = 0;
 
-    entry_db
-        .begin_bulk()
-        .map_err(|e| anyhow::anyhow!("begin_bulk ae: {e}"))?;
-
-    entry_db
-        .stream_all(|entry| {
-            for line in &entry.lines {
-                entry_db
-                    .insert_account_entry(&line.account_id, entry.sequence)
-                    .map_err(|e| {
-                        vledger_ledger::error::LedgerError::Serialization(format!(
-                            "insert_account_entry: {e}"
-                        ))
-                    })?;
-                ae_count += 1;
-                ae_batch += 1;
-            }
-            if ae_batch >= 500_000 {
-                let _ = entry_db.commit_bulk();
-                let _ = entry_db.begin_bulk();
-                ae_batch = 0;
-                eprint!("\r  Account index: {:>12} lines    ", ae_count);
-            }
-            Ok(())
+    let ae_count = entry_db
+        .rebuild_account_entries_fast(500_000, |n| {
+            eprint!("\r  Account index: {:>12} lines    ", n);
         })
-        .map_err(|e| anyhow::anyhow!("stream_all: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("rebuild_account_entries_fast: {e}"))?;
 
-    let _ = entry_db.commit_bulk();
     eprintln!();
 
     println!(
