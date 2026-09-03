@@ -166,7 +166,6 @@ pub struct LedgerStore {
     // ── Sequence / chain state ────────────────────────────────────────────
     next_sequence: AtomicU64,
     last_chain_hash: Hash,
-    idempotency_keys: std::collections::HashSet<String>,
 
     // ── Reversal event index ──────────────────────────────────────────────
     reversal_event_index: HashMap<Uuid, Uuid>,
@@ -249,7 +248,6 @@ impl LedgerStore {
             balance_cache: HashMap::new(),
             next_sequence: AtomicU64::new(1),
             last_chain_hash: ZERO_HASH,
-            idempotency_keys: std::collections::HashSet::new(),
             reversal_event_index: HashMap::new(),
             settlement_event_index: HashMap::new(),
             legal_hold_accounts: std::collections::HashSet::new(),
@@ -341,7 +339,6 @@ impl LedgerStore {
             balance_cache: HashMap::new(),
             next_sequence: AtomicU64::new(1),
             last_chain_hash: ZERO_HASH,
-            idempotency_keys: std::collections::HashSet::new(),
             reversal_event_index: HashMap::new(),
             settlement_event_index: HashMap::new(),
             legal_hold_accounts: std::collections::HashSet::new(),
@@ -386,9 +383,9 @@ impl LedgerStore {
         // 1. Structural validation
         entry.validate()?;
 
-        // 2. Idempotency check
+        // 2. Idempotency check — delegate to SQLite index.
         if let Some(ref key) = entry.idempotency_key {
-            if self.idempotency_keys.contains(key) {
+            if self.entry_db.idempotency_key_exists(key).unwrap_or(false) {
                 // Already imported — return the sequence as a sentinel 0 to signal skip.
                 return Ok(0);
             }
@@ -422,12 +419,9 @@ impl LedgerStore {
         let prev_hash = Some(entry.prev_hash);
         self.persist_row(TABLE_ENTRIES, &bytes, MutationKind::Insert, prev_hash)?;
 
-        // 6. Update ONLY the minimal state needed for chain continuity and dedup.
+        // 6. Update ONLY the minimal state needed for chain continuity.
         //    Do NOT touch self.entries, balance_cache, or query indexes.
         self.last_chain_hash = entry.chain_hash;
-        if let Some(ref key) = entry.idempotency_key {
-            self.idempotency_keys.insert(key.clone());
-        }
 
         Ok(seq)
     }
@@ -591,9 +585,6 @@ impl LedgerStore {
                                             .store(entry.sequence + 1, Ordering::SeqCst);
                                     }
                                     self.last_chain_hash = entry.chain_hash;
-                                    if let Some(ref key) = entry.idempotency_key {
-                                        self.idempotency_keys.insert(key.clone());
-                                    }
                                     self.next_entry_page += 1;
                                 } else if sqlite_is_current {
                                     // Assumed SQLite-current path — check if this
@@ -610,9 +601,6 @@ impl LedgerStore {
                                             self.next_sequence.store(entry.sequence + 1, Ordering::SeqCst);
                                         }
                                         self.last_chain_hash = entry.chain_hash;
-                                        if let Some(ref key) = entry.idempotency_key {
-                                            self.idempotency_keys.insert(key.clone());
-                                        }
                                         let affects_balance = matches!(
                                             entry.status,
                                             EntryStatus::Posted | EntryStatus::Reversal
@@ -663,12 +651,6 @@ impl LedgerStore {
                                             .store(entry.sequence + 1, Ordering::SeqCst);
                                     }
                                     self.last_chain_hash = entry.chain_hash;
-
-                                    if !already_in_sqlite {
-                                        if let Some(ref key) = entry.idempotency_key {
-                                            self.idempotency_keys.insert(key.clone());
-                                        }
-                                    }
 
                                     let affects_balance = matches!(
                                         entry.status,
@@ -790,11 +772,6 @@ impl LedgerStore {
         }
         // Advance chain tip
         self.last_chain_hash = entry.chain_hash;
-        // Register idempotency key
-        if let Some(ref key) = entry.idempotency_key {
-            self.idempotency_keys.insert(key.clone());
-        }
-
         // Update running balance cache.
         // Only Posted and Reversal entries affect balances — skip others.
         let affects_balance = matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
@@ -1027,20 +1004,11 @@ impl LedgerStore {
         // 1. Structural validation
         entry.validate()?;
 
-        // 2. Idempotency check — two-level: in-memory HashSet (fast, covers
-        //    entries posted this session) then SQLite (covers entries from
-        //    previous sessions not loaded into the HashSet at startup).
+        // 2. Idempotency check — SQLite index lookup (O(1) via idx_entries_idem_key).
+        //    The in-memory HashSet has been removed; SQLite is the sole source of truth.
         if let Some(ref key) = entry.idempotency_key {
-            let in_ram = self.idempotency_keys.contains(key);
-            let in_sqlite = if in_ram {
-                true
-            } else {
-                self.entry_db.idempotency_key_exists(key).unwrap_or(false)
-            };
-
-            if in_sqlite || in_ram {
+            if self.entry_db.idempotency_key_exists(key).unwrap_or(false) {
                 warn!(key, "Idempotency key already posted");
-                // O(1) index lookup — no full scan needed.
                 let seq = self
                     .entry_db
                     .sequence_for_idempotency_key(key)
@@ -1215,9 +1183,6 @@ impl LedgerStore {
 
         // 7. Update in-memory state and SQLite index.
         self.last_chain_hash = entry.chain_hash;
-        if let Some(ref key) = entry.idempotency_key {
-            self.idempotency_keys.insert(key.clone());
-        }
         let affects_balance = matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
         for line in &entry.lines {
             if affects_balance {
