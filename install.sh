@@ -42,7 +42,7 @@ RELEASES_DOWNLOAD="https://github.com/${REPO}/releases/download"
 
 # Fallback used when the GitHub Releases API cannot determine the latest version.
 # Update this whenever a new release is cut.
-LATEST_KNOWN_VERSION="v1.0.0"
+LATEST_KNOWN_VERSION="v1.0.17"
 
 # ── Colour output helpers ─────────────────────────────────────────────────────
 
