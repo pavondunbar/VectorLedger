@@ -56,10 +56,10 @@ pub enum LicenseTier {
     /// Free tier — core ledger only, single node, 30-day audit export.
     Free,
     /// Starter tier — adds PostgreSQL wire protocol, 90-day audit export.
-    /// Single node, no replication. $199/month.
+    /// Single node, no replication. $999/month.
     Starter,
     /// Growth tier — pgwire, replication, unlimited audit export, full
-    /// compliance reports. $999/month.
+    /// compliance reports. $2499/month.
     Growth,
     /// Enterprise tier — all features, hardware HSM, multi-node. Contact Sales.
     Enterprise,

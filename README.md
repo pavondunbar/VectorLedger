@@ -2213,8 +2213,8 @@ Licenses are issued by VectorGuard Labs. After purchasing a subscription at [vle
 | Tier | Price | Best for |
 |---|---|---|
 | **Free** | $0 / month | Development, evaluation, internal tools |
-| **Starter** | $199 / month | Early-stage teams that need PostgreSQL client compatibility |
-| **Growth** | $999 / month | Production fintechs and SaaS companies under SOC 2 or PCI-DSS |
+| **Starter** | $999 / month | Early-stage teams that need PostgreSQL client compatibility |
+| **Growth** | $2499 / month | Production fintechs and SaaS companies under SOC 2 or PCI-DSS |
 | **Enterprise** | Contact Sales | Banks, payment processors, PCI-DSS Level 1, hardware HSM requirements |
 
 Annual billing available on all paid tiers — pay for 10 months, get 12.
