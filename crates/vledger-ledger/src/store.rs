@@ -351,6 +351,23 @@ impl LedgerStore {
         };
         // Replay in import mode — loads accounts + chain state, skips entries.
         store.replay_from_wal_import_mode(&wal_dir)?;
+
+        // Write a WAL startup checkpoint so the next open_for_import call
+        // (e.g. resuming an interrupted import) skips already-indexed segments.
+        // Without this, each resume replays the full WAL from segment 0 → OOM.
+        let sqlite_max = store.entry_db.max_sequence().unwrap_or(0);
+        let segments = vledger_wal::segment::list_segments(&wal_dir).unwrap_or_default();
+        let last_seg = segments.last().copied().unwrap_or(0);
+        if sqlite_max > 0 {
+            let cp = WalCheckpoint {
+                sqlite_max_sequence: sqlite_max,
+                first_needed_segment: last_seg,
+            };
+            if let Err(e) = WalCheckpoint::write(data_dir, &cp) {
+                warn!("Failed to write WAL checkpoint after import open: {e}");
+            }
+        }
+
         info!(
             accounts = store.accounts.len(),
             sequence = store.next_sequence.load(Ordering::SeqCst),
@@ -507,18 +524,17 @@ impl LedgerStore {
         use vledger_wal::recovery::recover_streaming;
 
         // ── WAL startup checkpoint — skip segments already in SQLite ────────
-        // Read the checkpoint written by the previous open(). If present,
-        // skip all WAL segments before first_needed_segment. This turns
-        // 20 GB of WAL replay into reading 1-2 segments (128 MB) on restart.
+        // Read the checkpoint for BOTH normal and import mode. Import mode
+        // previously hardcoded start_segment=0, forcing a full WAL replay of
+        // 100+ segments even when SQLite already had all entries — causing OOM.
         let data_dir_opt = self.data_dir.clone();
-        let start_segment = if import_mode {
-            0u64
-        } else if let Some(ref dd) = data_dir_opt {
+        let start_segment = if let Some(ref dd) = data_dir_opt {
             match WalCheckpoint::read(dd) {
                 Some(cp) => {
                     info!(
                         sqlite_max_sequence = cp.sqlite_max_sequence,
                         first_needed_segment = cp.first_needed_segment,
+                        import_mode,
                         "WAL startup checkpoint found — skipping earlier segments"
                     );
                     cp.first_needed_segment

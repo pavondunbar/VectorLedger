@@ -341,6 +341,21 @@ impl EntryDb {
         Ok(())
     }
 
+    /// Fetch a single entry by its UUID (entry id).
+    /// O(1) with idx_entries_id index.
+    pub fn get_by_uuid(&self, entry_id: &uuid::Uuid) -> Result<Option<JournalEntry>, LedgerError> {
+        let conn = self.lock()?;
+        let result = conn
+            .query_row(
+                "SELECT data FROM entries WHERE id = ?1 LIMIT 1",
+                rusqlite::params![entry_id.to_string()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|e| LedgerError::Serialization(format!("SQLite query error: {e}")))?;
+        result.map(|b| decode_entry(&b)).transpose()
+    }
+
     /// Fetch a single entry by sequence number.
     pub fn get_by_sequence(&self, seq: u64) -> Result<Option<JournalEntry>, LedgerError> {
         let conn = self.lock()?;

@@ -72,16 +72,25 @@ impl TransactionManager {
             None,
         )?;
 
-        // Recover the WAL to determine the highest committed tx_id and
-        // any idempotency keys that were already committed.
-        let recovery = vledger_wal::recovery::recover(wal_dir)?;
-
-        let last_committed_tx_id = recovery
-            .committed
-            .iter()
-            .map(|tx| tx.tx_id)
-            .max()
-            .unwrap_or(0);
+        // Use streaming recovery to find the highest committed tx_id.
+        // The non-streaming recover() accumulates ALL CommittedTransaction
+        // objects in RAM — with 100+ WAL segments this causes OOM on 8 GB hosts.
+        let mut last_committed_tx_id = 0u64;
+        let mut recovered_txns = 0usize;
+        vledger_wal::recovery::recover_streaming::<TxError, _>(
+            wal_dir,
+            None,
+            false,
+            None,
+            0,
+            |tx| {
+                if tx.tx_id > last_committed_tx_id {
+                    last_committed_tx_id = tx.tx_id;
+                }
+                recovered_txns += 1;
+                Ok(())
+            },
+        )?;
 
         // The next tx_id must be strictly greater than anything in the WAL.
         let next_tx_id = last_committed_tx_id + 1;
@@ -89,7 +98,7 @@ impl TransactionManager {
         info!(
             last_committed_tx_id,
             next_tx_id,
-            recovered_txns = recovery.committed.len(),
+            recovered_txns,
             signing_enabled = signing_key.is_some(),
             "TransactionManager initialized"
         );

@@ -4999,9 +4999,24 @@ async fn cmd_import(
             data_dir.display()
         );
     }
+    // When --create-accounts is set, account creation WAL records must be
+    // durable regardless of the entry sync mode. If no_sync is requested,
+    // upgrade to group_commit so account records survive process exit.
+    // Entry records still benefit from the fast no_sync path; only the
+    // account creation records need durability.
+    let account_sync_mode = if create_accounts && sync_mode == vledger_wal::WalSyncMode::NoSync {
+        eprintln!("  ℹ  --create-accounts: account WAL records will use group_commit sync");
+        eprintln!("     (no_sync applies to entry records only — account records must be durable)");
+        vledger_wal::WalSyncMode::GroupCommit
+    } else {
+        sync_mode
+    };
     // open_for_import replays WAL without loading entries into RAM.
     // Memory stays flat at O(accounts) regardless of entry count.
-    let mut ledger = vledger_ledger::LedgerStore::open_for_import(data_dir, sync_mode)
+    // When --create-accounts is set, use account_sync_mode (at least GroupCommit)
+    // to ensure account creation WAL records are durable. Entry records use the
+    // user-specified sync_mode via a WAL flush after all accounts are registered.
+    let mut ledger = vledger_ledger::LedgerStore::open_for_import(data_dir, account_sync_mode)
         .context("Failed to open ledger. Is vledger start running? Stop it first.")?;
 
     // Build account lookup: code → AccountId
