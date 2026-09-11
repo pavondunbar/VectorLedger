@@ -280,9 +280,11 @@ These limitations do not affect the WAL integrity or tamper-evidence guarantees.
 - Output as Markdown or JSON; piped to a file with `--output`
 
 ### Backup and Restore
-- Point-in-time backup creates a `.tar` archive with a BLAKE3 manifest
-- Private key material is **excluded** from backups — only public keys are archived; the HSM holds the private material
-- Restore verifies every file's BLAKE3 hash against the manifest before completing
+- Point-in-time backup creates an **AES-256-GCM encrypted** `.tar` archive with a BLAKE3 manifest
+- Each file in the archive is encrypted with a unique per-backup key derived from the master key via HKDF-SHA256; the wrapped backup key is stored in a `.key` sidecar file alongside the archive (mode `0o600`)
+- The `MANIFEST.json` is stored in plaintext so the file list and manifest hash can be verified without decrypting the archive
+- Private key material is **excluded** from backups — only the public signing key is archived; the HSM holds all private material
+- Restore decrypts every file using the `.key` sidecar, then verifies each file's BLAKE3 hash against the manifest before completing
 - `--force` required to overwrite an existing data directory
 
 ### Client SDKs
@@ -297,6 +299,14 @@ Native client libraries are included for three languages, all in `clients/`:
 ---
 
 ## Performance
+
+### Memory allocator
+
+VectorLedger uses **jemalloc** as its global allocator on Linux and macOS (via `tikv-jemallocator`). jemalloc aggressively returns freed memory to the OS after large working-set operations — in particular WAL recovery, where processing 25 M+ records with the default ptmalloc allocator causes ~7 GB of RSS to accumulate and never be returned. jemalloc eliminates this entirely. On Windows the default MSVC allocator is used unchanged.
+
+No configuration is required. The allocator is compiled in automatically on non-MSVC targets.
+
+---
 
 Benchmarked on Apple Silicon (MacBook, macOS) running in `group_commit`
 WAL mode with a mixed read/write workload (10 concurrent clients,
@@ -493,7 +503,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf \
   https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.sh \
-  | VLEDGER_VERSION=v0.1.0 bash
+  | VLEDGER_VERSION=v1.0.18 bash
 ```
 
 **Install to a custom directory:**
@@ -512,7 +522,7 @@ from source using Cargo (Rust 1.80+ required).
 
 | Variable | Default | Description |
 |---|---|---|
-| `VLEDGER_VERSION` | latest | Release tag to install, e.g. `v0.1.0` |
+| `VLEDGER_VERSION` | latest | Release tag to install, e.g. `v1.0.18` |
 | `VLEDGER_INSTALL_DIR` | `/usr/local/bin` | Directory to place the `vledger` binary |
 | `VLEDGER_NO_MODIFY_PATH` | `0` | Set to `1` to skip adding the install dir to your shell profile |
 
@@ -538,7 +548,7 @@ The installer detects your architecture (x86_64 or ARM64), downloads the signed 
 **Install a specific version:**
 
 ```powershell
-$env:VLEDGER_VERSION = "v0.1.0"
+$env:VLEDGER_VERSION = "v1.0.18"
 irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 | iex
 ```
 
@@ -553,7 +563,7 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 | Parameter | Default | Description |
 |---|---|---|
-| `-Version` | latest | Release tag, e.g. `v0.1.0`. Also reads `$env:VLEDGER_VERSION`. |
+| `-Version` | latest | Release tag, e.g. `v1.0.18`. Also reads `$env:VLEDGER_VERSION`. |
 | `-InstallDir` | `%LOCALAPPDATA%\vledger\bin` | Directory to install `vledger.exe` |
 | `-NoPathUpdate` | off | Skip adding the install dir to your user `PATH` |
 
@@ -1224,7 +1234,45 @@ vledger start [OPTIONS]
   --max-connections <N>          Max concurrent connections (default: 128)
 ```
 
-When started, a Prometheus metrics server is automatically available at `http://127.0.0.1:9090/metrics` (configurable via `--metrics-addr`).
+When started, a Prometheus metrics server is automatically available on a separate port (configurable via `--metrics-addr`, default `127.0.0.1:9090`). It exposes two endpoints:
+
+| Endpoint | Description |
+|---|---|
+| `GET /metrics` | Prometheus text-format scrape target |
+| `GET /health` | Liveness probe — returns `200 OK` with body `ok` |
+
+The `/health` endpoint is suitable for load-balancer and orchestrator health checks (AWS ALB, Kubernetes `livenessProbe`, etc.). It does not require authentication and is intentionally separate from the SQL listener so it remains reachable when the connection semaphore is saturated.
+
+**Prometheus scrape config:**
+
+```yaml
+scrape_configs:
+  - job_name: vledger
+    static_configs:
+      - targets: ['your-host:9090']
+    scrape_interval: 15s
+```
+
+**Available metrics:**
+
+| Metric | Type | Description |
+|---|---|---|
+| `vledger_build_info` | gauge | Build version and Rust version |
+| `vledger_uptime_seconds` | gauge | Server uptime in seconds |
+| `vledger_ledger_entries_total` | counter | Total journal entries posted |
+| `vledger_ledger_accounts_total` | gauge | Total accounts in chart of accounts |
+| `vledger_wal_segments_total` | gauge | Number of WAL segment files |
+| `vledger_wal_sync_lag_ms` | gauge | Milliseconds since last WAL fsync |
+| `vledger_connections_active` | gauge | Currently open client connections |
+| `vledger_connections_total` | counter | Total connections accepted since start |
+| `vledger_auth_successes_total` | counter | Successful authentications |
+| `vledger_auth_failures_total` | counter | Failed authentication attempts |
+| `vledger_queries_total` | counter | SQL queries executed |
+| `vledger_query_duration_ms_sum` | counter | Cumulative query execution time (ms) |
+| `vledger_chain_verification_failures_total` | counter | Hash chain integrity failures |
+| `vledger_backup_age_seconds` | gauge | Seconds since the last backup was created |
+| `vledger_replica_lag_lsn` | gauge | Replication lag in WAL records |
+| `vledger_foureyes_pending_total` | gauge | Four-eyes entries awaiting approval |
 
 Two background tasks run automatically after startup:
 - **Hourly integrity check** — calls `VERIFY_CHAIN()` every 60 minutes. Any failure is logged as an error and written to the audit log as `INTEGRITY_ALERT`.
@@ -1249,7 +1297,7 @@ Interactive SQL REPL or single-statement execution. The REPL includes built-in l
 vledger sql [OPTIONS]
   --data-dir <PATH>   Data directory
   --query <SQL>       Run a single statement and exit (omit for interactive mode)
-  --username <USER>   Username (or set VLEDGER_CLI_USER)
+  --username <USER>   Username (or set VLEDGER_CLI_USERNAME)
   --password <PASS>   Password (or set VLEDGER_CLI_PASSWORD, or enter interactively)
   --server <ADDR>     Connect to a running server at host:port instead of opening
                       the data directory directly (auto-detected if server is
@@ -1306,27 +1354,47 @@ vledger status --data-dir <PATH>
 
 ### `vledger backup`
 
-Create a point-in-time backup archive with a BLAKE3 manifest.
+Create an **AES-256-GCM encrypted** point-in-time backup archive.
 
 ```bash
 vledger backup --data-dir <PATH> [--output <FILE.tar>]
 ```
 
+The backup writes two files:
+
+| File | Description |
+|---|---|
+| `<output>.tar` | tar archive containing encrypted file blobs + plaintext `MANIFEST.json` |
+| `<output>.tar.key` | AES-256-GCM wrapped backup key (mode `0o600`) — keep alongside the archive |
+
+**Encryption design:**
+- A unique 32-byte backup key is derived from the master key via HKDF-SHA256 with context `vgdb/backup/<timestamp>`.
+- Each file in the archive is encrypted independently with AES-256-GCM using a random 96-bit nonce.
+- The backup key is itself encrypted under the master key and stored in the `.key` sidecar — the raw key never appears on disk in plaintext.
+- `MANIFEST.json` is stored unencrypted so the file list and manifest hash can be inspected without the key.
+- File content hashes in the manifest are computed over the **plaintext** bytes so restore can verify integrity after decryption.
+
+Both the `.tar` and `.tar.key` files must be kept together. Losing the `.key` sidecar makes the archive unrestorable.
+
 ### `vledger restore`
 
-Restore a backup archive. Verifies every file's hash before completing.
+Restore a backup archive. Decrypts every file using the `.key` sidecar, then verifies each file's BLAKE3 hash against the manifest before completing.
 
 ```bash
 vledger restore --from <FILE.tar> [--target <PATH>] [--force]
 ```
 
+The `.key` sidecar (`<FILE.tar>.key`) must be present alongside the archive. `--force` is required to overwrite an existing target directory.
+
 ### `vledger backup-verify`
 
-Verify a backup archive without restoring it (manifest + hash check).
+Verify a backup archive without restoring it — checks the manifest hash and, when the master key is available, decrypts and hash-checks every file.
 
 ```bash
 vledger backup-verify --from <FILE.tar> [--decrypt]
 ```
+
+`--decrypt` defaults to `true`. Set `--decrypt false` to verify the manifest hash only (no decryption, no master key required).
 
 ### `vledger rotate-keys`
 
@@ -1609,6 +1677,29 @@ vledger seed --data-dir ./vledger-data --entries 10000000 --accounts 50 --progre
 # Reproducible dataset — same data every time
 vledger seed --data-dir ./vledger-data --entries 10000000 --seed 12345
 ```
+
+---
+
+### `vledger migrate-to-sqlite`
+
+One-time migration that populates the SQLite entry index (`vledger.db`) from the WAL. Run this if the SQLite index is empty after a large bulk import or after upgrading from a version that predates the SQLite index. The server must NOT be running.
+
+```bash
+vledger migrate-to-sqlite [OPTIONS]
+  --data-dir <PATH>   Data directory (default: ./vledger-data)
+```
+
+The command reads the WAL in batches and writes entries to the SQLite index incrementally. Progress is printed every 100,000 entries. It is safe to interrupt and re-run — already-indexed entries are skipped. On completion it writes `wal-checkpoint.json` so future startups skip the WAL replay and start fast.
+
+**When to use:**
+
+| Situation | Action |
+|---|---|
+| SQLite index (`vledger.db`) is empty after a large `vledger import` | Run `migrate-to-sqlite` once after import completes |
+| Upgrading from a version that did not maintain the SQLite index | Run `migrate-to-sqlite` once after upgrading the binary |
+| Normal operation | Not needed — the index is maintained automatically |
+
+After the migration completes, run `vledger verify --data-dir ./vledger-data` to confirm WAL and chain integrity.
 
 ---
 
