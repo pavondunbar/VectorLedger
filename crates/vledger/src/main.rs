@@ -5227,11 +5227,15 @@ async fn cmd_import(
 
         // Build idempotency key.
         let idem_key = if let Some(ref id_col) = id_column {
-            // Use the row's id_column value if present — stored in external_ref as fallback.
-            row.idempotency_key
-                .clone()
-                .or_else(|| row.external_ref.clone())
+            // Read the value of the named source column directly from raw_fields
+            // (pre-mapping original column names → values). This ensures --id-column
+            // works correctly regardless of whether the column was also passed via --map.
+            row.raw_fields
+                .get(id_col.as_ref() as &str)
+                .filter(|v| !v.is_empty())
+                .cloned()
                 .unwrap_or_else(|| {
+                    // Column not found or empty — fall back to row-position hash.
                     let raw = format!("{}:row:{}", id_col, row_num);
                     hex::encode(blake3::hash(raw.as_bytes()).as_bytes())
                 })
