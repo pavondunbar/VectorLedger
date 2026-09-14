@@ -5226,27 +5226,40 @@ async fn cmd_import(
         let row_num = row_num_local;
 
         // Build idempotency key.
+        //
+        // Two modes:
+        //
+        // 1. --id-column <col>: use the actual value of the named source column
+        //    as the idempotency key, namespaced as "id:<col>:<value>". This
+        //    format is stable across re-runs regardless of file content changes,
+        //    so every re-import with the same --id-column flag will correctly
+        //    detect duplicates. Falls back to a row-position hash only if the
+        //    column is missing or empty in a given row.
+        //
+        // 2. No --id-column: BLAKE3 of the full raw CSV row, namespaced as
+        //    "import:<file_sha_prefix>:<row_hash>". Stable for identical files.
         let idem_key = if let Some(ref id_col) = id_column {
             // Read the value of the named source column directly from raw_fields
-            // (pre-mapping original column names → values). This ensures --id-column
-            // works correctly regardless of whether the column was also passed via --map.
-            row.raw_fields
+            // (pre-mapping original column names → values).
+            match row.raw_fields
                 .get(id_col.as_ref() as &str)
                 .filter(|v| !v.is_empty())
                 .cloned()
-                .unwrap_or_else(|| {
+            {
+                Some(val) => format!("id:{}:{}", id_col, val),
+                None => {
                     // Column not found or empty — fall back to row-position hash.
                     let raw = format!("{}:row:{}", id_col, row_num);
-                    hex::encode(blake3::hash(raw.as_bytes()).as_bytes())
-                })
+                    format!("id:{}:{}", id_col, hex::encode(blake3::hash(raw.as_bytes()).as_bytes()))
+                }
+            }
         } else {
             // Auto: BLAKE3 of full raw row content.
-            let key = format!(
+            format!(
                 "import:{}:{}",
                 &source_sha256[..16],
                 hex::encode(blake3::hash(row.raw.as_bytes()).as_bytes())
-            );
-            key
+            )
         };
 
         // Resolve or create accounts.
