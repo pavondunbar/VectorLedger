@@ -221,6 +221,12 @@ pub enum EntryFilter {
     ByStatus(String),
     ByDrCr(String),
     Limit(usize),
+    /// WHERE id = '<uuid>' on the accounts table.
+    ByAccountId(String),
+    /// WHERE code = '<value>' on the accounts table.
+    ByAccountCode(String),
+    /// WHERE name = '<value>' on the accounts table.
+    ByAccountName(String),
 }
 
 // ── Planner ───────────────────────────────────────────────────────────────────
@@ -705,7 +711,9 @@ fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, S
             (TABLE_LEDGER | TABLE_LEDGER_LINES, "domain") => Ok(EntryFilter::ByDomain(val)),
             (TABLE_LEDGER | TABLE_LEDGER_LINES, "status") => Ok(EntryFilter::ByStatus(val)),
             (TABLE_LEDGER_LINES, "dr_cr") => Ok(EntryFilter::ByDrCr(val)),
-            (TABLE_ACCOUNTS, "code") => Ok(EntryFilter::ByDomain(format!("__account_code:{val}"))),
+            (TABLE_ACCOUNTS, "id") => Ok(EntryFilter::ByAccountId(val)),
+            (TABLE_ACCOUNTS, "code") => Ok(EntryFilter::ByAccountCode(val)),
+            (TABLE_ACCOUNTS, "name") => Ok(EntryFilter::ByAccountName(val)),
             (TABLE_ACCOUNTS, "domain") => Ok(EntryFilter::ByDomain(val)),
             (TABLE_ACCOUNTS, "currency") => {
                 Ok(EntryFilter::ByDomain(format!("__account_currency:{val}")))

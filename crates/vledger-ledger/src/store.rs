@@ -571,6 +571,35 @@ impl LedgerStore {
             }
         }
 
+        // ── Load accounts from SQLite when WAL segments are being skipped ──
+        // When start_segment > 0, segments 0..(start_segment-1) are skipped
+        // entirely. Account creation records in those segments would be lost.
+        // Load accounts from the SQLite accounts table (populated by
+        // migrate-to-sqlite and kept in sync by create_account) so that all
+        // accounts are available regardless of which WAL segment we start from.
+        if start_segment > 0 && !import_mode {
+            match self.entry_db.ensure_accounts_table() {
+                Ok(()) => {}
+                Err(e) => warn!("ensure_accounts_table: {e}"),
+            }
+            match self.entry_db.load_all_accounts() {
+                Ok(accounts) => {
+                    let n = accounts.len();
+                    for account in accounts {
+                        self.apply_account(account);
+                    }
+                    if n > 0 {
+                        info!(
+                            accounts_loaded = n,
+                            start_segment,
+                            "Loaded accounts from SQLite (WAL segments before start_segment skipped)"
+                        );
+                    }
+                }
+                Err(e) => warn!("load_all_accounts from SQLite: {e}"),
+            }
+        }
+
         let verify_signatures = self.tx_manager.signing_pubkey().is_some();
 
         let mut bulk_open = false;
@@ -977,6 +1006,9 @@ impl LedgerStore {
         let id = account.id;
         let bytes = encode(&account)?;
         self.persist_row(TABLE_ACCOUNTS, &bytes, MutationKind::Insert, None)?;
+        if let Err(e) = self.entry_db.upsert_account(&account) {
+            warn!(account_id = %id, "Failed to upsert account into SQLite: {e}");
+        }
         self.apply_account(account);
         info!(account_id = %id, "Account created");
         Ok(id)
@@ -997,6 +1029,12 @@ impl LedgerStore {
         let bytes = encode(acct)?;
         let _ = acct;
         self.persist_row(TABLE_ACCOUNTS, &bytes, MutationKind::Delete, None)?;
+        // Keep SQLite in sync — update the stored account with Closed status.
+        if let Some(account) = self.accounts.get(id) {
+            if let Err(e) = self.entry_db.upsert_account(account) {
+                warn!(account_id = %id, "Failed to upsert closed account into SQLite: {e}");
+            }
+        }
         info!(account_id = %id, "Account closed");
         Ok(())
     }

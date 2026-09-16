@@ -418,6 +418,9 @@ impl<'a> ReadExecutor<'a> {
             .iter()
             .filter(|a| match &filter {
                 None => true,
+                Some(EntryFilter::ByAccountId(id_str)) => a.id.to_string() == *id_str,
+                Some(EntryFilter::ByAccountCode(code)) => &a.code == code,
+                Some(EntryFilter::ByAccountName(name)) => &a.name == name,
                 Some(EntryFilter::ByDomain(d)) if d.starts_with("__account_code:") => {
                     a.code == d.trim_start_matches("__account_code:")
                 }

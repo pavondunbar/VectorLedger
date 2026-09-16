@@ -5826,6 +5826,20 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
                 if !matches!(payload.mutation, MutationKind::Insert | MutationKind::Update) {
                     continue;
                 }
+
+                // table_id=0: account creation/update — persist to SQLite accounts table.
+                if payload.table_id == 0 && !payload.row_data.is_empty() {
+                    if let Ok((account, _)) = bincode::serde::decode_from_slice::<
+                        vledger_ledger::account::Account,
+                        _,
+                    >(
+                        &payload.row_data, bincode::config::standard()
+                    ) {
+                        let _ = entry_db.upsert_account(&account);
+                    }
+                    continue;
+                }
+
                 if payload.table_id != 1 || payload.row_data.is_empty() {
                     continue;
                 }

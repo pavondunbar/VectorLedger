@@ -42,6 +42,7 @@ use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::account::Account;
 use crate::entry::JournalEntry;
 use crate::error::LedgerError;
 
@@ -120,6 +121,10 @@ impl EntryDb {
                     effective_at    TEXT    NOT NULL,
                     posted_at       TEXT    NOT NULL,
                     data            BLOB    NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS accounts (
+                    id   TEXT PRIMARY KEY,
+                    data BLOB NOT NULL
                 );",
             )
             .map_err(|e| LedgerError::Serialization(format!("SQLite schema error: {e}")))?;
@@ -144,6 +149,10 @@ impl EntryDb {
                     effective_at    TEXT    NOT NULL,
                     posted_at       TEXT    NOT NULL,
                     data            BLOB    NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS accounts (
+                    id   TEXT PRIMARY KEY,
+                    data BLOB NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_entries_domain
                     ON entries(domain);
@@ -725,6 +734,78 @@ impl EntryDb {
         conn.execute_batch("ROLLBACK")
             .map_err(|e| LedgerError::Serialization(format!("SQLite rollback error: {e}")))?;
         Ok(())
+    }
+
+    // ── Accounts SQLite persistence ───────────────────────────────────────
+
+    /// Ensure the accounts table exists (safe to call on existing databases
+    /// opened before v1.0.21 that lack the table).
+    pub fn ensure_accounts_table(&self) -> Result<(), LedgerError> {
+        let conn = self.lock()?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS accounts (
+                id   TEXT PRIMARY KEY,
+                data BLOB NOT NULL
+            );",
+        )
+        .map_err(|e| LedgerError::Serialization(format!("ensure accounts table: {e}")))?;
+        Ok(())
+    }
+
+    /// Insert or replace a single account record.
+    pub fn upsert_account(&self, account: &Account) -> Result<(), LedgerError> {
+        let data = bincode::serde::encode_to_vec(account, bincode::config::standard())
+            .map_err(|e| LedgerError::Serialization(e.to_string()))?;
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO accounts (id, data) VALUES (?1, ?2)",
+            params![account.id.to_string(), data],
+        )
+        .map_err(|e| LedgerError::Serialization(format!("upsert account: {e}")))?;
+        Ok(())
+    }
+
+    /// Load all accounts from SQLite. Returns an empty Vec if none are stored.
+    pub fn load_all_accounts(&self) -> Result<Vec<Account>, LedgerError> {
+        let conn = self.lock()?;
+        // Table may not exist on databases created before v1.0.21.
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+        if !exists {
+            return Ok(vec![]);
+        }
+        let mut stmt = conn
+            .prepare("SELECT data FROM accounts")
+            .map_err(|e| LedgerError::Serialization(format!("prepare load_accounts: {e}")))?;
+        let accounts = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|e| LedgerError::Serialization(format!("query accounts: {e}")))?
+            .filter_map(|r| r.ok())
+            .filter_map(|data| {
+                bincode::serde::decode_from_slice::<Account, _>(
+                    &data,
+                    bincode::config::standard(),
+                )
+                .ok()
+                .map(|(a, _)| a)
+            })
+            .collect();
+        Ok(accounts)
+    }
+
+    /// Count of accounts stored in SQLite.
+    pub fn account_count(&self) -> Result<u64, LedgerError> {
+        let conn = self.lock()?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+            .unwrap_or(0);
+        Ok(count as u64)
     }
 
     /// FOR TESTING ONLY — overwrite an entry's data blob in SQLite without
