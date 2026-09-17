@@ -59,6 +59,8 @@ pub enum AdminCommand {
     SetEnabled { username: String, enabled: bool },
     /// List all users.
     ListUsers,
+    /// Change a user's role.
+    SetRole { username: String, role: String },
 }
 
 /// A response frame sent to the client.

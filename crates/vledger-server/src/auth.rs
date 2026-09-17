@@ -562,10 +562,27 @@ impl UserStore {
         self.persist()
     }
 
+    /// Change a user's role. All active sessions are revoked so the new
+    /// permissions take effect immediately on next login.
+    pub fn set_role(&self, username: &str, new_role: Role) -> Result<(), ServerError> {
+        {
+            let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
+            let user = users
+                .get_mut(username)
+                .ok_or_else(|| ServerError::Auth(format!("user '{username}' not found")))?;
+            user.role = new_role;
+        }
+        // Revoke all active sessions so the role change takes effect immediately.
+        let revoked = self.revoke_sessions_for(username);
+        if revoked > 0 {
+            warn!(username, revoked, role = %new_role, "Sessions revoked due to role change");
+        }
+        self.persist()
+    }
+
     /// List all users (without password hashes).
     pub fn list_users(&self) -> Vec<(String, Role, bool)> {
-        self.users
-            .read()
+        self.users            .read()
             .unwrap_or_else(|p| p.into_inner())
             .values()
             .map(|u| (u.username.clone(), u.role, u.enabled))

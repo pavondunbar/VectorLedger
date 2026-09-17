@@ -687,5 +687,21 @@ async fn execute_admin(cmd: AdminCommand, user_store: &Arc<UserStore>) -> Respon
                 format!("{} user(s)", users.len()),
             )
         }
+        AdminCommand::SetRole { username, role } => {
+            let parsed_role = match role.parse::<crate::auth::Role>() {
+                Ok(r) => r,
+                Err(e) => return Response::err(e),
+            };
+            match user_store.set_role(&username, parsed_role) {
+                Ok(()) => Response::ok(
+                    vec![],
+                    vec![],
+                    0,
+                    None,
+                    format!("User '{username}' role changed to '{role}'. All sessions revoked."),
+                ),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
     }
 }

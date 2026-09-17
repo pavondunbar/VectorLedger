@@ -615,6 +615,16 @@ enum UserAction {
         #[arg(long)]
         enabled: bool,
     },
+    /// Change a user's role (admin only).
+    #[command(name = "set-role")]
+    SetRole {
+        /// Username whose role will be changed.
+        #[arg(short, long)]
+        username: String,
+        /// New role: admin, operator, auditor, readonly.
+        #[arg(short, long)]
+        role: String,
+    },
     /// Delete a user account.
     #[command(name = "delete")]
     Delete {
@@ -2452,6 +2462,14 @@ async fn cmd_user(data_dir: &PathBuf, action: UserAction, ca_cert: Option<&str>)
                 .with_context(|| format!("Failed to delete '{username}'"))?;
             println!("✓ User '{username}' deleted.");
         }
+        UserAction::SetRole { username, role } => {
+            let role_parsed: vledger_server::auth::Role =
+                role.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            store
+                .set_role(&username, role_parsed)
+                .with_context(|| format!("Failed to set role for '{username}'"))?;
+            println!("✓ User '{username}' role changed to '{role}'. All sessions revoked.");
+        }
     }
     Ok(())
 }
@@ -2558,6 +2576,12 @@ async fn cmd_user_network(addr: &str, action: UserAction, ca_cert: Option<&str>)
         } => serde_json::json!({ "op": "set_enabled", "username": target, "enabled": enabled }),
         UserAction::Delete { username: target } => {
             serde_json::json!({ "op": "delete_user", "username": target })
+        }
+        UserAction::SetRole {
+            username: target,
+            role,
+        } => {
+            serde_json::json!({ "op": "set_role", "username": target, "role": role })
         }
     };
 
