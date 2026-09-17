@@ -33,6 +33,8 @@ mod fault_injection_tests;
 mod invariant_tests;
 #[cfg(test)]
 mod regression_tests;
+#[cfg(test)]
+mod entry_db_tests;
 pub mod lockfile;
 #[cfg(test)]
 mod proptest_invariants;

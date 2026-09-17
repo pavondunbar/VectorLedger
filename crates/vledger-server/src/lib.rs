@@ -7,6 +7,8 @@ pub mod handler;
 pub mod metrics;
 pub mod protocol;
 pub mod tls;
+#[cfg(test)]
+mod auth_tests;
 
 pub use auth::{check_plan_privilege, Role, Session, UserStore};
 pub use config::ServerConfig;

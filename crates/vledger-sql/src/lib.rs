@@ -31,6 +31,8 @@
 
 #[cfg(test)]
 mod adversarial_tests;
+#[cfg(test)]
+mod sql_tests;
 pub mod error;
 pub mod executor;
 pub mod optimizer;

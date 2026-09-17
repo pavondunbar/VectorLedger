@@ -40,3 +40,8 @@ blake3          = { workspace = true }
 axum            = { workspace = true }
 anyhow          = { workspace = true }
 rustls-pemfile  = { workspace = true }
+
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
