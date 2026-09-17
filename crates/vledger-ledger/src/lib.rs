@@ -31,6 +31,8 @@ pub mod error;
 mod fault_injection_tests;
 #[cfg(test)]
 mod invariant_tests;
+#[cfg(test)]
+mod regression_tests;
 pub mod lockfile;
 #[cfg(test)]
 mod proptest_invariants;
