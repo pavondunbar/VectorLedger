@@ -125,6 +125,24 @@ impl<'a> ReadExecutor<'a> {
             );
         }
 
+        // BySequenceIn: multiple O(1) SQLite point lookups.
+        if let Some(EntryFilter::BySequenceIn(seqs)) = &filter {
+            let mut matched: Vec<vledger_ledger::JournalEntry> = seqs
+                .iter()
+                .filter_map(|seq| self.ledger.get_entry_by_sequence(*seq))
+                .collect();
+            // Return in sequence order.
+            matched.sort_by_key(|e| e.sequence);
+            return Self::build_scan_entries_result(
+                cols,
+                matched,
+                true, // point lookups — no cap
+                None,
+                self.attach_proofs,
+                |root| self.ledger.sign_bytes(root),
+            );
+        }
+
         // ByDomain: SQLite index scan.
         if let Some(EntryFilter::ByDomain(domain)) = &filter {
             let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
@@ -303,6 +321,16 @@ impl<'a> ReadExecutor<'a> {
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
 
+        // BySequenceIn: multiple O(1) SQLite point lookups.
+        if let Some(EntryFilter::BySequenceIn(seqs)) = &filter {
+            let mut matched: Vec<vledger_ledger::JournalEntry> = seqs
+                .iter()
+                .filter_map(|seq| self.ledger.get_entry_by_sequence(*seq))
+                .collect();
+            matched.sort_by_key(|e| e.sequence);
+            return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
+        }
+
         // ByDomain: SQLite index scan.
         if let Some(EntryFilter::ByDomain(domain)) = &filter {
             let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
@@ -421,6 +449,14 @@ impl<'a> ReadExecutor<'a> {
                 Some(EntryFilter::ByAccountId(id_str)) => a.id.to_string() == *id_str,
                 Some(EntryFilter::ByAccountCode(code)) => &a.code == code,
                 Some(EntryFilter::ByAccountName(name)) => &a.name == name,
+                Some(EntryFilter::ByValueIn { column, values }) => match column.as_str() {
+                    "id" => values.iter().any(|v| a.id.to_string() == *v),
+                    "code" => values.iter().any(|v| &a.code == v),
+                    "name" => values.iter().any(|v| &a.name == v),
+                    "domain" => values.iter().any(|v| &a.domain == v),
+                    "currency" => values.iter().any(|v| &a.currency_code == v),
+                    _ => true,
+                },
                 Some(EntryFilter::ByDomain(d)) if d.starts_with("__account_code:") => {
                     a.code == d.trim_start_matches("__account_code:")
                 }

@@ -227,6 +227,11 @@ pub enum EntryFilter {
     ByAccountCode(String),
     /// WHERE name = '<value>' on the accounts table.
     ByAccountName(String),
+    /// WHERE sequence IN (1, 2, 3) — multi-point sequence lookup.
+    BySequenceIn(Vec<u64>),
+    /// WHERE col IN ('a', 'b', 'c') — multi-value string filter.
+    /// Carries the column name and the list of values.
+    ByValueIn { column: String, values: Vec<String> },
 }
 
 // ── Planner ───────────────────────────────────────────────────────────────────
@@ -680,6 +685,57 @@ fn extract_nth_string_arg(
 }
 
 fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, SqlError> {
+    // ── IN (val1, val2, ...) ─────────────────────────────────────────────
+    if let Expr::InList {
+        expr: col_expr,
+        list,
+        negated: false,
+    } = &expr
+    {
+        let col = match col_expr.as_ref() {
+            Expr::Identifier(i) => i.value.to_lowercase(),
+            Expr::CompoundIdentifier(parts) => parts
+                .last()
+                .map(|i| i.value.to_lowercase())
+                .unwrap_or_default(),
+            _ => {
+                return Err(SqlError::Unsupported(
+                    "IN clause left-hand side must be a column name".into(),
+                ))
+            }
+        };
+
+        // Collect all values from the IN list.
+        let values: Result<Vec<String>, SqlError> =
+            list.iter().map(|e| expr_to_string(e)).collect();
+        let values = values?;
+
+        if values.is_empty() {
+            return Err(SqlError::Unsupported("IN list must not be empty".into()));
+        }
+
+        // sequence IN (1, 2, 3) — use dedicated typed variant.
+        if col == "sequence"
+            && matches!(table, t if t == TABLE_LEDGER || t == TABLE_LEDGER_LINES)
+        {
+            let seqs: Result<Vec<u64>, _> = values.iter().map(|v| v.parse::<u64>()).collect();
+            let seqs = seqs.map_err(|_| {
+                SqlError::TypeError("sequence values in IN list must be integers".into())
+            })?;
+            return Ok(EntryFilter::BySequenceIn(seqs));
+        }
+
+        // Generic column IN (...) — string values.
+        return Ok(EntryFilter::ByValueIn { column: col, values });
+    }
+
+    // ── NOT IN — unsupported ─────────────────────────────────────────────
+    if let Expr::InList { negated: true, .. } = &expr {
+        return Err(SqlError::Unsupported(
+            "NOT IN is not supported — use separate queries".into(),
+        ));
+    }
+
     if let Expr::BinaryOp {
         left,
         op: BinaryOperator::Eq,
