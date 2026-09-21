@@ -193,11 +193,24 @@ fn sidecar_path(archive_path: &Path) -> PathBuf {
 /// - `output_path`        — tar archive containing encrypted file blobs + MANIFEST.json
 /// - `output_path` + `.key` — AES-256-GCM wrapped backup key (mode 0o600)
 ///
-/// Pass `master_key = None` in tests where no real master key is available;
-/// files will be stored **unencrypted** and `BackupManifest::encrypted` will
-/// be `false`.  Production callers should always supply the master key.
-pub fn create_backup(data_dir: &Path, output_path: &Path) -> Result<BackupManifest> {
-    create_backup_inner(data_dir, output_path, None, None)
+/// A master key is **required**.  Use `create_backup_encrypted` or
+/// `create_backup_encrypted_audited` to supply it.  This no-key variant
+/// is intentionally removed from the public API to prevent accidental
+/// plaintext backups of ledger data.
+///
+/// # Errors
+/// Always returns `Err` — callers must supply a master key.
+/// Use `create_backup_encrypted` or `create_backup_encrypted_audited`.
+#[deprecated(
+    since = "1.0.26",
+    note = "Plaintext backups are disabled. Use create_backup_encrypted() and supply the master key."
+)]
+pub fn create_backup(_data_dir: &Path, _output_path: &Path) -> Result<BackupManifest> {
+    anyhow::bail!(
+        "Plaintext backups are not permitted. \
+         Supply the master key and call create_backup_encrypted() instead. \
+         Run `vledger backup` — it loads the master key automatically."
+    )
 }
 
 /// Like `create_backup` but accepts an explicit master key for encryption.
@@ -219,13 +232,23 @@ pub fn create_backup_encrypted_audited(
     create_backup_inner(data_dir, output_path, Some(master), Some(audit_log))
 }
 
-/// Like `create_backup` but also writes a `BackupCreated` audit event.
+/// Plaintext backup with audit event — disabled.
+///
+/// # Errors
+/// Always returns `Err`.  Use `create_backup_encrypted_audited()` instead.
+#[deprecated(
+    since = "1.0.26",
+    note = "Plaintext backups are disabled. Use create_backup_encrypted_audited() and supply the master key."
+)]
 pub fn create_backup_audited(
-    data_dir: &Path,
-    output_path: &Path,
-    audit_log: &vledger_audit::AuditLog,
+    _data_dir: &Path,
+    _output_path: &Path,
+    _audit_log: &vledger_audit::AuditLog,
 ) -> Result<BackupManifest> {
-    create_backup_inner(data_dir, output_path, None, Some(audit_log))
+    anyhow::bail!(
+        "Plaintext backups are not permitted. \
+         Supply the master key and call create_backup_encrypted_audited() instead."
+    )
 }
 
 fn create_backup_inner(

@@ -61,14 +61,13 @@ pub fn compute_mac(secret: &[u8; 32], nonce: &[u8]) -> [u8; 32] {
 }
 
 /// Constant-time comparison of two 32-byte arrays to resist timing attacks.
+///
+/// Uses `subtle::ConstantTimeEq` so the compiler cannot short-circuit or
+/// reorder the comparison — unlike a hand-rolled XOR accumulator loop, which
+/// the optimiser is free to transform into a non-constant-time branch.
 pub fn mac_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    // XOR all bytes and OR the results — constant time regardless of where
-    // the first difference occurs.
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 // ── Replication messages ──────────────────────────────────────────────────────

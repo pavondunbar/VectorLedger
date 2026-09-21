@@ -132,7 +132,23 @@ func (c *Client) Execute(sql string) (int, error) {
 }
 
 // Balance returns the current balance for account (code or UUID).
+//
+// account is validated against a strict character allowlist before being
+// interpolated into the SQL statement.  Valid characters: alphanumeric,
+// hyphen, underscore, dot, colon (for domain-qualified codes such as
+// "prod:CASH"), max 128 characters.  Returns an error if the value does
+// not match — this prevents SQL injection via a crafted account code.
 func (c *Client) Balance(account string) (int64, error) {
+	// Allowlist: alphanumeric, hyphen, underscore, dot, colon, 1–128 chars.
+	if !isValidAccountID(account) {
+		return 0, &VledgerError{
+			Message: fmt.Sprintf(
+				"invalid account identifier %q: must contain only alphanumeric "+
+					"characters, hyphens, underscores, dots, or colons (max 128 characters)",
+				account,
+			),
+		}
+	}
 	result, err := c.Query(fmt.Sprintf("SELECT BALANCE('%s')", account))
 	if err != nil {
 		return 0, err
@@ -155,6 +171,22 @@ func (c *Client) Balance(account string) (int64, error) {
 	default:
 		return 0, fmt.Errorf("vledger: unexpected balance type %T", raw)
 	}
+}
+
+// isValidAccountID reports whether s is a safe account identifier that can
+// be interpolated into a SQL string without risk of injection.
+// Allowed: A-Z, a-z, 0-9, hyphen, underscore, dot, colon.  Length 1–128.
+func isValidAccountID(s string) bool {
+	if len(s) == 0 || len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' || r == ':') {
+			return false
+		}
+	}
+	return true
 }
 
 // VerifyChain verifies the database hash-chain integrity.

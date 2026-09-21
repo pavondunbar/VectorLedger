@@ -258,8 +258,25 @@ class VledgerClient:
         result = self._send(sql, with_proof=False)
         return result.rows_affected
 
+    # Allowlist for account identifiers: alphanumeric, hyphen, underscore,
+    # dot, and colon (for domain-qualified codes such as "prod:CASH").
+    # Max 128 characters.  Anything outside this set is rejected before
+    # it is interpolated into the SQL string — prevents SQL injection.
+    _ACCOUNT_RE = __import__("re").compile(r"^[A-Za-z0-9_\-\.:]{1,128}$")
+
     def balance(self, account: str) -> int:
-        """Return the current balance for *account* (code or UUID)."""
+        """Return the current balance for *account* (code or UUID).
+
+        ``account`` is validated against a strict character allowlist before
+        being interpolated into the SQL statement.  Pass only account codes
+        or UUIDs; arbitrary strings will raise ``VledgerError``.
+        """
+        if not self._ACCOUNT_RE.match(account):
+            raise VledgerError(
+                f"Invalid account identifier '{account}': must contain only "
+                "alphanumeric characters, hyphens, underscores, dots, or colons "
+                "(max 128 characters)."
+            )
         result = self.query(f"SELECT BALANCE('{account}')")
         if not result.rows:
             raise VledgerError(f"No balance returned for account '{account}'")

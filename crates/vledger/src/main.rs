@@ -3096,37 +3096,36 @@ async fn cmd_backup(data_dir: &PathBuf, output: Option<&std::path::Path>) -> Res
                         }
                     }
                     Err(e) => {
-                        eprintln!(
-                            "⚠  Could not load master key ({e}). Backup will be UNENCRYPTED."
+                        anyhow::bail!(
+                            "Cannot create backup: master key unavailable ({e}).\n\
+                             Plaintext backups of ledger data are not permitted.\n\
+                             Ensure the key source is reachable and retry."
                         );
-                        match &audit_log {
-                            Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
-                            None => backup::create_backup(data_dir, &out_path)?,
-                        }
                     }
                 },
                 Err(e) => {
-                    eprintln!("⚠  Could not build key provider ({e}). Backup will be UNENCRYPTED.");
-                    match &audit_log {
-                        Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
-                        None => backup::create_backup(data_dir, &out_path)?,
-                    }
+                    anyhow::bail!(
+                        "Cannot create backup: key provider failed ({e}).\n\
+                         Plaintext backups of ledger data are not permitted.\n\
+                         Ensure the key source is reachable and retry."
+                    );
                 }
             },
             Err(e) => {
-                eprintln!("⚠  Could not read key_source.json ({e}). Backup will be UNENCRYPTED.");
-                match &audit_log {
-                    Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
-                    None => backup::create_backup(data_dir, &out_path)?,
-                }
+                anyhow::bail!(
+                    "Cannot create backup: key_source.json unreadable ({e}).\n\
+                     Plaintext backups of ledger data are not permitted.\n\
+                     Ensure the key source is reachable and retry."
+                );
             }
         }
     } else {
-        eprintln!("⚠  key_source.json not found. Backup will be UNENCRYPTED.");
-        match &audit_log {
-            Some(log) => backup::create_backup_audited(data_dir, &out_path, log)?,
-            None => backup::create_backup(data_dir, &out_path)?,
-        }
+        anyhow::bail!(
+            "Cannot create backup: key_source.json not found in {}.\n\
+             Plaintext backups of ledger data are not permitted.\n\
+             Initialise a key source with `vledger init` and retry.",
+            data_dir.join("keys").display()
+        );
     };
 
     println!("  Archive   : {}", out_path.display());
@@ -3588,12 +3587,25 @@ async fn cmd_self_test_phase3() -> Result<()> {
         let archive_dir = TempDir::new().unwrap();
         let archive_path = archive_dir.path().join("test.tar");
 
-        let manifest = backup::create_backup(data, &archive_path).unwrap();
+        let manifest = {
+            // Self-test: generate an ephemeral master key so the backup is
+            // encrypted, matching production behaviour (plaintext backups
+            // are no longer permitted).
+            let test_key_bytes = [0x5eu8; 32]; // deterministic test-only key
+            let master = vledger_crypto::kdf::MasterKey::from_bytes(test_key_bytes);
+            backup::create_backup_encrypted(data, &archive_path, &master).unwrap()
+        };
         assert!(manifest.files.len() >= 2);
         assert!(manifest.verify());
+        assert!(manifest.encrypted, "self-test backup must be encrypted");
 
         let restore_dir = TempDir::new().unwrap();
-        let restored = backup::restore_backup(&archive_path, restore_dir.path(), true).unwrap();
+        // Restore also requires the master key for an encrypted archive.
+        let test_key_bytes = [0x5eu8; 32];
+        let master = vledger_crypto::kdf::MasterKey::from_bytes(test_key_bytes);
+        let restored =
+            backup::restore_backup_encrypted(&archive_path, restore_dir.path(), true, &master)
+                .unwrap();
         assert_eq!(restored.manifest_hash, manifest.manifest_hash);
         assert!(restore_dir.path().join("catalog").join("VERSION").exists());
     }

@@ -20,6 +20,11 @@ use crate::tier::{Feature, LicenseTier};
 //
 // Generated with: vledger-license-gen keygen
 // Key ID: vgl-license-v1
+//
+// This is the correct 32-byte (64 hex char) Ed25519 public key derived from
+// the private key stored offline at ~/.vgl-keys/license_signing_key.hex.
+// The key was previously misidentified as 31 bytes in a security audit due
+// to a manual counting error; it is and always was 32 bytes / 64 hex chars.
 const VECTORGUARD_LICENSE_PUBKEY_HEX: &str =
     "9cf73a416943d55255a4943d2c839560454869ff8ea2fa74c33e787d70e09b14";
 

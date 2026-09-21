@@ -214,8 +214,24 @@ export class VledgerClient {
     return result.rowsAffected;
   }
 
-  /** Return the current balance for *account* (code or UUID). */
+  /** Return the current balance for *account* (code or UUID).
+   *
+   * `account` is validated against a strict character allowlist before being
+   * interpolated into the SQL statement.  Valid characters: alphanumeric,
+   * hyphen, underscore, dot, colon (for domain-qualified codes), max 128
+   * chars.  Throws `VledgerError` if the value does not match.
+   */
   async balance(account: string): Promise<number> {
+    // Allowlist: alphanumeric, hyphen, underscore, dot, colon, 1–128 chars.
+    // Rejects any character that could be used for SQL injection.
+    const ACCOUNT_RE = /^[A-Za-z0-9_\-.:]{1,128}$/;
+    if (!ACCOUNT_RE.test(account)) {
+      throw new VledgerError(
+        `Invalid account identifier '${account}': must contain only ` +
+        `alphanumeric characters, hyphens, underscores, dots, or colons ` +
+        `(max 128 characters).`
+      );
+    }
     const result = await this.query(`SELECT BALANCE('${account}')`);
     if (!result.rows.length) {
       throw new VledgerError(`No balance returned for account '${account}'`);

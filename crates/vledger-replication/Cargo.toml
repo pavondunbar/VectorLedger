@@ -25,6 +25,7 @@ tracing         = { workspace = true }
 tokio           = { workspace = true }
 chrono          = { workspace = true }
 uuid            = { workspace = true }
+subtle         = { workspace = true }
 blake3          = { workspace = true }
 hex             = { workspace = true }
 rand            = { workspace = true }

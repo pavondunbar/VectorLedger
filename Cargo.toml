@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version     = "1.0.25"
+version     = "1.0.26"
 edition     = "2021"
 authors     = ["VectorGuard Labs <engineering@vectorguardlabs.com>"]
 license     = "BUSL-1.1"
@@ -49,6 +49,7 @@ argon2         = { version = "0.5.3" }
 rand           = { version = "0.8.5" }
 rand_core      = { version = "0.6.4" }
 zeroize        = { version = "1.8.1",   features = ["derive"] }
+subtle         = { version = "2.6.1" }
 hkdf           = { version = "0.12.4" }
 sha2           = { version = "0.10.9" }
 hmac           = { version = "0.12.1" }

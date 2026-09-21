@@ -104,7 +104,39 @@ impl SignedCommit {
         }
     }
 
-    /// Verify that the embedded signature is valid.
+    /// Verify the commit signature against a **trusted** external public key.
+    ///
+    /// # Security
+    /// Always pass the public key from a trust anchor you control (e.g. the
+    /// key stored in your database's `keys/` directory or provisioned at
+    /// startup).  Never use the key embedded in the commit itself as the
+    /// trusted key — that only proves self-consistency, not authenticity.
+    ///
+    /// # Errors
+    /// Returns `CryptoError::SignatureInvalid` if the signature does not
+    /// verify, or `CryptoError::InvalidKey` if `trusted_key` is malformed.
+    pub fn verify_against(&self, trusted_key: &DbVerifyingKey) -> Result<(), CryptoError> {
+        trusted_key.verify(&self.data, &self.signature)
+    }
+
+    /// Verify that the embedded signature is self-consistent.
+    ///
+    /// # ⚠ Security warning — do not use for authenticity checks
+    /// This method verifies the signature against the public key **embedded
+    /// inside the commit itself**.  An attacker who can write to a commit on
+    /// disk or in transit can generate new content with their own keypair,
+    /// embed their own public key, and this function will return `Ok(())`.
+    ///
+    /// Use [`SignedCommit::verify_against`] with an externally-trusted key
+    /// for any real tamper-detection or authenticity check.
+    ///
+    /// This method is retained only for unit-test convenience and is
+    /// **deprecated** for all production use.
+    #[deprecated(
+        since = "1.0.26",
+        note = "Use verify_against(trusted_key) with an externally-supplied trust anchor. \
+                Self-verification does not prove authenticity."
+    )]
     pub fn verify(&self) -> Result<(), CryptoError> {
         let key = DbVerifyingKey::from_bytes(&self.public_key)?;
         key.verify(&self.data, &self.signature)
@@ -151,7 +183,17 @@ mod tests {
     fn signed_commit_roundtrip() {
         let key = DbSigningKey::generate();
         let sc = SignedCommit::new(b"tx payload".to_vec(), &key);
-        sc.verify().unwrap();
+        // Use verify_against with the trusted public key — not the embedded key.
+        sc.verify_against(&key.public_key()).unwrap();
+    }
+
+    #[test]
+    fn signed_commit_wrong_key_fails() {
+        let key = DbSigningKey::generate();
+        let other_key = DbSigningKey::generate();
+        let sc = SignedCommit::new(b"tx payload".to_vec(), &key);
+        // Verifying against a different key must fail.
+        assert!(sc.verify_against(&other_key.public_key()).is_err());
     }
 }
 
