@@ -186,6 +186,55 @@ impl<'a> ReadExecutor<'a> {
             );
         }
 
+        // ByMetadataEq: full scan + exact metadata string match.
+        if let Some(EntryFilter::ByMetadataEq(needle)) = &filter {
+            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let all = self.ledger.entries_scan(Self::DEFAULT_SCAN_LIMIT);
+            let matched: Vec<_> = all
+                .into_iter()
+                .filter(|e| {
+                    e.metadata
+                        .as_deref()
+                        .map(|m| m == needle.as_str())
+                        .unwrap_or(false)
+                })
+                .take(limit)
+                .collect();
+            return Self::build_scan_entries_result(
+                cols,
+                matched,
+                true,
+                None,
+                self.attach_proofs,
+                |root| self.ledger.sign_bytes(root),
+            );
+        }
+
+        // ByMetadataContains: full scan + case-insensitive substring match.
+        if let Some(EntryFilter::ByMetadataContains(needle)) = &filter {
+            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let needle_lower = needle.to_lowercase();
+            let all = self.ledger.entries_scan(Self::DEFAULT_SCAN_LIMIT);
+            let matched: Vec<_> = all
+                .into_iter()
+                .filter(|e| {
+                    e.metadata
+                        .as_deref()
+                        .map(|m| m.to_lowercase().contains(&needle_lower))
+                        .unwrap_or(false)
+                })
+                .take(limit)
+                .collect();
+            return Self::build_scan_entries_result(
+                cols,
+                matched,
+                true,
+                None,
+                self.attach_proofs,
+                |root| self.ledger.sign_bytes(root),
+            );
+        }
+
         // ── Full scan fallback (Limit / None) — paginated via SQLite ─────
         let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
         let matched = self.ledger.entries_scan(limit);
@@ -350,6 +399,41 @@ impl<'a> ReadExecutor<'a> {
         // ByExternalRef: SQLite index scan.
         if let Some(EntryFilter::ByExternalRef(r)) = &filter {
             let matched = self.ledger.entries_by_external_ref(r);
+            return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
+        }
+
+        // ByMetadataEq: full scan + exact metadata string match.
+        if let Some(EntryFilter::ByMetadataEq(needle)) = &filter {
+            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let all = self.ledger.entries_scan(Self::DEFAULT_SCAN_LIMIT);
+            let matched: Vec<_> = all
+                .into_iter()
+                .filter(|e| {
+                    e.metadata
+                        .as_deref()
+                        .map(|m| m == needle.as_str())
+                        .unwrap_or(false)
+                })
+                .take(limit)
+                .collect();
+            return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
+        }
+
+        // ByMetadataContains: full scan + case-insensitive substring match.
+        if let Some(EntryFilter::ByMetadataContains(needle)) = &filter {
+            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let needle_lower = needle.to_lowercase();
+            let all = self.ledger.entries_scan(Self::DEFAULT_SCAN_LIMIT);
+            let matched: Vec<_> = all
+                .into_iter()
+                .filter(|e| {
+                    e.metadata
+                        .as_deref()
+                        .map(|m| m.to_lowercase().contains(&needle_lower))
+                        .unwrap_or(false)
+                })
+                .take(limit)
+                .collect();
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
 

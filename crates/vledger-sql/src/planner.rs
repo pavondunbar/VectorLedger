@@ -232,6 +232,10 @@ pub enum EntryFilter {
     /// WHERE col IN ('a', 'b', 'c') — multi-value string filter.
     /// Carries the column name and the list of values.
     ByValueIn { column: String, values: Vec<String> },
+    /// WHERE metadata = 'exact json string' — exact metadata match.
+    ByMetadataEq(String),
+    /// WHERE metadata LIKE '%value%' — substring search within the metadata blob.
+    ByMetadataContains(String),
 }
 
 // ── Planner ───────────────────────────────────────────────────────────────────
@@ -736,6 +740,45 @@ fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, S
         ));
     }
 
+    // ── LIKE — metadata substring search ────────────────────────────────
+    if let Expr::ILike {
+        expr: col_expr,
+        pattern,
+        negated: false,
+        ..
+    }
+    | Expr::Like {
+        expr: col_expr,
+        pattern,
+        negated: false,
+        ..
+    } = &expr
+    {
+        let col = match col_expr.as_ref() {
+            Expr::Identifier(i) => i.value.to_lowercase(),
+            Expr::CompoundIdentifier(parts) => parts
+                .last()
+                .map(|i| i.value.to_lowercase())
+                .unwrap_or_default(),
+            _ => {
+                return Err(SqlError::Unsupported(
+                    "LIKE left-hand side must be a column name".into(),
+                ))
+            }
+        };
+        if col == "metadata"
+            && matches!(table, t if t == TABLE_LEDGER || t == TABLE_LEDGER_LINES)
+        {
+            let raw = expr_to_string(pattern)?;
+            // Strip leading/trailing SQL '%' wildcards to get the search term.
+            let term = raw.trim_matches('%').to_string();
+            return Ok(EntryFilter::ByMetadataContains(term));
+        }
+        return Err(SqlError::Unsupported(
+            "LIKE is only supported on the metadata column".into(),
+        ));
+    }
+
     if let Expr::BinaryOp {
         left,
         op: BinaryOperator::Eq,
@@ -766,6 +809,7 @@ fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, S
             }
             (TABLE_LEDGER | TABLE_LEDGER_LINES, "domain") => Ok(EntryFilter::ByDomain(val)),
             (TABLE_LEDGER | TABLE_LEDGER_LINES, "status") => Ok(EntryFilter::ByStatus(val)),
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "metadata") => Ok(EntryFilter::ByMetadataEq(val)),
             (TABLE_LEDGER_LINES, "dr_cr") => Ok(EntryFilter::ByDrCr(val)),
             (TABLE_ACCOUNTS, "id") => Ok(EntryFilter::ByAccountId(val)),
             (TABLE_ACCOUNTS, "code") => Ok(EntryFilter::ByAccountCode(val)),
