@@ -798,6 +798,144 @@ Two background tasks run automatically after startup:
 vledger verify --data-dir ./vledger-data
 ```
 
+### `vledger hsm` — HSM Setup and Key Source Configuration
+
+> **Enterprise license required** for PyHSM key sources.
+
+VectorLedger does not link a PKCS#11 `.so` directly. Instead it communicates with a separate **PyHSM daemon** (a TypeScript/Node.js process) over either a Unix socket (Model 1, same server) or mTLS over TCP (Model 2, separate server). Raw key material never leaves PyHSM — the master key is AES-wrapped inside it and VectorLedger only ever holds the ciphertext blob on disk at `vledger-data/keys/pyhsm_master_key.enc`.
+
+#### Model 1 — Local PyHSM (same server)
+
+**Step 1 — Ensure your Enterprise license is in place:**
+```bash
+cp your-license.json ./vledger-data/license.json
+vledger license --data-dir ./vledger-data
+```
+
+**Step 2 — Start the PyHSM daemon** so it is listening on `/tmp/pyhsm.sock` before initializing VectorLedger.
+
+**Step 3 — Initialize with PyHSM as the key source:**
+```bash
+vledger init --data-dir ./vledger-data --key-source pyhsm
+# Optional overrides:
+vledger init --data-dir ./vledger-data --key-source pyhsm \
+  --pyhsm-socket /tmp/pyhsm.sock \
+  --pyhsm-caller-id vledger
+```
+
+This writes `vledger-data/keys/key_source.json`:
+```json
+{
+  "backend": "py_hsm",
+  "socket_path": "/tmp/pyhsm.sock",
+  "caller_id": "vledger",
+  "key_id": "vledger.master-key"
+}
+```
+
+**Step 4 — Start the server normally:**
+```bash
+vledger start --data-dir ./vledger-data --with-proofs --pgwire
+```
+On every boot VectorLedger sends the cached blob to PyHSM to unwrap it. If PyHSM is not running, startup fails immediately.
+
+#### Model 2 — Remote PyHSM over mTLS (separate server)
+
+```bash
+vledger init --data-dir ./vledger-data \
+  --key-source remote-pyhsm \
+  --pyhsm-endpoint https://pyhsm.internal.example.com:8443 \
+  --pyhsm-ca-cert /etc/vledger/pyhsm/ca.pem \
+  --pyhsm-client-cert /etc/vledger/pyhsm/client.pem \
+  --pyhsm-client-key /etc/vledger/pyhsm/client-key.pem \
+  --pyhsm-timeout-ms 5000 \
+  --pyhsm-max-retries 3
+```
+
+This writes `vledger-data/keys/key_source.json`:
+```json
+{
+  "backend": "remote_py_hsm",
+  "endpoint": "https://pyhsm.internal.example.com:8443",
+  "ca_cert": "/etc/vledger/pyhsm/ca.pem",
+  "client_cert": "/etc/vledger/pyhsm/client.pem",
+  "client_key": "/etc/vledger/pyhsm/client-key.pem",
+  "timeout_ms": 5000,
+  "max_retries": 3,
+  "caller_id": "vledger",
+  "key_id": "vledger.master-key"
+}
+```
+
+#### Hardware HSM backends (AWS CloudHSM / Azure Dedicated HSM)
+
+For physical hardware, bridge sidecars (`vledger-hsm-aws-bridge`, `vledger-hsm-azure-bridge`) translate the JSON IPC to hardware PKCS#11 calls. Configure `vledger-data/keys/hsm_config.json`:
+
+**AWS CloudHSM:**
+```json
+{
+  "backend": "aws_cloud_hsm",
+  "bridge_socket": "~/.vledger-hsm-aws/bridge.sock",
+  "cluster_id": "cluster-xxxxxxxxx",
+  "crypto_user": "vgdb-cu",
+  "verify_bridge_tls": true
+}
+```
+
+**Azure Dedicated HSM (Thales Luna Network HSM 7):**
+```json
+{
+  "backend": "azure_dedicated_hsm",
+  "bridge_socket": "~/.vledger-hsm-azure/bridge.sock",
+  "resource_group": "my-resource-group",
+  "device_host": "hsm.internal.example.com",
+  "partition": "vledger"
+}
+```
+
+#### Other key source backends
+
+For non-HSM deployments, `key_source.json` supports:
+
+```json
+{ "backend": "env", "var": "VectorLedger_MASTER_KEY" }
+```
+```json
+{ "backend": "file", "path": "/path/to/master_key.hex" }
+```
+```json
+{
+  "backend": "vault",
+  "addr": "http://127.0.0.1:8200",
+  "mount": "secret",
+  "secret_path": "vledger/master_key",
+  "field": "value"
+}
+```
+```json
+{
+  "backend": "aws_kms",
+  "key_id": "arn:aws:kms:us-east-1:123456789012:key/...",
+  "region": "us-east-1"
+}
+```
+
+#### Key rotation
+
+```bash
+# Model 1
+vledger rotate-keys --data-dir ./vledger-data \
+  --hsm-socket /tmp/pyhsm.sock
+
+# Model 2
+vledger rotate-keys --data-dir ./vledger-data \
+  --pyhsm-endpoint https://pyhsm.internal.example.com:8443 \
+  --pyhsm-ca-cert /etc/vledger/pyhsm/ca.pem \
+  --pyhsm-client-cert /etc/vledger/pyhsm/client.pem \
+  --pyhsm-client-key /etc/vledger/pyhsm/client-key.pem
+```
+The old key version is archived for decryption of existing data; all new writes use the new version.
+
 ### `vledger self-test` / `vledger self-test-phase3`
 
 Run the built-in self-test suites against an isolated temporary database. Your production data is never touched.
@@ -910,9 +1048,99 @@ Show the active license tier, features, and expiry.
 vledger license --data-dir ./vledger-data
 ```
 
----
+### `vledger start-primary` / `vledger start-replica` — Multi-Node WAL Replication
 
-## Test Suite
+> **Growth or Enterprise license required.**
+
+WAL replication runs a hot-standby replica that streams every committed WAL record from the primary in real time. The channel is secured with TLS 1.3, optional mTLS, and a BLAKE3 HMAC challenge-response handshake. The replica verifies the BLAKE3 hash of every received WAL record before writing it locally.
+
+#### Step 1 — Configure the primary
+
+Create `<data_dir>/replication.json` on the primary node:
+
+```json
+{
+  "role": "primary",
+  "replication_addr": "0.0.0.0:5434",
+  "ack_timeout_ms": 5000,
+  "heartbeat_interval_ms": 1000,
+  "send_buffer_bytes": 67108864,
+  "tls": {
+    "enabled": true,
+    "server_hostname": "vledger-primary",
+    "server_cert": "/etc/vledger/replication/server.pem",
+    "server_key": "/etc/vledger/replication/server-key.pem",
+    "ca_cert": "/etc/vledger/replication/ca.pem"
+  }
+}
+```
+
+> If you omit `server_cert` and `server_key`, a self-signed certificate is auto-generated at startup — suitable for development.
+
+#### Step 2 — Start the primary
+
+```bash
+vledger start-primary --data-dir /opt/vledger-primary
+# Override the bind address at CLI:
+vledger start-primary --data-dir /opt/vledger-primary --bind 0.0.0.0:5434
+```
+
+On first run, `replication_secret.hex` (a 32-byte BLAKE3 HMAC shared secret, mode 0600) is auto-generated in the data directory.
+
+#### Step 3 — Copy the secret to the replica
+
+```bash
+scp /opt/vledger-primary/replication_secret.hex \
+    replica-host:/opt/vledger-replica/replication_secret.hex
+```
+
+The replica does **not** auto-generate this file — startup fails with a clear error if it is missing.
+
+#### Step 4 — Configure the replica
+
+Create `<data_dir>/replication.json` on the replica node:
+
+```json
+{
+  "role": "replica",
+  "replication_addr": "primary-host:5434",
+  "ack_timeout_ms": 5000,
+  "tls": {
+    "enabled": true,
+    "server_hostname": "vledger-primary",
+    "ca_cert": "/etc/vledger/replication/ca.pem"
+  }
+}
+```
+
+For mTLS (primary requires client certificate from replica), add:
+```json
+"client_cert": "/etc/vledger/replication/replica-client.pem",
+"client_key": "/etc/vledger/replication/replica-client-key.pem"
+```
+
+#### Step 5 — Start the replica
+
+```bash
+vledger start-replica --data-dir /opt/vledger-replica
+# Override the primary address at CLI:
+vledger start-replica --data-dir /opt/vledger-replica --primary primary-host:5434
+```
+
+The replica connects, performs the BLAKE3 HMAC challenge-response inside TLS, then streams WAL records. On disconnection it reconnects automatically with exponential back-off (500 ms → 30 s).
+
+#### TLS mode reference
+
+| `tls.enabled` | `tls.ca_cert` | `tls.client_cert` | Effective mode |
+|---|---|---|---|
+| `false` | — | — | Plain TCP (dev only) |
+| `true` | `null` | `null` | TLS, self-signed, no mTLS |
+| `true` | path | `null` | TLS, CA-verified, no mTLS |
+| `true` | path | path + key | Mutual TLS (mTLS) |
+
+#### License enforcement
+
+If `replication.json` exists in the data directory when `vledger start` is run, the `Replication` feature license is checked immediately — the server will not start without a valid Growth+ license.
 
 VectorLedger has **245 automated tests** across 6 test files and 4 crates, all passing on every release.
 
