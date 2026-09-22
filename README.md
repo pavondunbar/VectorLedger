@@ -30,7 +30,7 @@ VectorLedger makes tampering **cryptographically detectable**:
 - **Idempotency keys** — duplicate submissions for the same financial event are detected and returned without double-posting
 - **Exposure limits** and **non-negative balance enforcement** configurable per account
 - **Multi-domain** support — each account and entry is tagged to a legal entity or business domain
-- **Hash-protected metadata** — every entry can carry an arbitrary JSON metadata blob (e.g. sender name, channel, status) that is included in `canonical_bytes()` and cannot be altered after posting without breaking the hash chain
+- **Hash-protected metadata** — every entry can carry an arbitrary JSON metadata blob (e.g. sender name, channel, status) that is included in `canonical_bytes()` and cannot be altered after posting without breaking the hash chain; indexed via SQLite FTS5 for instant full-text search
 - **Settlement lifecycle** — entries support `Pending → Settled | Failed` status transitions stored as append-only events; the original entry row is never modified
 - **Legal holds** — accounts can be placed under a legal hold, blocking all new entries, reversals, and settlement transitions until the hold is lifted
 - **Reconciliation** — on-demand balance reconciliation recomputes all account balances from journal entries and compares against the running cache
@@ -658,6 +658,34 @@ SELECT SUM(amount) FROM ledger_lines WHERE dr_cr = 'Credit';
 SELECT * FROM ledger JOIN accounts ON ledger.domain = accounts.domain LIMIT 10;
 ```
 
+### Metadata search
+
+Every entry carries a `metadata` field — an arbitrary JSON blob (e.g. `{"sender_name":"Alice","receiver_name":"Bob","channel":"mobile"}`). From v1.0.30, metadata is indexed using a **SQLite FTS5 full-text index**, making search instant regardless of ledger size.
+
+```sql
+-- Find all entries involving a person by name (LIKE — uses FTS5 index)
+SELECT * FROM ledger WHERE metadata LIKE '%Elizabeth Cadet%';
+SELECT * FROM ledger_lines WHERE metadata LIKE '%Elizabeth Cadet%';
+
+-- Case-insensitive search (ILIKE)
+SELECT * FROM ledger WHERE metadata ILIKE '%elizabeth cadet%';
+
+-- Search for a specific role
+SELECT * FROM ledger WHERE metadata LIKE '%"receiver_name":"Elizabeth Cadet"%';
+SELECT * FROM ledger WHERE metadata LIKE '%"sender_name":"Elizabeth Cadet"%';
+
+-- Exact full metadata match
+SELECT * FROM ledger WHERE metadata = '{"channel":"mobile","receiver_name":"Elizabeth Cadet","sender_name":"Basma Ammar","status":"completed","transaction_type":"fee"}';
+```
+
+**Supported on both `ledger` and `ledger_lines`.** Results are ordered by sequence.
+
+**FTS index is automatic** — no configuration needed. On first startup after upgrading to v1.0.30 on an existing database, VectorLedger detects the empty FTS index and rebuilds it automatically. Progress is logged to `nohup.out`. Subsequent startups skip this step. All new entries are indexed at insert time.
+
+**Works with any metadata field name.** Because the entire JSON blob is indexed as text, future CSV imports with different column names (e.g. `beneficiary`, `payee`, `customer_ref`) are automatically searchable without any schema changes.
+
+---
+
 ### What is NOT supported
 
 - `UPDATE` — append-only; entries are permanent
@@ -730,6 +758,23 @@ vledger migrate-to-sqlite --data-dir ./vledger-data
 ```
 
 From v1.0.21 onward, this also persists all account records to SQLite so that server startup after migration loads accounts instantly without replaying the full WAL history.
+
+### FTS index rebuild (automatic on startup)
+
+From v1.0.30, VectorLedger maintains a **SQLite FTS5 full-text index** over all entry metadata. This index is built automatically:
+
+- **New entries** — indexed at insert time with no manual action required.
+- **Existing databases** (pre-v1.0.30) — on the first startup after upgrading, VectorLedger detects the empty FTS index and rebuilds it automatically in a background pass before accepting connections. Progress is logged to `nohup.out`:
+
+```
+INFO FTS index empty — rebuilding from existing entries total=17652378
+INFO FTS rebuild progress processed=1000000
+INFO FTS rebuild progress processed=2000000
+...
+INFO FTS index rebuilt entries_indexed=17652378
+```
+
+No manual steps are required. Subsequent startups skip the rebuild entirely.
 
 ### `vledger start`
 
@@ -982,6 +1027,27 @@ vledger license --data-dir ./vledger-data
 - [ ] Run `cargo test --package vledger-ledger --package vledger-sql --package vledger-server --package vledger-audit` and confirm 245 tests pass
 - [ ] Run compliance reports and confirm zero FAIL items: `vledger compliance-report --standard pci-dss`
 - [ ] Ship `audit/audit.log` to an append-only off-host destination in real time
+
+---
+
+## Changelog
+
+### v1.0.30 — FTS5 metadata index
+- Added SQLite FTS5 full-text index over all entry metadata (`entries_fts` virtual table, `unicode61` tokenizer)
+- `WHERE metadata LIKE '%value%'` and `WHERE metadata ILIKE '%value%'` now use the FTS index — queries that previously took minutes on 17M+ entry ledgers now return in milliseconds
+- FTS index is populated at insert time for all new entries
+- On first startup after upgrade, existing databases are automatically backfilled (progress logged to `nohup.out`); subsequent startups skip the step
+- Index works with any metadata field name — future CSV imports with different column layouts are automatically searchable
+
+### v1.0.29 — Metadata scan OOM fix
+- Fixed server crash (OOM) introduced in v1.0.28: replaced `entries_scan(entry_count())` with `stream_entries()`, which iterates SQLite rows one at a time in constant RAM
+
+### v1.0.28 — Metadata scan cap fix
+- Fixed `WHERE metadata LIKE` returning 0 rows on ledgers larger than 10,000 entries: scan was incorrectly capped at `DEFAULT_SCAN_LIMIT` regardless of total ledger size
+
+### v1.0.27 — Metadata WHERE filtering
+- Added `WHERE metadata = 'value'` and `WHERE metadata LIKE '%value%'` / `ILIKE` support on both `ledger` and `ledger_lines`
+- Previously metadata was readable in SELECT output but not filterable in WHERE clauses
 
 ---
 
