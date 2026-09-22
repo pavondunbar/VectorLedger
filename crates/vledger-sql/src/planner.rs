@@ -236,6 +236,8 @@ pub enum EntryFilter {
     ByMetadataEq(String),
     /// WHERE metadata LIKE '%value%' — substring search within the metadata blob.
     ByMetadataContains(String),
+    /// WHERE metadata MATCH 'value' — FTS5 index search (fast, indexed).
+    ByMetadataSearch(String),
 }
 
 // ── Planner ───────────────────────────────────────────────────────────────────
@@ -770,9 +772,10 @@ fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, S
             && matches!(table, t if t == TABLE_LEDGER || t == TABLE_LEDGER_LINES)
         {
             let raw = expr_to_string(pattern)?;
-            // Strip leading/trailing SQL '%' wildcards to get the search term.
+            // Strip leading/trailing SQL '%' wildcards to get the search term,
+            // then route through the FTS5 index for fast indexed search.
             let term = raw.trim_matches('%').to_string();
-            return Ok(EntryFilter::ByMetadataContains(term));
+            return Ok(EntryFilter::ByMetadataSearch(term));
         }
         return Err(SqlError::Unsupported(
             "LIKE is only supported on the metadata column".into(),
@@ -809,7 +812,7 @@ fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, S
             }
             (TABLE_LEDGER | TABLE_LEDGER_LINES, "domain") => Ok(EntryFilter::ByDomain(val)),
             (TABLE_LEDGER | TABLE_LEDGER_LINES, "status") => Ok(EntryFilter::ByStatus(val)),
-            (TABLE_LEDGER | TABLE_LEDGER_LINES, "metadata") => Ok(EntryFilter::ByMetadataEq(val)),
+            (TABLE_LEDGER | TABLE_LEDGER_LINES, "metadata") => Ok(EntryFilter::ByMetadataSearch(val)),
             (TABLE_LEDGER_LINES, "dr_cr") => Ok(EntryFilter::ByDrCr(val)),
             (TABLE_ACCOUNTS, "id") => Ok(EntryFilter::ByAccountId(val)),
             (TABLE_ACCOUNTS, "code") => Ok(EntryFilter::ByAccountCode(val)),

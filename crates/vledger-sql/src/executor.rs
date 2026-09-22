@@ -186,7 +186,17 @@ impl<'a> ReadExecutor<'a> {
             );
         }
 
-        // ByMetadataEq: stream full ledger + exact metadata string match.
+        // ByMetadataSearch: FTS5 indexed search — fast regardless of ledger size.
+        if let Some(EntryFilter::ByMetadataSearch(query)) = &filter {
+            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let matched = self.ledger.search_metadata(query, limit);
+            return Self::build_scan_entries_result(
+                cols, matched, true, None, self.attach_proofs,
+                |root| self.ledger.sign_bytes(root),
+            );
+        }
+
+        // ByMetadataEq: stream full ledger + exact metadata string match (fallback).
         if let Some(EntryFilter::ByMetadataEq(needle)) = &filter {
             let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
             let needle = needle.clone();
@@ -206,7 +216,7 @@ impl<'a> ReadExecutor<'a> {
             );
         }
 
-        // ByMetadataContains: stream full ledger + case-insensitive substring match.
+        // ByMetadataContains: stream full ledger + case-insensitive substring match (fallback).
         if let Some(EntryFilter::ByMetadataContains(needle)) = &filter {
             let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
             let needle_lower = needle.to_lowercase();
@@ -396,7 +406,14 @@ impl<'a> ReadExecutor<'a> {
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
 
-        // ByMetadataEq: stream full ledger + exact metadata string match.
+        // ByMetadataSearch: FTS5 indexed search — fast regardless of ledger size.
+        if let Some(EntryFilter::ByMetadataSearch(query)) = &filter {
+            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let matched = self.ledger.search_metadata(query, limit);
+            return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
+        }
+
+        // ByMetadataEq: stream full ledger + exact metadata string match (fallback).
         if let Some(EntryFilter::ByMetadataEq(needle)) = &filter {
             let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
             let needle = needle.clone();

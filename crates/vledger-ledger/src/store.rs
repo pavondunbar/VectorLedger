@@ -569,6 +569,25 @@ impl LedgerStore {
             if let Err(e) = self.entry_db.ensure_account_entries_table() {
                 warn!("ensure_account_entries_table: {e}");
             }
+            // Ensure the FTS virtual table exists (idempotent IF NOT EXISTS).
+            // Then rebuild the index if it is empty — this handles the one-time
+            // backfill for databases created before v1.0.30.
+            match self.entry_db.count() {
+                Ok(total) if total > 0 => {
+                    if self.entry_db.fts_is_empty() {
+                        info!(total, "FTS index empty — rebuilding from existing entries");
+                        match self.entry_db.rebuild_fts_index(|n| {
+                            if n % 1_000_000 == 0 {
+                                info!(processed = n, "FTS rebuild progress");
+                            }
+                        }) {
+                            Ok(n) => info!(entries_indexed = n, "FTS index rebuilt"),
+                            Err(e) => warn!("FTS rebuild failed: {e}"),
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
         // ── Load accounts from SQLite when WAL segments are being skipped ──
@@ -1536,6 +1555,27 @@ impl LedgerStore {
         F: FnMut(JournalEntry) -> Result<(), LedgerError>,
     {
         self.entry_db.stream_all(f)
+    }
+
+    /// Full-text search over entry metadata using the FTS5 index.
+    /// Returns matching entries in sequence order up to `limit`.
+    /// Near-instant regardless of ledger size — uses the SQLite FTS5 index.
+    pub fn search_metadata(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<JournalEntry> {
+        self.entry_db.search_metadata(query, limit).unwrap_or_default()
+    }
+
+    /// Rebuild the FTS5 metadata index from all existing entries.
+    /// Call this once after upgrading an existing database to v1.0.30+.
+    /// Progress callback receives the count of entries processed so far.
+    pub fn rebuild_fts_index<F>(&self, on_progress: F) -> Result<u64, LedgerError>
+    where
+        F: FnMut(u64),
+    {
+        self.entry_db.rebuild_fts_index(on_progress)
     }
 
     const DEFAULT_QUERY_LIMIT: usize = 10_000;

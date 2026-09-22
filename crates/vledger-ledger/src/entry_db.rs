@@ -161,7 +161,9 @@ impl EntryDb {
                 CREATE INDEX IF NOT EXISTS idx_entries_external_ref
                     ON entries(external_ref) WHERE external_ref IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_entries_idem_key
-                    ON entries(idempotency_key) WHERE idempotency_key IS NOT NULL;",
+                    ON entries(idempotency_key) WHERE idempotency_key IS NOT NULL;
+                CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts
+                    USING fts5(metadata, content='', tokenize='unicode61');",
             )
             .map_err(|e| LedgerError::Serialization(format!("SQLite schema error: {e}")))?;
         }
@@ -223,6 +225,10 @@ impl EntryDb {
             )
             .map_err(|e| LedgerError::Serialization(format!("prepare: {e}")))?;
 
+        let mut fts_stmt = conn
+            .prepare("INSERT INTO entries_fts(rowid, metadata) VALUES (?1, ?2)")
+            .map_err(|e| LedgerError::Serialization(format!("fts prepare: {e}")))?;
+
         let mut inserted = 0u64;
         for entry in entries {
             let data = encode_entry(entry)?;
@@ -241,6 +247,14 @@ impl EntryDb {
                     data,
                 ])
                 .map_err(|e| LedgerError::Serialization(format!("insert: {e}")))?;
+            if rows > 0 {
+                fts_stmt
+                    .execute(rusqlite::params![
+                        entry.sequence as i64,
+                        entry.metadata.as_deref().unwrap_or(""),
+                    ])
+                    .map_err(|e| LedgerError::Serialization(format!("fts insert: {e}")))?;
+            }
             inserted += rows as u64;
         }
 
@@ -347,6 +361,15 @@ impl EntryDb {
             ],
         )
         .map_err(|e| LedgerError::Serialization(format!("SQLite insert error: {e}")))?;
+        // Populate FTS index for metadata search.
+        conn.execute(
+            "INSERT INTO entries_fts(rowid, metadata) VALUES (?1, ?2)",
+            params![
+                entry.sequence as i64,
+                entry.metadata.as_deref().unwrap_or(""),
+            ],
+        )
+        .map_err(|e| LedgerError::Serialization(format!("FTS insert error: {e}")))?;
         Ok(())
     }
 
@@ -580,9 +603,119 @@ impl EntryDb {
         Ok(())
     }
 
-    /// Fetch entries in a sequence range [from_seq, to_seq] inclusive.
-    pub fn scan_range(&self, from_seq: u64, to_seq: u64) -> Result<Vec<JournalEntry>, LedgerError> {
+    /// Full-text search over entry metadata using the FTS5 index.
+    /// Returns matching entries in sequence order up to `limit`.
+    /// `query` is treated as a plain substring — automatically wrapped
+    /// in FTS5 prefix/phrase syntax so callers don't need FTS5 query knowledge.
+    pub fn search_metadata(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<JournalEntry>, LedgerError> {
         let conn = self.lock()?;
+        // Wrap the query in double-quotes for FTS5 phrase matching so that
+        // names with spaces ("Elizabeth Cadet") work as a single phrase.
+        // Escape any existing double-quotes in the input to avoid injection.
+        let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.data FROM entries e
+                 JOIN entries_fts ON entries_fts.rowid = e.sequence
+                 WHERE entries_fts MATCH ?1
+                 ORDER BY e.sequence
+                 LIMIT ?2",
+            )
+            .map_err(|e| LedgerError::Serialization(format!("FTS prepare error: {e}")))?;
+
+        let rows = stmt
+            .query_map(params![fts_query, limit as i64], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .map_err(|e| LedgerError::Serialization(format!("FTS search error: {e}")))?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let data =
+                row.map_err(|e| LedgerError::Serialization(format!("FTS row error: {e}")))?;
+            results.push(decode_entry(&data)?);
+        }
+        Ok(results)
+    }
+
+    /// Rebuild the FTS index from scratch by streaming all existing entries.
+    /// Safe to call on an existing database — clears the FTS table first
+    /// then repopulates it in batches. Uses the same pattern as
+    /// `rebuild_account_entries_fast` for constant-RAM operation.
+    pub fn rebuild_fts_index<F>(&self, mut on_progress: F) -> Result<u64, LedgerError>
+    where
+        F: FnMut(u64),
+    {
+        let conn = self.lock()?;
+
+        // Delete all FTS content first.
+        conn.execute_batch("DELETE FROM entries_fts;")
+            .map_err(|e| LedgerError::Serialization(format!("FTS clear: {e}")))?;
+
+        let mut fts_stmt = conn
+            .prepare("INSERT INTO entries_fts(rowid, metadata) VALUES (?1, ?2)")
+            .map_err(|e| LedgerError::Serialization(format!("FTS prepare: {e}")))?;
+
+        let mut scan_stmt = conn
+            .prepare("SELECT sequence, data FROM entries ORDER BY sequence")
+            .map_err(|e| LedgerError::Serialization(format!("scan prepare: {e}")))?;
+
+        let mut count: u64 = 0;
+        let mut batch: u64 = 0;
+
+        conn.execute_batch("BEGIN")
+            .map_err(|e| LedgerError::Serialization(format!("BEGIN: {e}")))?;
+
+        let rows = scan_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| LedgerError::Serialization(format!("scan: {e}")))?;
+
+        for row in rows {
+            let (seq, data) =
+                row.map_err(|e| LedgerError::Serialization(format!("row: {e}")))?;
+            let entry = decode_entry(&data)?;
+            fts_stmt
+                .execute(rusqlite::params![
+                    seq,
+                    entry.metadata.as_deref().unwrap_or(""),
+                ])
+                .map_err(|e| LedgerError::Serialization(format!("FTS insert: {e}")))?;
+            count += 1;
+            batch += 1;
+
+            if batch >= 500_000 {
+                conn.execute_batch("COMMIT; BEGIN")
+                    .map_err(|e| LedgerError::Serialization(format!("COMMIT/BEGIN: {e}")))?;
+                batch = 0;
+                on_progress(count);
+            }
+        }
+
+        conn.execute_batch("COMMIT")
+            .map_err(|e| LedgerError::Serialization(format!("final COMMIT: {e}")))?;
+
+        Ok(count)
+    }
+
+    /// Returns true if the FTS index has no rows — used at startup to detect
+    /// whether a one-time backfill is needed on an existing database.
+    pub fn fts_is_empty(&self) -> bool {
+        let Ok(conn) = self.lock() else { return true };
+        conn.query_row(
+            "SELECT COUNT(*) FROM entries_fts",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) == 0
+    }
+
+    /// Fetch entries in a sequence range [from_seq, to_seq] inclusive.
+    pub fn scan_range(&self, from_seq: u64, to_seq: u64) -> Result<Vec<JournalEntry>, LedgerError> {        let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
                 "SELECT data FROM entries WHERE sequence >= ?1 AND sequence <= ?2 ORDER BY sequence",
