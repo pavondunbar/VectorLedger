@@ -186,10 +186,11 @@ impl<'a> ReadExecutor<'a> {
             );
         }
 
-        // ByMetadataEq: full scan + exact metadata string match.
+        // ByMetadataEq: full ledger scan + exact metadata string match.
         if let Some(EntryFilter::ByMetadataEq(needle)) = &filter {
-            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let all = self.ledger.entries_scan(Self::DEFAULT_SCAN_LIMIT);
+            let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let total = self.ledger.entry_count();
+            let all = self.ledger.entries_scan(total);
             let matched: Vec<_> = all
                 .into_iter()
                 .filter(|e| {
@@ -198,7 +199,7 @@ impl<'a> ReadExecutor<'a> {
                         .map(|m| m == needle.as_str())
                         .unwrap_or(false)
                 })
-                .take(limit)
+                .take(result_limit)
                 .collect();
             return Self::build_scan_entries_result(
                 cols,
@@ -210,11 +211,12 @@ impl<'a> ReadExecutor<'a> {
             );
         }
 
-        // ByMetadataContains: full scan + case-insensitive substring match.
+        // ByMetadataContains: full ledger scan + case-insensitive substring match.
         if let Some(EntryFilter::ByMetadataContains(needle)) = &filter {
-            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
             let needle_lower = needle.to_lowercase();
-            let all = self.ledger.entries_scan(Self::DEFAULT_SCAN_LIMIT);
+            let total = self.ledger.entry_count();
+            let all = self.ledger.entries_scan(total);
             let matched: Vec<_> = all
                 .into_iter()
                 .filter(|e| {
@@ -223,7 +225,7 @@ impl<'a> ReadExecutor<'a> {
                         .map(|m| m.to_lowercase().contains(&needle_lower))
                         .unwrap_or(false)
                 })
-                .take(limit)
+                .take(result_limit)
                 .collect();
             return Self::build_scan_entries_result(
                 cols,
@@ -402,10 +404,11 @@ impl<'a> ReadExecutor<'a> {
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
 
-        // ByMetadataEq: full scan + exact metadata string match.
+        // ByMetadataEq: full ledger scan + exact metadata string match.
         if let Some(EntryFilter::ByMetadataEq(needle)) = &filter {
-            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let all = self.ledger.entries_scan(Self::DEFAULT_SCAN_LIMIT);
+            let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let total = self.ledger.entry_count();
+            let all = self.ledger.entries_scan(total);
             let matched: Vec<_> = all
                 .into_iter()
                 .filter(|e| {
@@ -414,16 +417,17 @@ impl<'a> ReadExecutor<'a> {
                         .map(|m| m == needle.as_str())
                         .unwrap_or(false)
                 })
-                .take(limit)
+                .take(result_limit)
                 .collect();
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
 
-        // ByMetadataContains: full scan + case-insensitive substring match.
+        // ByMetadataContains: full ledger scan + case-insensitive substring match.
         if let Some(EntryFilter::ByMetadataContains(needle)) = &filter {
-            let limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
+            let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
             let needle_lower = needle.to_lowercase();
-            let all = self.ledger.entries_scan(Self::DEFAULT_SCAN_LIMIT);
+            let total = self.ledger.entry_count();
+            let all = self.ledger.entries_scan(total);
             let matched: Vec<_> = all
                 .into_iter()
                 .filter(|e| {
@@ -432,7 +436,7 @@ impl<'a> ReadExecutor<'a> {
                         .map(|m| m.to_lowercase().contains(&needle_lower))
                         .unwrap_or(false)
                 })
-                .take(limit)
+                .take(result_limit)
                 .collect();
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
