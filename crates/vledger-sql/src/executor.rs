@@ -186,53 +186,45 @@ impl<'a> ReadExecutor<'a> {
             );
         }
 
-        // ByMetadataEq: full ledger scan + exact metadata string match.
+        // ByMetadataEq: stream full ledger + exact metadata string match.
         if let Some(EntryFilter::ByMetadataEq(needle)) = &filter {
             let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let total = self.ledger.entry_count();
-            let all = self.ledger.entries_scan(total);
-            let matched: Vec<_> = all
-                .into_iter()
-                .filter(|e| {
-                    e.metadata
-                        .as_deref()
-                        .map(|m| m == needle.as_str())
-                        .unwrap_or(false)
-                })
-                .take(result_limit)
-                .collect();
+            let needle = needle.clone();
+            let mut matched: Vec<vledger_ledger::JournalEntry> = Vec::new();
+            let _ = self.ledger.stream_entries(|entry| {
+                if matched.len() >= result_limit {
+                    return Err(vledger_ledger::LedgerError::Serialization("limit".into()));
+                }
+                if entry.metadata.as_deref().map(|m| m == needle.as_str()).unwrap_or(false) {
+                    matched.push(entry);
+                }
+                Ok(())
+            });
             return Self::build_scan_entries_result(
-                cols,
-                matched,
-                true,
-                None,
-                self.attach_proofs,
+                cols, matched, true, None, self.attach_proofs,
                 |root| self.ledger.sign_bytes(root),
             );
         }
 
-        // ByMetadataContains: full ledger scan + case-insensitive substring match.
+        // ByMetadataContains: stream full ledger + case-insensitive substring match.
         if let Some(EntryFilter::ByMetadataContains(needle)) = &filter {
             let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
             let needle_lower = needle.to_lowercase();
-            let total = self.ledger.entry_count();
-            let all = self.ledger.entries_scan(total);
-            let matched: Vec<_> = all
-                .into_iter()
-                .filter(|e| {
-                    e.metadata
-                        .as_deref()
-                        .map(|m| m.to_lowercase().contains(&needle_lower))
-                        .unwrap_or(false)
-                })
-                .take(result_limit)
-                .collect();
+            let mut matched: Vec<vledger_ledger::JournalEntry> = Vec::new();
+            let _ = self.ledger.stream_entries(|entry| {
+                if matched.len() >= result_limit {
+                    return Err(vledger_ledger::LedgerError::Serialization("limit".into()));
+                }
+                if entry.metadata.as_deref()
+                    .map(|m| m.to_lowercase().contains(&needle_lower))
+                    .unwrap_or(false)
+                {
+                    matched.push(entry);
+                }
+                Ok(())
+            });
             return Self::build_scan_entries_result(
-                cols,
-                matched,
-                true,
-                None,
-                self.attach_proofs,
+                cols, matched, true, None, self.attach_proofs,
                 |root| self.ledger.sign_bytes(root),
             );
         }
@@ -404,40 +396,40 @@ impl<'a> ReadExecutor<'a> {
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
 
-        // ByMetadataEq: full ledger scan + exact metadata string match.
+        // ByMetadataEq: stream full ledger + exact metadata string match.
         if let Some(EntryFilter::ByMetadataEq(needle)) = &filter {
             let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
-            let total = self.ledger.entry_count();
-            let all = self.ledger.entries_scan(total);
-            let matched: Vec<_> = all
-                .into_iter()
-                .filter(|e| {
-                    e.metadata
-                        .as_deref()
-                        .map(|m| m == needle.as_str())
-                        .unwrap_or(false)
-                })
-                .take(result_limit)
-                .collect();
+            let needle = needle.clone();
+            let mut matched: Vec<vledger_ledger::JournalEntry> = Vec::new();
+            let _ = self.ledger.stream_entries(|entry| {
+                if matched.len() >= result_limit {
+                    return Err(vledger_ledger::LedgerError::Serialization("limit".into()));
+                }
+                if entry.metadata.as_deref().map(|m| m == needle.as_str()).unwrap_or(false) {
+                    matched.push(entry);
+                }
+                Ok(())
+            });
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
 
-        // ByMetadataContains: full ledger scan + case-insensitive substring match.
+        // ByMetadataContains: stream full ledger + case-insensitive substring match.
         if let Some(EntryFilter::ByMetadataContains(needle)) = &filter {
             let result_limit = explicit_limit.unwrap_or(Self::DEFAULT_SCAN_LIMIT);
             let needle_lower = needle.to_lowercase();
-            let total = self.ledger.entry_count();
-            let all = self.ledger.entries_scan(total);
-            let matched: Vec<_> = all
-                .into_iter()
-                .filter(|e| {
-                    e.metadata
-                        .as_deref()
-                        .map(|m| m.to_lowercase().contains(&needle_lower))
-                        .unwrap_or(false)
-                })
-                .take(result_limit)
-                .collect();
+            let mut matched: Vec<vledger_ledger::JournalEntry> = Vec::new();
+            let _ = self.ledger.stream_entries(|entry| {
+                if matched.len() >= result_limit {
+                    return Err(vledger_ledger::LedgerError::Serialization("limit".into()));
+                }
+                if entry.metadata.as_deref()
+                    .map(|m| m.to_lowercase().contains(&needle_lower))
+                    .unwrap_or(false)
+                {
+                    matched.push(entry);
+                }
+                Ok(())
+            });
             return Self::build_scan_ledger_lines_result(cols, matched, &filter, false);
         }
 
