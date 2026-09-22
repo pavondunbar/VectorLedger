@@ -978,7 +978,7 @@ VectorLedger uses a tiered license model. The binary enforces feature availabili
 | Tier | Price | Best for |
 |---|---|---|
 | **Free** | $0 / month | Development, evaluation, internal tools |
-| **Starter** | $999 / month | Early-stage teams that need PostgreSQL client compatibility |
+| **Starter** | $499 / month | Early-stage teams that need PostgreSQL client compatibility |
 | **Growth** | $2,499 / month | Production fintechs and SaaS companies under SOC 2 or PCI-DSS |
 | **Enterprise** | Contact Sales | Banks, payment processors, PCI-DSS Level 1, hardware HSM requirements |
 
