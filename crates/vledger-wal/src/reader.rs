@@ -24,6 +24,14 @@ use crate::record::{RecordHeader, WalRecord};
 use crate::segment::{list_segments, segment_filename};
 use crate::{WAL_MAGIC, WAL_VERSION};
 
+/// Maximum payload size accepted from an on-disk WAL record.
+///
+/// A legitimate WAL record payload cannot exceed one full segment (64 MiB).
+/// Any `payload_len` or `ct_len` larger than this is proof of a corrupt or
+/// fuzz-generated record — reject it as a torn write rather than attempting
+/// to allocate gigabytes of memory.
+const MAX_RECORD_PAYLOAD: usize = 64 * 1024 * 1024; // 64 MiB
+
 /// Deserializes a `RecordHeader` from raw bytes.
 fn decode_header(bytes: &[u8]) -> Result<RecordHeader, WalError> {
     bincode::serde::decode_from_slice(bytes, bincode::config::standard().with_fixed_int_encoding())
@@ -128,6 +136,21 @@ impl SegmentReader {
             };
             let ct_len = u32::from_le_bytes(rest_header[12..16].try_into().unwrap()) as usize;
 
+            if ct_len > MAX_RECORD_PAYLOAD {
+                warn!(
+                    offset = self.byte_offset,
+                    ct_len,
+                    "Encrypted WAL record ct_len ({ct_len}) exceeds maximum \
+                     ({MAX_RECORD_PAYLOAD}) — treating as torn write"
+                );
+                self.done = true;
+                return Some(Err(WalError::TruncatedRecord {
+                    offset: self.byte_offset,
+                    needed: ct_len,
+                    available: 0,
+                }));
+            }
+
             let ciphertext = match read_exact_vec(&mut self.inner, ct_len) {
                 Ok(b) => b,
                 Err(e) => {
@@ -213,7 +236,23 @@ impl SegmentReader {
                 return Some(Err(WalError::UnsupportedVersion(header.version)));
             }
 
-            let payload = match read_exact_vec(&mut self.inner, header.payload_len as usize) {
+            let payload_len = header.payload_len as usize;
+            if payload_len > MAX_RECORD_PAYLOAD {
+                warn!(
+                    offset = self.byte_offset,
+                    payload_len,
+                    "WAL record payload_len ({payload_len}) exceeds maximum \
+                     ({MAX_RECORD_PAYLOAD}) — treating as torn write"
+                );
+                self.done = true;
+                return Some(Err(WalError::TruncatedRecord {
+                    offset: self.byte_offset,
+                    needed: payload_len,
+                    available: 0,
+                }));
+            }
+
+            let payload = match read_exact_vec(&mut self.inner, payload_len) {
                 Ok(b) => b,
                 Err(e) => {
                     self.done = true;
