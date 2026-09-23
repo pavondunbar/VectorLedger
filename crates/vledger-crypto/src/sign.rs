@@ -119,28 +119,25 @@ impl SignedCommit {
         trusted_key.verify(&self.data, &self.signature)
     }
 
-    /// Verify that the embedded signature is self-consistent.
-    ///
-    /// # ⚠ Security warning — do not use for authenticity checks
-    /// This method verifies the signature against the public key **embedded
-    /// inside the commit itself**.  An attacker who can write to a commit on
-    /// disk or in transit can generate new content with their own keypair,
-    /// embed their own public key, and this function will return `Ok(())`.
-    ///
-    /// Use [`SignedCommit::verify_against`] with an externally-trusted key
-    /// for any real tamper-detection or authenticity check.
-    ///
-    /// This method is retained only for unit-test convenience and is
-    /// **deprecated** for all production use.
-    #[deprecated(
-        since = "1.0.26",
-        note = "Use verify_against(trusted_key) with an externally-supplied trust anchor. \
-                Self-verification does not prove authenticity."
-    )]
-    pub fn verify(&self) -> Result<(), CryptoError> {
-        let key = DbVerifyingKey::from_bytes(&self.public_key)?;
-        key.verify(&self.data, &self.signature)
-    }
+    // `verify()` — the self-consistency method that existed here until 1.0.30 —
+    // has been removed.  It was deprecated in 1.0.26 because it verified the
+    // signature against the public key embedded inside the commit itself.  An
+    // attacker who can write to a commit on disk can generate new content,
+    // sign it with their own keypair, embed their own public key, and the old
+    // method would have returned `Ok(())`.
+    //
+    // Use `verify_against(trusted_key)` with a key sourced from a trust anchor
+    // you control (the database `keys/` directory, an HSM, or a compile-time
+    // constant).  If you are hitting a compile error here, replace:
+    //
+    //     signed_commit.verify()
+    //
+    // with:
+    //
+    //     signed_commit.verify_against(&trusted_verifying_key)
+    //
+    // where `trusted_verifying_key` is a `DbVerifyingKey` loaded from your
+    // trust anchor, NOT re-derived from `signed_commit.public_key`.
 }
 
 // ── Serde helper for VerifyingKey ─────────────────────────────────────────────

@@ -7,6 +7,17 @@ authors.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 
+[features]
+# Propagates dev-no-sync down to vledger-wal (and vledger-server) so that
+# `--features vledger/dev-no-sync` is the single knob a developer needs.
+# This feature MUST NOT be present in release builds or any binary shipped
+# to customers.
+#
+# Usage (dev/test only):
+#   cargo run  -p vledger --features dev-no-sync -- start ...
+#   cargo test -p vledger --features dev-no-sync
+dev-no-sync = ["vledger-wal/dev-no-sync", "vledger-server/dev-no-sync"]
+
 [[bin]]
 name = "vledger"
 path = "src/main.rs"

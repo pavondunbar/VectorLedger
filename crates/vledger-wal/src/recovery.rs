@@ -414,6 +414,29 @@ fn verify_commit_full(
 /// A zero pubkey/signature (from legacy or dev-mode commits) passes without
 /// verification — this preserves backwards compatibility while refusing
 /// tampered signatures on signed commits.
+///
+/// # ⚠ Embedded-pubkey limitation
+/// This function verifies the signature against the public key **stored inside
+/// the Commit record itself** (`CommitPayload.signer_pubkey`).  On its own
+/// that proves self-consistency — not authenticity.  An attacker who can
+/// overwrite the WAL segment could replace both the commit payload *and* the
+/// embedded public key with content of their choosing and this check would
+/// pass.
+///
+/// The defence-in-depth layer that closes this gap is **`verify_commit_full`**:
+/// it first recomputes `tx_hash` from the actual Data record `row_hash` fields
+/// (step 2–3) before calling this function (step 4).  An attacker must therefore
+/// also replace every Data record consistently — a correct Data record carries
+/// its `row_hash` which is derived from the row content, so any change to a
+/// row also requires forging the corresponding `row_hash` and the resulting
+/// `tx_hash`, and then forging the Ed25519 signature over the new `tx_hash`.
+///
+/// For the strongest guarantee, callers should additionally verify the Commit
+/// signature using `DbVerifyingKey::from_bytes(&trusted_pubkey)` where
+/// `trusted_pubkey` is loaded from the database `keys/` directory or an HSM,
+/// rather than from inside the Commit record.  The WAL checkpoint Merkle root
+/// signature (written by `WalWriter::checkpoint_with_merkle_root`) provides
+/// that external trust anchor for batch verification.
 fn verify_commit_signature(commit_record: &WalRecord) -> Result<(), WalError> {
     let payload = decode_commit_payload(commit_record)?;
 

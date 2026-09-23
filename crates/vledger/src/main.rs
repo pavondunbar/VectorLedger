@@ -124,7 +124,8 @@ enum Commands {
         /// Attach Merkle proofs to every SELECT response.
         #[arg(long)]
         with_proofs: bool,
-        /// WAL sync mode: per_record | group_commit | no_sync (default: group_commit)
+        /// WAL sync mode: per_record | group_commit (default: group_commit).
+        /// no_sync is only available in dev builds (--features dev-no-sync).
         #[arg(long, default_value = "group_commit")]
         wal_sync_mode: String,
         /// Group-commit flush interval in milliseconds (default: 2).
@@ -521,6 +522,7 @@ enum Commands {
         /// WAL sync mode for the import: group_commit (default), per_record, or no_sync.
         /// Use no_sync for maximum import speed on bulk migrations — run
         /// `vledger verify` after import completes to confirm integrity.
+        /// no_sync requires a dev build (--features dev-no-sync).
         #[arg(long, default_value = "group_commit")]
         wal_sync_mode: String,
     },
@@ -1195,12 +1197,14 @@ async fn cmd_start(
         anyhow::bail!("Data directory not found — run `vledger init` first.");
     }
 
-    // ── Fix #7: no_sync production guard ──────────────────────────────────
-    // NoSync mode never calls fsync — any crash between a COMMIT and the next
-    // OS writeback loses committed transactions permanently.  Refuse to start
-    // against a data directory that already contains committed WAL segments
-    // unless the operator explicitly acknowledges the risk.  In all cases emit
-    // a loud error so the setting cannot be silently deployed to production.
+    // ── no_sync guard ─────────────────────────────────────────────────────
+    // WalSyncMode::NoSync is only compiled when the `dev-no-sync` crate
+    // feature is active — release binaries structurally cannot parse this
+    // mode.  The runtime check below is a second defence-in-depth layer for
+    // dev builds: refuse to start against an existing data directory so that
+    // a developer who accidentally sets the flag doesn't silently lose data
+    // from a real database they were testing against.
+    #[cfg(feature = "dev-no-sync")]
     if wal_sync_mode == "no_sync" {
         let wal_dir = data_dir.join("wal");
         let has_existing_data = wal_dir.exists()
@@ -1222,7 +1226,7 @@ async fn cmd_start(
             );
         }
 
-        // Even for a fresh database, make the danger impossible to miss.
+        // Even for a fresh dev database, make the danger impossible to miss.
         tracing::error!(
             "⚠  WAL sync mode is NO_SYNC — fsync is NEVER called. \
              Committed transactions will be lost on a crash or power failure. \
@@ -5028,6 +5032,7 @@ async fn cmd_import(
         );
         vledger_wal::WalSyncMode::GroupCommit
     });
+    #[cfg(feature = "dev-no-sync")]
     if sync_mode == vledger_wal::WalSyncMode::NoSync {
         eprintln!("  ⚠  --wal-sync-mode=no_sync: fsync disabled for this import.");
         eprintln!(
@@ -5040,6 +5045,7 @@ async fn cmd_import(
     // upgrade to group_commit so account records survive process exit.
     // Entry records still benefit from the fast no_sync path; only the
     // account creation records need durability.
+    #[cfg(feature = "dev-no-sync")]
     let account_sync_mode = if create_accounts && sync_mode == vledger_wal::WalSyncMode::NoSync {
         eprintln!("  ℹ  --create-accounts: account WAL records will use group_commit sync");
         eprintln!("     (no_sync applies to entry records only — account records must be durable)");
@@ -5047,6 +5053,8 @@ async fn cmd_import(
     } else {
         sync_mode
     };
+    #[cfg(not(feature = "dev-no-sync"))]
+    let account_sync_mode = sync_mode;
     // open_for_import replays WAL without loading entries into RAM.
     // Memory stays flat at O(accounts) regardless of entry count.
     // When --create-accounts is set, use account_sync_mode (at least GroupCommit)

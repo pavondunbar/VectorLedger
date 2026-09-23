@@ -7,6 +7,20 @@ authors.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 
+[features]
+# Enable the NoSync WAL sync mode.
+#
+# NoSync never calls fsync — any crash between a COMMIT and the next OS
+# writeback permanently loses those committed transactions.  This feature
+# is intentionally absent from release builds.
+#
+# Usage: cargo build --features vledger-wal/dev-no-sync
+#        cargo test   --features vledger-wal/dev-no-sync
+#
+# The feature is automatically activated by the `vledger` binary crate when
+# its own `dev-no-sync` feature is present, and by the fuzz crate.
+dev-no-sync = []
+
 [dependencies]
 vledger-crypto = { workspace = true }
 serde          = { workspace = true }

@@ -8,12 +8,25 @@ publish = false
 #   cargo +nightly fuzz run fuzz_wal_recovery
 #   cargo +nightly fuzz run fuzz_sql_parser
 #   cargo +nightly fuzz run fuzz_pgwire_codec
+#   cargo +nightly fuzz run fuzz_backup_restore
+#   cargo +nightly fuzz run fuzz_auth
+#   cargo +nightly fuzz run fuzz_transaction
 #
 # Install cargo-fuzz:
 #   cargo install cargo-fuzz
+#
+# Run a specific target for N seconds:
+#   cargo +nightly fuzz run fuzz_transaction -- -max_total_time=60
+#
+# Show coverage after a corpus run:
+#   cargo +nightly fuzz coverage fuzz_transaction
 
 [package.metadata]
 cargo-fuzz = true
+
+# Declare an independent workspace so this crate is isolated from the root
+# workspace when built directly (e.g. `cargo +nightly fuzz run ...`).
+[workspace]
 
 [dependencies]
 libfuzzer-sys   = "0.4"
@@ -22,7 +35,19 @@ vledger-sql     = { path = "../crates/vledger-sql" }
 vledger-pgwire  = { path = "../crates/vledger-pgwire" }
 vledger-ledger  = { path = "../crates/vledger-ledger" }
 vledger-crypto  = { path = "../crates/vledger-crypto" }
+vledger-server  = { path = "../crates/vledger-server" }
 tempfile        = "3.20.0"
+# Explicit versions matching workspace pinned versions (no workspace = true
+# since this crate declares its own [workspace]).
+bincode         = { version = "2.0.1", features = ["serde"] }
+blake3          = "1.8.2"
+serde_json      = "1.0.140"
+serde           = { version = "1.0.219", features = ["derive"] }
+tar             = "0.4.44"
+hex             = "0.4.3"
+tokio           = { version = "1.45.1", features = ["full"] }
+
+# ── Existing targets ──────────────────────────────────────────────────────────
 
 [[bin]]
 name  = "fuzz_wal_recovery"
@@ -39,5 +64,25 @@ doc   = false
 [[bin]]
 name  = "fuzz_pgwire_codec"
 path  = "fuzz_targets/fuzz_pgwire_codec.rs"
+test  = false
+doc   = false
+
+# ── New targets ───────────────────────────────────────────────────────────────
+
+[[bin]]
+name  = "fuzz_backup_restore"
+path  = "fuzz_targets/fuzz_backup_restore.rs"
+test  = false
+doc   = false
+
+[[bin]]
+name  = "fuzz_auth"
+path  = "fuzz_targets/fuzz_auth.rs"
+test  = false
+doc   = false
+
+[[bin]]
+name  = "fuzz_transaction"
+path  = "fuzz_targets/fuzz_transaction.rs"
 test  = false
 doc   = false

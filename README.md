@@ -82,6 +82,66 @@ VectorLedger enforces 16 financial invariants in code — not by policy or docum
 - **Merkle proofs** on every SELECT response — clients can verify the exact set of rows returned matches the committed database state
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
 
+### Security & Reliability Hardening (v1.0.31)
+
+The following hardening changes were made after a full security review of the codebase.
+No on-disk data formats were changed; existing databases and backups are fully compatible.
+
+**`SignedCommit::verify()` removed**
+
+The self-consistency verification method (`SignedCommit::verify()`, deprecated in v1.0.26) has
+been deleted from `vledger-crypto`. It verified a WAL commit's Ed25519 signature against the
+public key embedded *inside the commit itself*, which proves self-consistency but not
+authenticity — an attacker who can write to the WAL segment can substitute their own
+content and key. All callers already used the safe `verify_against(trusted_key)` form;
+the unsafe method is now a compile error. The WAL recovery path (`verify_commit_signature`)
+carries an explicit doc comment explaining the embedded-key limitation and the two
+defence-in-depth layers (tx_hash recomputation + Merkle checkpoint signing) that
+together close the gap.
+
+**`WalSyncMode::NoSync` is a compile-time feature gate, not a runtime guard**
+
+`NoSync` mode never calls `fsync` — a crash loses committed transactions permanently.
+Previously it was accepted by the release binary and guarded only by a runtime warning.
+It is now gated behind `#[cfg(feature = "dev-no-sync")]`; the variant does not exist in
+the type system of a standard build, so it cannot be enabled by misconfiguration.
+The `--wal-sync-mode=no_sync` CLI flag now returns a hard error from `FromStr` in
+release builds. Development and CI builds can opt in with `--features dev-no-sync`.
+The bulk-import fast path retains access to `no_sync` behind the same feature gate.
+Verified: zero `NoSync` symbols in the release `.rlib` without the feature.
+
+**Deterministic crash/recovery test suite (8 new tests)**
+
+`crates/vledger-ledger/src/deterministic_recovery_tests.rs` adds eight tests that each
+target a specific failure scenario not covered by the existing suite:
+
+| Test | Failure scenario |
+|---|---|
+| `power_loss_mid_commit_torn_record_is_discarded` | Corrupt the last 8 bytes of the active WAL segment — torn Commit is discarded, prior entries intact |
+| `segment_boundary_crash_all_committed_entries_survive` | 30 transactions across multiple 4 KiB segments; all recovered, sequences strictly monotonic |
+| `checkpoint_deleted_falls_back_to_full_wal_replay` | Delete `wal-checkpoint.json`; full WAL replay recovers all data |
+| `checkpoint_corrupted_falls_back_to_full_wal_replay` | Overwrite checkpoint with invalid JSON; `WalCheckpoint::read` returns `None`, open succeeds |
+| `checkpoint_with_future_sequence_triggers_full_replay` | Bogus checkpoint pointing to segment 999; store finds real data via full replay |
+| `concurrent_open_second_attempt_is_refused` | `DataDirLock` refuses a second acquire immediately |
+| `concurrent_open_via_ledger_store_second_open_errors` | Second `LedgerStore::open()` on the same dir returns a lock error |
+| `multi_entry_batch_spanning_segment_roll_fully_recovered` | 60 data records in a single WAL transaction spanning multiple 4 KiB segments; all payloads present after `recover_verified()` |
+
+**Fuzz suite expanded (3 new targets)**
+
+`fuzz/fuzz_targets/` now contains six targets. The three additions:
+
+| Target | What it fuzzes |
+|---|---|
+| `fuzz_backup_restore` | tar entry parsing, AES-256-GCM tamper detection (asserts every single-byte ciphertext mutation returns `Err`), `BackupManifest` JSON deserialization, BLAKE3 manifest hash, path-traversal guard |
+| `fuzz_auth` | `Role::from_str`, `UserStore::authenticate` (arbitrary credentials, lockout counter path), `validate_token` (arbitrary token strings), cross-user token forgery invariant |
+| `fuzz_transaction` | Bincode deserialization of all four WAL payload types (`DataPayload`, `CommitPayload`, `BeginPayload`, `CheckpointPayload`), `decode_data_payload_from_bytes`, `decode_table_id_only`, full `recover()` / `recover_verified()` / `recover_streaming()` pipelines, 8 structured transaction boundary scenarios |
+
+Run any target with:
+```bash
+cargo install cargo-fuzz
+cargo +nightly fuzz run fuzz_transaction -- -max_total_time=60
+```
+
 ### Write-Ahead Log (WAL)
 - **Per-record mode** fsyncs every WAL record before returning `Ok` — zero data loss on crash
 - **Group-commit mode** (default) flushes the WAL on a configurable background interval (default 2 ms); up to one flush window of writes may be lost on a hard crash

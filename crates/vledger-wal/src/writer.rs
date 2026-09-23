@@ -38,6 +38,13 @@ use crate::{DEFAULT_SEGMENT_SIZE, WAL_MAGIC, WAL_VERSION};
 // ── WalSyncMode ───────────────────────────────────────────────────────────────
 
 /// Controls when the WAL calls `fsync` to commit writes to stable storage.
+///
+/// # Production safety
+/// Only `PerRecord` and `GroupCommit` are available in normal builds.
+/// `NoSync` is compiled in only when the `dev-no-sync` crate feature is
+/// active (e.g. `--features vledger-wal/dev-no-sync`).  Release binaries
+/// are built without that feature, making it structurally impossible to
+/// ship a production binary that can silently skip fsyncs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -64,6 +71,10 @@ pub enum WalSyncMode {
     ///
     /// **Development and testing only.**  Any crash will likely corrupt or
     /// lose data.  Never use in production.
+    ///
+    /// Only compiled when the `dev-no-sync` crate feature is active.
+    /// Production release binaries are built without this feature.
+    #[cfg(feature = "dev-no-sync")]
     NoSync,
 }
 
@@ -72,6 +83,7 @@ impl std::fmt::Display for WalSyncMode {
         match self {
             Self::PerRecord => write!(f, "per_record"),
             Self::GroupCommit => write!(f, "group_commit"),
+            #[cfg(feature = "dev-no-sync")]
             Self::NoSync => write!(f, "no_sync"),
         }
     }
@@ -83,9 +95,17 @@ impl std::str::FromStr for WalSyncMode {
         match s.to_lowercase().as_str() {
             "per_record" | "fsync" => Ok(Self::PerRecord),
             "group_commit" | "group" => Ok(Self::GroupCommit),
+            #[cfg(feature = "dev-no-sync")]
             "no_sync" | "none" => Ok(Self::NoSync),
+            #[cfg(not(feature = "dev-no-sync"))]
+            "no_sync" | "none" => Err(
+                "no_sync WAL mode is not available in this build. \
+                 Rebuild with --features vledger-wal/dev-no-sync for development use only. \
+                 Use group_commit (recommended) or per_record instead."
+                    .into(),
+            ),
             other => Err(format!(
-                "unknown wal_sync_mode '{other}' — use: per_record, group_commit, no_sync"
+                "unknown wal_sync_mode '{other}' — use: per_record, group_commit"
             )),
         }
     }
@@ -351,6 +371,7 @@ impl WalWriter {
                         fs.dirty.store(true, Ordering::Release);
                     }
                 }
+                #[cfg(feature = "dev-no-sync")]
                 WalSyncMode::NoSync => {
                     #[cfg(debug_assertions)]
                     debug!("WAL no_sync mode — write not fsynced");

@@ -24,6 +24,8 @@ mod concurrent_tests;
 #[cfg(test)]
 mod crash_tests;
 pub mod currency;
+#[cfg(test)]
+mod deterministic_recovery_tests;
 pub mod entry;
 pub mod entry_db;
 pub mod error;

@@ -13,6 +13,11 @@ repository.workspace  = true
 # Usage: cargo build -p vledger-server --features dev-no-auth
 dev-no-auth = []
 
+# Propagate the dev-no-sync feature flag through to vledger-wal so that
+# ServerConfig (which contains WalSyncMode) can still reference the full
+# enum when building dev/test binaries with NoSync enabled.
+dev-no-sync = ["vledger-wal/dev-no-sync"]
+
 [dependencies]
 vledger-secrets     = { workspace = true }
 vledger-crypto      = { workspace = true }
