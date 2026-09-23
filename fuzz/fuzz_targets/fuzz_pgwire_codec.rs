@@ -20,21 +20,27 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 use tokio::io::AsyncReadExt;
+use tokio::runtime::Runtime;
 
-/// Synchronous wrapper so libfuzzer's synchronous callback can drive async
-/// codec functions.
-fn run_async<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(f)
+/// Single shared runtime, built once for the lifetime of the fuzz process.
+/// Building a new Runtime on every iteration costs ~1 ms of scheduler setup
+/// and caused libFuzzer to flag slow units on inputs that hit runtime-init
+/// paths. A shared runtime eliminates that overhead.
+fn runtime() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("fuzz runtime init")
+    })
 }
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() { return; }
 
-    run_async(async {
+    runtime().block_on(async {
         // ── Test 1: startup packet decoder ───────────────────────────────
         {
             use tokio::io::BufReader;

@@ -37,8 +37,19 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 use tempfile::TempDir;
+use tokio::runtime::Runtime;
 use vledger_server::auth::{Role, UserStore};
+
+fn runtime() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("fuzz runtime init")
+    })
+}
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
@@ -100,16 +111,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // ── Surface 4: validate_token with arbitrary tokens ────────────────────
-    // validate_token is async; create a minimal single-threaded runtime.
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    rt.block_on(async {
+    // validate_token is async; use the shared runtime.
+    runtime().block_on(async {
         // Arbitrary fuzz token — must return Err (invalid), never panic.
         let _ = store.validate_token(&fuzz_token).await;
 
@@ -127,7 +130,7 @@ fuzz_target!(|data: &[u8]| {
 
     if let (Ok(session_a), Ok(session_b)) = (&result_a, &result_b) {
         if session_a.username != session_b.username {
-            rt.block_on(async {
+            runtime().block_on(async {
                 if let Ok(validated) = store.validate_token(&session_a.token).await {
                     assert_eq!(
                         validated.username, session_a.username,
