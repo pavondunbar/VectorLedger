@@ -513,7 +513,14 @@ impl LogicalPlanBuilder {
                         .iter()
                         .position(|c| c == name)
                         .ok_or_else(|| SqlError::MissingField(name.to_string()))?;
-                    expr_to_string(&vals[idx])
+                    let val = vals.get(idx).ok_or_else(|| {
+                        SqlError::MissingField(format!(
+                            "column '{name}' is at position {idx} in the column list \
+                             but VALUES only has {} element(s)",
+                            vals.len()
+                        ))
+                    })?;
+                    expr_to_string(val)
                 };
 
                 let amount_str = get("amount")?;
@@ -558,7 +565,14 @@ impl LogicalPlanBuilder {
                         .iter()
                         .position(|c| c == name)
                         .ok_or_else(|| SqlError::MissingField(name.to_string()))?;
-                    expr_to_string(&vals[idx])
+                    let val = vals.get(idx).ok_or_else(|| {
+                        SqlError::MissingField(format!(
+                            "column '{name}' is at position {idx} in the column list \
+                             but VALUES only has {} element(s)",
+                            vals.len()
+                        ))
+                    })?;
+                    expr_to_string(val)
                 };
 
                 Ok(LogicalPlan::CreateAccount(AccountSpec {
