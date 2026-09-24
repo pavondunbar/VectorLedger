@@ -23,7 +23,7 @@ Objective (RTO), and operational runbooks for VectorLedger deployments.
 |---|---|---|---|
 | Single-node | `per_record` | **0 seconds** | Every committed transaction is fsynced before ACK |
 | Single-node | `group_commit` (default) | **≤ flush interval** (default 2 ms) | A hard crash may lose at most one flush window of committed transactions |
-| Single-node | `no_sync` | **unbounded** | Dev/test only. Never use in production |
+| Single-node | `no_sync` | **unbounded** | Dev/CI builds only — requires `--features dev-no-sync` at compile time. Not available in release binaries. Never use in production |
 | Primary + synchronous replica | `per_record` | **0 seconds** | Replica ACKs before primary returns to client |
 | Primary + synchronous replica | `group_commit` | **≤ flush interval** | Both nodes flush within the same window |
 | Backup-based DR (no replica) | any | **≤ backup interval** | Typically 24 h for daily backups; reduce with more frequent snapshots |

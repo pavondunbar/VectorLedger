@@ -81,10 +81,41 @@ The following known limitations are **by design** and are **not** security
 vulnerabilities:
 
 - `WalSyncMode::NoSync` provides no durability guarantee and must never be
-  used in production. The server refuses to start with existing data in this
-  mode.
+  used in production. As of v1.0.32, `NoSync` does not exist in the type
+  system of a standard release build — it is gated behind
+  `--features dev-no-sync` at compile time. A release binary cannot accept
+  `--wal-sync-mode=no_sync` regardless of configuration.
 - Self-signed TLS certificates are accepted for loopback connections only.
   Non-loopback connections require a CA-signed certificate via `--ca-cert`.
 - The `file` key source stores the master key on disk in hex. This is
   documented as a development-only option and the server emits a loud
   warning at startup.
+
+## Fuzz-Found Vulnerabilities (fixed)
+
+The following vulnerabilities were discovered by the VectorLedger fuzz test
+suite and fixed before any public exposure:
+
+**WAL reader unbounded allocation (fixed in v1.0.32)**
+The WAL segment reader allocated a buffer of `payload_len` bytes before
+attempting any read. A WAL record header with `payload_len = 0xFFFFFFFF`
+triggered a 4 GiB allocation attempt and killed the process. The same
+issue existed for `ct_len` in the encrypted record path. Fixed by capping
+both fields at `MAX_RECORD_PAYLOAD = 64 MiB` before any allocation.
+Severity: an attacker with write access to the WAL directory could prevent
+the server from starting.
+
+**SQL planner index-out-of-bounds panic (fixed in v1.0.32)**
+The SQL query planner indexed directly into the `VALUES` list without
+checking that the value count matched the column count. An `INSERT`
+statement with fewer values than columns caused a panic. Fixed by replacing
+`vals[idx]` with `vals.get(idx)` returning a typed error. Severity: any
+authenticated client could crash the query planner with a single malformed
+`INSERT` statement.
+
+**Fuzz harness bincode unbounded allocation (fixed in v1.0.32)**
+The `fuzz_transaction` harness fed raw bytes directly to
+`bincode::serde::decode_from_slice` without an allocation limit. Fixed by
+adding `.with_limit::<{1 MiB}>()` to the decode config. This was a
+harness-only issue — not a vulnerability in production code, which validates
+payload sizes at the WAL reader layer before reaching bincode.

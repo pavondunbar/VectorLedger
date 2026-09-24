@@ -81,6 +81,7 @@ VectorLedger enforces 16 financial invariants in code — not by policy or docum
 - **Argon2id** password hashing (64 MiB / 3 iterations / 4 lanes — above OWASP minimum)
 - **Merkle proofs** on every SELECT response — clients can verify the exact set of rows returned matches the committed database state
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
+- `WalSyncMode::NoSync` is a **compile-time feature gate**, not a runtime guard — the `NoSync` variant does not exist in the type system of a standard release build. It is only compiled in when `--features dev-no-sync` is explicitly passed, making it structurally impossible to ship or misconfigure a production binary that skips fsyncs
 
 ### Security & Reliability Hardening (v1.0.33)
 

@@ -442,7 +442,7 @@ Disabling an account immediately revokes all active sessions.
 | `cannot lock data directory` | Another vledger process is running | `pkill vledger`; check for stale PID files |
 | `HSM daemon not reachable` | PyHSM is down | Start PyHSM; check socket/endpoint |
 | `Feature 'pgwire' is not available` | License tier too low | Remove `--pgwire` flag or upgrade license |
-| `WAL sync mode is NO_SYNC...REFUSED` | Existing data with `no_sync` | Use `group_commit` or `per_record` |
+| `WAL sync mode is NO_SYNC...REFUSED` | Existing data with `no_sync` | Use `group_commit` or `per_record`; note that `no_sync` is not available in release binaries at all — it requires a dev build with `--features dev-no-sync` |
 | `Audit log cannot be opened` | Permissions or disk full | Check disk space; `chmod 700 data/audit/` |
 
 ### The hash chain is broken (`VERIFY_CHAIN()` returns non-OK)
@@ -531,7 +531,7 @@ intentional — VectorLedger fails closed rather than starting without key acces
 |---|---|---|---|
 | `group_commit` (default) | Up to 1 flush interval | Highest | Most deployments |
 | `per_record` | Zero data loss | ~30–50% lower | Strict regulatory |
-| `no_sync` | None | Highest | Dev/CI only — never production |
+| `no_sync` | None | Highest | Dev/CI builds only — requires `--features dev-no-sync` at compile time; not available in release binaries |
 
 Tune the group commit interval:
 ```bash
@@ -593,6 +593,16 @@ Run through this before going to production:
 - [ ] Schedule daily `VERIFY_CHAIN()` cron job
 - [ ] Schedule daily backup cron job
 - [ ] Test restore procedure from backup before going live
+- [ ] Run the full test suite to confirm the binary was built from a clean codebase:
+  ```bash
+  cargo test --package vledger-ledger --package vledger-sql \
+             --package vledger-server --package vledger-audit \
+             --package vledger-replication --package vledger-compliance \
+             --package vledger-foureyes --package vledger-hsm \
+             --package vledger-license --package vledger-crypto \
+             --package vledger-wal
+  ```
+  All 498 tests must pass before deploying a new build to production.
 
 ---
 
