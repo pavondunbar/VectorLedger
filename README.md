@@ -82,6 +82,63 @@ VectorLedger enforces 16 financial invariants in code — not by policy or docum
 - **Merkle proofs** on every SELECT response — clients can verify the exact set of rows returned matches the committed database state
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
 
+### Security & Reliability Hardening (v1.0.32)
+
+Three bugs were found and fixed by the fuzz suite during a full fuzzing run of all six
+targets. No on-disk data formats were changed; existing databases and backups are fully
+compatible.
+
+**WAL reader unbounded allocation — OOM on crafted `payload_len` / `ct_len`**
+
+The WAL segment reader in `crates/vledger-wal/src/reader.rs` allocated a buffer of
+`payload_len` bytes before attempting any read. A WAL record header with
+`payload_len = 0xFFFFFFFF` (4 GiB) triggered a 4 GiB allocation attempt and killed
+the process. The same issue existed for `ct_len` in the encrypted record path.
+
+Fix: `MAX_RECORD_PAYLOAD = 64 MiB` (matching `DEFAULT_SEGMENT_SIZE`) is checked against
+both fields before any allocation. Records claiming a larger payload are treated as torn
+writes and stop the recovery scan cleanly. This was found by `fuzz_wal_recovery` with
+input `RLWE\xff\xff...\xff`.
+
+Severity: any process that opens a WAL directory containing a crafted or accidentally
+corrupted segment fails to start. An attacker with write access to the WAL directory
+could use this to prevent the server from starting.
+
+**SQL planner panic — out-of-bounds index on column/value count mismatch**
+
+The SQL query planner in `crates/vledger-sql/src/planner.rs` indexed directly into the
+`VALUES` list (`vals[idx]`) without checking that the number of values matched the number
+of columns. An `INSERT` statement with fewer values than columns — for either
+`INSERT INTO ledger` or `INSERT INTO accounts` — caused an index-out-of-bounds panic.
+
+Fix: replaced `vals[idx]` with `vals.get(idx)` returning `SqlError::MissingField` with
+a descriptive message. Found by `fuzz_sql_parser` with:
+```sql
+INSERT INTO accounts (code,name,account_type,currency,domain) VALUES ('\B','\007sset','\\USD','\011est')
+```
+
+Severity: any authenticated client could crash the query planner with a single malformed
+`INSERT` statement.
+
+**Fuzz harness bincode allocation cap**
+
+`fuzz_transaction` fed raw arbitrary bytes directly to
+`bincode::serde::decode_from_slice` without an allocation limit. A crafted 64-bit length
+prefix caused bincode to attempt a ~1.8 exabyte allocation. The production code path is
+safe (payloads are already reader-validated before reaching bincode), but the fuzz harness
+needed `.with_limit::<{1 MiB}>()` added to the decode config.
+
+**All six fuzz targets ran clean after fixes:**
+
+| Target | Runs | Result |
+|---|---|---|
+| `fuzz_wal_recovery` | 1,039,845 | ✅ Clean |
+| `fuzz_sql_parser` | 3,049,549 | ✅ Clean |
+| `fuzz_pgwire_codec` | 9,291,762 | ✅ Clean |
+| `fuzz_backup_restore` | 1,191,487 | ✅ Clean |
+| `fuzz_auth` | 382 | ✅ Clean |
+| `fuzz_transaction` | 30,062 | ✅ Clean |
+
 ### Security & Reliability Hardening (v1.0.31)
 
 The following hardening changes were made after a full security review of the codebase.
