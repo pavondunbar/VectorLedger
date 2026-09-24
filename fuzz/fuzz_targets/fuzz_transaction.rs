@@ -66,8 +66,15 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode_table_id_only(data);
 
     // ── Surface 3: bincode deserialization of each payload type ──────────
-    // Uses the exact config from production (`standard().with_fixed_int_encoding()`).
-    let cfg = bincode::config::standard().with_fixed_int_encoding();
+    // Uses the exact config from production (`standard().with_fixed_int_encoding()`),
+    // plus a 1 MiB allocation limit so a fuzz-crafted length prefix cannot
+    // trigger a multi-gigabyte allocation before the read fails.
+    // The production code path uses the same standard() config but operates on
+    // already-validated WAL records (CRC-checked, payload_len capped at 64 MiB
+    // in reader.rs) so the limit is only needed in the raw fuzz context.
+    let cfg = bincode::config::standard()
+        .with_fixed_int_encoding()
+        .with_limit::<{ 1024 * 1024 }>();
 
     let _ = bincode::serde::decode_from_slice::<DataPayload, _>(data, cfg);
     let _ = bincode::serde::decode_from_slice::<CommitPayload, _>(data, cfg);
