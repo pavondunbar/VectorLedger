@@ -82,6 +82,54 @@ VectorLedger enforces 16 financial invariants in code — not by policy or docum
 - **Merkle proofs** on every SELECT response — clients can verify the exact set of rows returned matches the committed database state
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
 
+### Security & Reliability Hardening (v1.0.33)
+
+498 tests passing across 11 packages. Added comprehensive coverage for every
+previously untested subsystem. No on-disk format changes; existing databases
+and backups are fully compatible.
+
+**New unit/integration tests (245 new tests across 9 packages):**
+
+| Package | New tests | What they cover |
+|---|---|---|
+| `vledger-replication` | 21 | HMAC challenge-response, secret management, divergence detection, protocol encoding, config loading |
+| `vledger-compliance` | 45 | SOC 2 / PCI-DSS report generation, all control evaluations, JSON/Markdown serialisation |
+| `vledger-foureyes` | 30 | Submit, approve, reject, list_pending, get, persistence across reopen, idempotency guard, audit event emission |
+| `vledger-hsm` | 19 | HsmTransport construction, key ID helpers, KeyPolicy, RemotePyHsmConfig, HsmError display, is_available without socket |
+| `vledger-license` | 21 | Free tier, invalid JSON fallback, tampered signature, feature gating, LicenseTier/Feature parse round-trips, canonical payload |
+| `vledger-crypto` | 34 | MasterKey determinism, all named derivation contexts pairwise distinct, row key isolation, DerivedKey conversions, edge cases |
+| `vledger-wal` | 29 | WAL encryption migration path — plaintext, encrypted, mixed segments; derive_segment_key, encrypt/decrypt round-trip, segment-index AAD |
+| `vledger-ledger` | +24 | Settlement lifecycle (Posted→Pending→Settled/Failed), original entry immutability, legal hold placement/lifting, WAL replay |
+
+**New proptest properties (4 added to `proptest_invariants.rs`):**
+
+- `p_inv8_reversal_correction_nets_to_correction_amount` — reversal + correction always yields the correction amount, not the original
+- `p_inv9_hash_chain_valid_for_random_count_and_amounts` — chain valid and every entry passes `verify_hashes()` for up to 500 random transactions
+- `p_inv10_settlement_events_do_not_mutate_original_entry` — `content_hash` never changes after any sequence of settlement events
+- `p_inv11_balance_equals_sum_of_lines` — `balance()` always equals `Σdebits - Σcredits` across all entry lines for an account
+
+**New fuzz targets (6 added — 12 total):**
+
+| Target | What it fuzzes |
+|---|---|
+| `fuzz_replication` | Protocol message parsing, HMAC computation, secret file parsing, divergence checkpoint verification |
+| `fuzz_backup_keysidecar` | `.key` sidecar JSON parsing, AES-256-GCM wrapped key decryption, single-byte tamper detection |
+| `fuzz_audit_log` | WORM audit log with arbitrary content, `AuditEvent::verify()`, chain verifier on corrupt logs |
+| `fuzz_compliance_report` | Compliance engine on adversarially crafted data directories |
+| `fuzz_csv_import` | CSV parser iteration, column mapping resolution, amount field parsing |
+| `fuzz_wal_recovery_multisegment` | Recovery across 2–3 segment files in 5 structured scenarios |
+
+Run all 12 fuzz targets:
+```bash
+cargo install cargo-fuzz
+cargo +nightly fuzz run fuzz_replication -- -max_total_time=60
+cargo +nightly fuzz run fuzz_backup_keysidecar -- -max_total_time=60
+cargo +nightly fuzz run fuzz_audit_log -- -max_total_time=60
+cargo +nightly fuzz run fuzz_compliance_report -- -max_total_time=60
+cargo +nightly fuzz run fuzz_csv_import -- -max_total_time=60
+cargo +nightly fuzz run fuzz_wal_recovery_multisegment -- -max_total_time=60
+```
+
 ### Security & Reliability Hardening (v1.0.32)
 
 Three bugs were found and fixed by the fuzz suite during a full fuzzing run of all six

@@ -37,6 +37,9 @@ pub mod store;
 pub mod tier;
 pub mod watcher;
 
+#[cfg(test)]
+mod license_tests;
+
 pub use error::LicenseError;
 pub use store::LicenseStore;
 pub use tier::{Feature, LicenseTier};

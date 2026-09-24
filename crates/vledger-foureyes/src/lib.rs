@@ -24,6 +24,8 @@
 
 #[cfg(test)]
 mod bypass_tests;
+#[cfg(test)]
+mod queue_tests;
 pub mod error;
 pub mod queue;
 pub mod record;

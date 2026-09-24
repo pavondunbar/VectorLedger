@@ -18,6 +18,8 @@ pub mod encrypt;
 pub mod error;
 pub mod hash;
 pub mod kdf;
+#[cfg(test)]
+mod kdf_tests;
 pub mod merkle;
 pub mod password;
 pub mod sign;

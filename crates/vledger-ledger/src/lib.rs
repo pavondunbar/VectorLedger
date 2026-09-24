@@ -40,6 +40,8 @@ mod entry_db_tests;
 pub mod lockfile;
 #[cfg(test)]
 mod proptest_invariants;
+#[cfg(test)]
+mod settlement_tests;
 pub mod store;
 #[cfg(test)]
 mod stress_tests;

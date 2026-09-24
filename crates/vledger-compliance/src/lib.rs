@@ -22,6 +22,9 @@ pub mod evidence;
 pub mod report;
 pub mod rules;
 
+#[cfg(test)]
+mod compliance_tests;
+
 pub use engine::ComplianceEngine;
 pub use error::ComplianceError;
 pub use evidence::{Evidence, EvidenceStatus};

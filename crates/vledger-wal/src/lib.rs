@@ -48,6 +48,8 @@
 
 pub mod encrypt;
 pub mod error;
+#[cfg(test)]
+mod encryption_migration_tests;
 pub mod key_rotation;
 pub mod reader;
 pub mod record;

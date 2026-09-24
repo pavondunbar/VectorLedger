@@ -36,6 +36,9 @@ pub mod replica;
 pub mod secret;
 pub mod tls;
 
+#[cfg(test)]
+mod replication_tests;
+
 pub use config::{ReplicationConfig, ReplicationRole};
 pub use divergence::{
     build_checkpoint, compute_wal_chain_hash, verify_checkpoint, DivergenceCheckpoint,

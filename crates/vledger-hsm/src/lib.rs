@@ -25,6 +25,9 @@ pub mod pkcs11;
 pub mod protocol;
 pub mod remote;
 
+#[cfg(test)]
+mod hsm_tests;
+
 pub use client::{default_pyhsm_address, HsmClient, KeyProvider};
 pub use error::HsmError;
 pub use pkcs11::{
