@@ -1,0 +1,18 @@
+[package]
+name        = "vledger-kani"
+description = "Kani formal verification proof harnesses for VectorLedger"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[lib]
+name = "vledger_kani"
+path = "src/lib.rs"
+
+[dependencies]
+vledger-crypto      = { workspace = true }
+vledger-wal         = { workspace = true }
+vledger-ledger      = { workspace = true }
+vledger-replication = { workspace = true }

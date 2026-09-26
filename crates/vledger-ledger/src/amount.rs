@@ -12,6 +12,11 @@
 //! Arithmetic is performed in `i128` to prevent overflow on intermediate
 //! calculations.
 
+// Arithmetic overflow in financial amount calculations is a critical bug —
+// deny it at the module level so any accidental unchecked arithmetic on
+// Amount values is caught at compile time.
+#![deny(clippy::arithmetic_side_effects)]
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, Neg, Sub};
@@ -87,21 +92,21 @@ impl Amount {
 impl Neg for Amount {
     type Output = Self;
     fn neg(self) -> Self {
-        Self(-self.0)
+        Self(self.0.checked_neg().expect("Amount negation overflow"))
     }
 }
 
 impl Add for Amount {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        Self(self.0 + rhs.0)
+        Self(self.0.checked_add(rhs.0).expect("Amount addition overflow"))
     }
 }
 
 impl Sub for Amount {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
-        Self(self.0 - rhs.0)
+        Self(self.0.checked_sub(rhs.0).expect("Amount subtraction overflow"))
     }
 }
 

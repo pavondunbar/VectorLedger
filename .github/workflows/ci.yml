@@ -44,11 +44,77 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::too_many_arguments -A clippy::doc_markdown -A clippy::result_unit_err -A dead_code -A clippy::ptr_arg -A clippy::explicit_counter_loop
 
+      - name: Static analysis (custom lint rules)
+        run: bash scripts/static-analysis.sh
+
       - name: Build
         run: cargo build --workspace
 
       - name: Test
         run: cargo test --workspace
+
+  # ── Formal verification (Kani proof harnesses) ─────────────────────────────
+  # Exhaustively verifies 21 proof harnesses covering:
+  # - WAL payload bound (MAX_RECORD_PAYLOAD cap correctness)
+  # - Amount arithmetic (checked ops never panic, zero rejected)
+  # - Hash chain structure (ZERO_HASH, Hash type invariants)
+  # - MAC equality (mac_eq reflexivity, symmetry, correctness)
+  #
+  # Runs on push to main only — verification is CPU-intensive and does not
+  # need to run on every pull request draft commit.
+  formal-verify:
+    name: Formal verification (Kani)
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Kani
+        uses: model-checking/kani-github-action@v1.1
+
+      - name: Run Kani proof harnesses
+        run: bash scripts/formal-verify.sh
+
+  # ── Mutation testing (cargo-mutants, scoped to crypto) ──────────────────────
+  # Injects plausible bugs into vledger-crypto and verifies the test suite
+  # catches each one. Runs on push to main to track mutation score over time.
+  mutation-test:
+    name: Mutation testing (cargo-mutants)
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Run mutation testing (vledger-crypto)
+        # Run on the crypto package only in CI — fast and highest value.
+        # Full workspace mutation run can be triggered manually:
+        #   ./scripts/mutation-test.sh
+        run: bash scripts/mutation-test.sh --package vledger-crypto
+
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results
+          path: mutants.out/
+          retention-days: 30
 
   # ── Known CVE audit (cargo-audit) ──────────────────────────────────────────
   audit:

@@ -727,7 +727,7 @@ fn parse_where_to_entry_filter(table: &str, expr: Expr) -> Result<EntryFilter, S
 
         // Collect all values from the IN list.
         let values: Result<Vec<String>, SqlError> =
-            list.iter().map(|e| expr_to_string(e)).collect();
+            list.iter().map(expr_to_string).collect();
         let values = values?;
 
         if values.is_empty() {

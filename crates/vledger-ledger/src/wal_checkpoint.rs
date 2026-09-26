@@ -52,7 +52,7 @@ impl WalCheckpoint {
         let p = Self::path(data_dir);
         let tmp = p.with_extension("json.tmp");
         let json = serde_json::to_vec_pretty(cp)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(|e| std::io::Error::other(e))?;
         std::fs::write(&tmp, &json)?;
         std::fs::rename(&tmp, &p)?;
         Ok(())

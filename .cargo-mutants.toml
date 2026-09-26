@@ -1,0 +1,81 @@
+# VectorLedger — cargo-mutants configuration
+#
+# Mutation testing verifies that the test suite actually catches injected bugs.
+# cargo-mutants replaces function bodies with plausible-but-wrong alternatives
+# and checks whether tests fail (good) or pass (test gap found).
+#
+# Reference: https://mutants.rs/
+
+# ── Packages to mutate ───────────────────────────────────────────────────────
+# We focus on the packages where a surviving mutant is most dangerous:
+# financial math, cryptography, and audit integrity.
+#
+# vledger-pages, vledger-wal, vledger-index, vledger-transaction are
+# excluded from the default run — they are infrastructure packages whose
+# correctness is covered by the crash/recovery and WAL integration tests,
+# which take too long to run on every mutant candidate.
+packages = [
+    "vledger-crypto",
+    "vledger-ledger",
+    "vledger-audit",
+    "vledger-license",
+    "vledger-foureyes",
+    "vledger-compliance",
+    "vledger-replication",
+]
+
+# ── Test timeout ─────────────────────────────────────────────────────────────
+# Kill a test run after this many seconds.  The full test suite takes ~45s;
+# allow 3× headroom for slower CI machines.
+timeout_multiplier = 3.0
+timeout_minimum = 30
+
+# ── Parallelism ───────────────────────────────────────────────────────────────
+# Number of jobs to run in parallel.  Defaults to number of CPUs.
+# Set to 4 to leave headroom on an 8-core machine.
+jobs = 4
+
+# ── Output ───────────────────────────────────────────────────────────────────
+output = "mutants.out"
+
+# ── Exclude generated/test-only code from mutation ───────────────────────────
+# These patterns match file paths that should not be mutated:
+# - test modules (mutations there don't prove test quality)
+# - generated files
+# - benchmark harnesses
+exclude_globs = [
+    "src/*_tests.rs",
+    "src/audit_tests.rs",
+    "src/bypass_tests.rs",
+    "src/adversarial_tests.rs",
+    "src/invariant_tests.rs",
+    "src/crash_tests.rs",
+    "src/fault_injection_tests.rs",
+    "src/stress_tests.rs",
+    "src/proptest_invariants.rs",
+    "src/regression_tests.rs",
+    "src/concurrent_tests.rs",
+    "src/deterministic_recovery_tests.rs",
+    "src/settlement_tests.rs",
+    "src/kdf_tests.rs",
+    "src/queue_tests.rs",
+    "src/hsm_tests.rs",
+    "src/license_tests.rs",
+    "src/compliance_tests.rs",
+    "src/replication_tests.rs",
+    "src/encryption_migration_tests.rs",
+    "src/entry_db_tests.rs",
+    "tools/**",
+]
+
+# ── Skip functions that are trivially correct or print-only ──────────────────
+# Mutations to Display/Debug impls and logging helpers rarely catch real bugs.
+exclude_re = [
+    "fmt",
+    "display",
+    "debug",
+    "print_banner",
+    "to_string",
+    "summary",
+    "description",
+]

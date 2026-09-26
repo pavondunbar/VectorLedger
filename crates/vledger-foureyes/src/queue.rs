@@ -1,5 +1,12 @@
 //! The four-eyes approval queue.
 
+// `unwrap()` calls in this file are on `Mutex::lock()` (pending index) and
+// on JSON serialisation of ApprovalRecord (which only fails on unmarshalable
+// types — impossible given the struct derives Serialize).  Both are intentional
+// fail-loud patterns where propagating the error would silently corrupt
+// the queue state.
+#![allow(clippy::unwrap_used)]
+
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};

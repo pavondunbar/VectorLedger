@@ -19,11 +19,12 @@ members = [
     "crates/vledger-secrets",
     "crates/vledger-license",
     "crates/vledger",
+    "crates/vledger-kani",
     "tools/vledger-bench",
 ]
 
 [workspace.package]
-version     = "1.0.33"
+version     = "1.0.34"
 edition     = "2021"
 authors     = ["VectorGuard Labs <engineering@vectorguardlabs.com>"]
 license     = "BUSL-1.1"

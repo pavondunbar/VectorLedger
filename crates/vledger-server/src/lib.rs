@@ -96,7 +96,10 @@ impl Server {
             let tmp = std::env::temp_dir().join(format!("vledger-catalog-{}", std::process::id()));
             if let Err(mkdir_err) = std::fs::create_dir_all(&tmp) {
                 // Both the real catalog and the temp fallback failed.
-                // Fail loudly rather than silently continuing.
+                // Fail loudly rather than silently continuing — there is no
+                // safe way to start the server without a user store.
+                // clippy::panic: intentional — unrecoverable startup failure.
+                #[allow(clippy::panic)]
                 panic!(
                     "Cannot open user store at '{}' ({e}) and cannot create \
                          fallback at '{}' ({mkdir_err}). \

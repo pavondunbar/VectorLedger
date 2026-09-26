@@ -19,6 +19,12 @@ use crate::{CryptoError, Hash};
 /// Build a Merkle tree from a list of raw data items and return the root hash.
 ///
 /// Returns `ZERO_HASH` for an empty input.
+// SAFETY: layer[0] is accessed only after the while loop which guarantees
+// layer.len() == 1.  The indexing in next_layer is guarded by the while
+// condition i < layer.len().  clippy::indexing_slicing is suppressed at
+// the module level because all accesses in this file are bounds-verified
+// by the surrounding loop invariants.
+#[allow(clippy::indexing_slicing)]
 pub fn merkle_root(items: &[impl AsRef<[u8]>]) -> Hash {
     if items.is_empty() {
         return crate::ZERO_HASH;
@@ -34,6 +40,7 @@ pub fn merkle_root(items: &[impl AsRef<[u8]>]) -> Hash {
 }
 
 /// Compute one level up in the Merkle tree.
+#[allow(clippy::indexing_slicing)] // bounds guarded by while i < layer.len()
 fn next_layer(layer: &[Hash]) -> Vec<Hash> {
     let mut next = Vec::with_capacity(layer.len().div_ceil(2));
     let mut i = 0;
@@ -96,6 +103,9 @@ impl MerkleProof {
 /// Build a Merkle proof for the item at `leaf_index`.
 ///
 /// Returns `None` if `leaf_index` is out of bounds.
+// SAFETY: layer[leaf_index] is accessed only after the is_empty / out-of-bounds
+// guard above. layer[sibling_index] uses min(layer.len()-1) to clamp the index.
+#[allow(clippy::indexing_slicing)]
 pub fn merkle_proof(items: &[impl AsRef<[u8]>], leaf_index: usize) -> Option<MerkleProof> {
     if items.is_empty() || leaf_index >= items.len() {
         return None;

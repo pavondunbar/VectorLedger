@@ -1,0 +1,14 @@
+# VectorLedger — Clippy configuration
+#
+# Lint-level decisions (deny/warn/allow) are applied in scripts/static-analysis.sh.
+# This file sets numeric thresholds used by clippy's built-in lints.
+#
+# Reference: https://rust-lang.github.io/rust-clippy/stable/
+
+# Raise the argument count threshold — financial functions like post_entry
+# and cmd_start legitimately need many parameters.
+too-many-arguments-threshold = 12
+
+# Raise cognitive complexity threshold — the ledger replay loop and SQL
+# executor are inherently complex; this prevents false positives there.
+cognitive-complexity-threshold = 30

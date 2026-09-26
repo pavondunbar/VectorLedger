@@ -75,6 +75,10 @@ pub fn encrypt(
 }
 
 /// Decrypt `ciphertext` (in `nonce || ciphertext_with_tag` format) under `key`.
+// SAFETY: split_at(12) is bounds-checked — we return Err immediately above
+// if ciphertext.len() < 12.  clippy::indexing_slicing is suppressed here
+// because the manual bounds check precedes the split.
+#[allow(clippy::indexing_slicing)]
 pub fn decrypt(
     key: &EncryptionKey,
     ciphertext: &[u8],
@@ -100,6 +104,9 @@ pub fn decrypt(
 }
 
 /// Extract the nonce from a `nonce || ciphertext` blob.
+// SAFETY: &ciphertext[..12] is bounds-checked — we return None immediately
+// above if ciphertext.len() < 12.
+#[allow(clippy::indexing_slicing)]
 pub fn extract_nonce(ciphertext: &[u8]) -> Option<Nonce> {
     if ciphertext.len() < 12 {
         return None;

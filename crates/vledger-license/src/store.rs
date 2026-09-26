@@ -1,5 +1,10 @@
 //! LicenseStore — loads, verifies, and caches the active license.
 
+// `.expect()` is used in `LicenseStore::free()` on a compile-time constant
+// date (9999-12-31) that is known valid.  This is acceptable — it can never
+// fail at runtime.
+#![allow(clippy::expect_used)]
+
 use std::path::Path;
 
 use chrono::{NaiveDate, Utc};
@@ -212,7 +217,8 @@ impl LicenseStore {
             email: String::new(),
             tier: LicenseTier::Free,
             issued_at: today,
-            expires_at: NaiveDate::from_ymd_opt(9999, 12, 31).unwrap(),
+            expires_at: NaiveDate::from_ymd_opt(9999, 12, 31)
+                .expect("9999-12-31 is a valid date"), // compile-time constant
             features: vec![],
             is_signed: false,
         }

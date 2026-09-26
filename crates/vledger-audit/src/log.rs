@@ -1,5 +1,11 @@
 //! WORM append-only audit log writer.
 
+// All `unwrap()` calls in this file are on `Mutex::lock()`.  A poisoned
+// mutex means a thread panicked while holding the lock — which indicates a
+// logic error. Propagating a poison error would silently corrupt the hash
+// chain; failing loudly is the correct behaviour for a WORM audit log.
+#![allow(clippy::unwrap_used)]
+
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
