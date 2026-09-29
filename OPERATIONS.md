@@ -21,6 +21,8 @@ engineer responsible for maintaining a deployed VectorLedger instance.
 11. [Performance Tuning](#11-performance-tuning)
 12. [Security Hardening Checklist](#12-security-hardening-checklist)
 13. [Log Reference](#13-log-reference)
+14. [SQL Syntax Notes and Client Compatibility](#14-sql-syntax-notes-and-client-compatibility)
+15. [Recovery Point and Time Objectives](#15-recovery-point-and-time-objectives)
 
 ---
 
@@ -77,6 +79,20 @@ nohup ./target/release/vledger start \
 
 echo $! > /var/run/vledger.pid
 ```
+
+> ⚠ **Network binding security notice:** The command above binds the database
+> interface (`--bind 0.0.0.0:5433`) and metrics endpoint (`--metrics-addr 0.0.0.0:9090`)
+> to all network interfaces. This is required in some deployment architectures (e.g.
+> behind a load balancer or inside a VPC) but must be paired with firewall rules to
+> prevent public Internet exposure.
+>
+> - **Never expose ports 5432, 5433, 5434, or 9090 directly to the public Internet.**
+> - Bind database interfaces to a private/internal network interface where your
+>   architecture permits it.
+> - Bind the metrics endpoint only to the interface reachable by your monitoring
+>   infrastructure.
+> - See the [Security Hardening Checklist](#12-security-hardening-checklist) for
+>   required firewall rules before going to production.
 
 ### Stop (graceful)
 
@@ -150,8 +166,12 @@ curl -s http://127.0.0.1:9090/metrics | grep vledger
 
 ### Load balancer / uptime monitor health check endpoint
 
-Use `SELECT 1` via the PostgreSQL wire protocol as your health check query. Any
-PostgreSQL-compatible monitoring tool (Datadog, CloudWatch, PgBouncer) will work.
+Use `SELECT 1` via the PostgreSQL wire protocol as your health check query.
+PostgreSQL-wire-protocol clients and monitoring systems that issue supported SQL
+queries can be used for health monitoring (e.g. Datadog, CloudWatch, PgBouncer).
+Validate integration-specific behavior before production deployment — wire-protocol
+compatibility does not guarantee that every PostgreSQL ecosystem tool will work
+correctly with VectorLedger's append-only ledger model.
 
 ---
 
@@ -167,7 +187,7 @@ PostgreSQL-compatible monitoring tool (Datadog, CloudWatch, PgBouncer) will work
 | WAL segment count | > 100 | > 500 | Run `vledger backup` and consider WAL archiving |
 | Audit log chain broken | — | Any break | Page on-call — potential tampering |
 | Replication lag (if primary) | > 10s | > 60s | Check replica connectivity and disk |
-| License expiry | 30 days | 7 days | Contact sales@vectorguardlabs.com |
+| License expiry | 30 days | 7 days | Contact pavon@vectorguardlabs.com |
 
 ### Cron jobs (recommended)
 
@@ -382,7 +402,7 @@ nohup ./target/release/vledger start --data-dir /var/lib/vledger/data --pgwire &
   at the next midnight tick without requiring a restart.
 - Free tier continues to function indefinitely with no license file.
 
-Contact `sales@vectorguardlabs.com` at least 30 days before expiry.
+Contact `pavon@vectorguardlabs.com` at least 30 days before expiry.
 
 ---
 
@@ -453,7 +473,7 @@ This is a critical incident. Do not accept new writes until the issue is resolve
 2. Run: `./target/release/vledger verify --data-dir /var/lib/vledger/data`
 3. Note the sequence number where the chain breaks
 4. Do not modify any files in the data directory
-5. Contact `security@vectorguardlabs.com` immediately
+5. Contact `pavon@vectorguardlabs.com` immediately
 6. Restore from the most recent verified backup
 
 ### WAL corruption detected on startup
@@ -593,6 +613,19 @@ Run through this before going to production:
 - [ ] Schedule daily `VERIFY_CHAIN()` cron job
 - [ ] Schedule daily backup cron job
 - [ ] Test restore procedure from backup before going live
+- [ ] Perform a documented backup restoration drill at least quarterly and after any
+  material change to the backup or restore subsystem. Record the following for
+  each drill:
+  - Date and time of drill
+  - Backup file used (name, date, size)
+  - Restore duration (wall clock time)
+  - Transaction/sequence count after restore
+  - `VERIFY_CHAIN()` result
+  - `vledger verify` result
+  - Operator who performed the drill
+  - Any issues encountered and how they were resolved
+
+  A backup that has never been tested in a restore is not a verified backup.
 - [ ] Run the full test suite to confirm the binary was built from a clean codebase:
   ```bash
   cargo test --package vledger-ledger --package vledger-sql \
@@ -660,6 +693,169 @@ Export for external review:
 
 ---
 
+## 14. SQL Syntax Notes and Client Compatibility
+
+### String literals, numeric literals, and quoting rules
+
+VectorLedger's SQL parser is more lenient than standard PostgreSQL in some areas.
+One known difference is that VectorLedger may accept double-quoted values as string
+literals in certain contexts. This is non-standard behavior.
+
+In standard PostgreSQL, double quotes denote **identifiers** (table names, column
+names, etc.), not string values. Using double quotes around a value would throw:
+`column "45289" does not exist`. VectorLedger silently accepting them is a parser
+quirk, not a supported feature.
+
+**Use the following rules for all queries, application code, and scripts:**
+
+```sql
+-- Numeric literal: no quotes
+SELECT * FROM ledger WHERE sequence = 45289;
+
+-- String literal: single quotes only
+SELECT * FROM ledger WHERE description = 'Payment to Jeremy Tamura';
+
+-- Non-standard and unreliable: double quotes around a value
+-- Do NOT use this form even if VectorLedger currently accepts it
+SELECT * FROM ledger WHERE description = "Payment to Jeremy Tamura";
+```
+
+Use single quotes for string values. Do not quote numeric literals unless the
+query intentionally requires a type conversion. Do not rely on double-quote string
+acceptance — this behavior may change in a future VectorLedger release without notice.
+
+> ⚠ **Portability note:** SQL written with double-quoted string literals will fail
+> immediately if run against a standard PostgreSQL instance. Write portable SQL
+> from the start.
+
+### Unsupported PostgreSQL features
+
+VectorLedger is PostgreSQL wire-protocol compatible but is not a full PostgreSQL
+implementation. The following are not supported and will return errors:
+
+| Feature | Notes |
+|---|---|
+| `pg_catalog.*` | System catalog tables do not exist |
+| `information_schema.*` | Not implemented |
+| `\dt`, `\d`, `\l` and other psql meta-commands | These query `pg_catalog` internally |
+| `CREATE TABLE`, `DROP TABLE` | The ledger schema is fixed and append-only |
+| `UPDATE`, `DELETE` | The ledger is immutable by design |
+| `CREATE INDEX`, `ALTER TABLE` | Not supported |
+
+### Recommended SQL client tools
+
+| Tool | Platform | Notes |
+|---|---|---|
+| `psql` | Mac, Linux, Windows | Proven working; use `sslmode=require` and `host=127.0.0.1` to force IPv4 |
+| DBeaver Community | Mac, Windows, Linux | Recommended GUI; see DBeaver connection note below |
+| TablePlus | Mac, Windows, Linux | Lightweight GUI alternative |
+| DataGrip | Mac, Windows, Linux | Full IDE-grade SQL tool; paid |
+
+### DBeaver connection behavior
+
+When you click **Test Connection** in DBeaver's setup dialog, DBeaver issues an
+internal validation query after the TCP and authentication handshake completes.
+VectorLedger does not implement the PostgreSQL system catalog tables that DBeaver
+queries during this validation step, so DBeaver returns:
+
+```
+SQL Error [02000]: No results were returned by the query.
+```
+
+What this error means in practice:
+
+- **The TCP connection was established successfully.** The error occurs after
+  the connection is open, not before.
+- **Authentication succeeded.** DBeaver would show an authentication error, not
+  a `02000`, if credentials were wrong.
+- **The error is in DBeaver's post-connect validation query**, not in the
+  connection itself. DBeaver issues a catalog introspection query that returns
+  no rows against VectorLedger, and DBeaver's internal code treats an empty
+  result as an error condition.
+- **Subsequent SQL execution is not affected.** Once you dismiss the error and
+  open a SQL Editor, queries against `ledger`, `ledger_lines`, `accounts`,
+  `VERIFY_CHAIN()`, and `BALANCE()` execute normally.
+
+**To suppress the error:** In DBeaver's connection settings, go to
+**Driver Properties** and set `assumeMinServerVersion` to `9.0`. This reduces
+the scope of DBeaver's startup introspection queries. The `02000` warning may
+still appear on some DBeaver versions — dismiss it and proceed. It does not
+indicate a broken connection.
+
+### Connecting via psql
+
+```bash
+psql "host=127.0.0.1 port=5433 user=[USERNAME] dbname=vledger sslmode=require"
+```
+
+> **Note:** Use `host=127.0.0.1` explicitly rather than `host=localhost`. On many
+> systems `localhost` resolves to `::1` (IPv6), which does not route through the
+> SSH tunnel. `127.0.0.1` forces IPv4 and connects correctly.
+
+### pgAdmin compatibility
+
+pgAdmin (all versions) is **not recommended** for use with VectorLedger. pgAdmin
+relies heavily on `pg_catalog` and `information_schema` for core functionality
+including listing databases, enabling the Query Tool, and browsing the object tree.
+Because VectorLedger does not implement these system catalogs, pgAdmin throws
+`list index out of range` errors and the Query Tool may be inaccessible.
+
+Use DBeaver, TablePlus, or `psql` instead.
+
+---
+
+## 15. Recovery Point and Time Objectives
+
+The values in this section are operational targets. **Do not publish these numbers
+externally until they have been measured against your specific hardware, deployment
+configuration, and data volume.** Benchmarked figures should replace the estimates
+below before this runbook is used in a production SLA or compliance audit.
+
+### Recovery Point Objective (RPO)
+
+RPO defines the maximum amount of committed data that can be lost under each
+failure scenario.
+
+| Scenario | Expected RPO | Notes |
+|---|---|---|
+| Process crash (SIGKILL or OOM) | 0 committed transactions | WAL replays on next start; group-commit buffer may lose up to 1 flush interval of in-flight transactions |
+| Host failure (hard power loss) | 0–1 flush interval | Depends on WAL sync mode; `per_record` mode gives zero committed-data loss; `group_commit` exposes up to `--group-commit-delay-ms` ms of in-flight writes |
+| Primary failure with replica running | 0 acknowledged transactions | Replica receives WAL ACKs before primary confirms commit; unACK'd in-flight writes may be lost |
+| Restore from backup | Data since last backup | RPO equals the backup interval — daily backups mean up to 24 hours of data loss in a full-restore scenario |
+
+### Recovery Time Objective (RTO)
+
+RTO defines how quickly the system can be restored and accepting new writes.
+
+| Scenario | Expected RTO | Notes |
+|---|---|---|
+| Process crash — restart on same host | Minutes | WAL replay time depends on segment count since last checkpoint; measure against your typical WAL backlog |
+| Host failure — failover to warm replica | Minutes | Manual failover required (see [Replication](#6-replication)); no automatic election |
+| Host failure — no replica, restore from backup | To be measured | Depends on backup size, network transfer speed, restore verification time, and `VERIFY_CHAIN()` duration |
+| Full restore from backup (planned) | To be measured | Benchmark this during your quarterly restore drill and record the result |
+
+### Measuring your actual RTO
+
+Run a timed restore drill using your most recent backup:
+
+```bash
+time vledger restore \
+  --from /var/lib/vledger/backups/vledger-backup-latest.tar \
+  --target /var/lib/vledger/data-drill \
+  --force && \
+vledger verify --data-dir /var/lib/vledger/data-drill
+```
+
+Record the wall-clock time from `vledger restore` start to `VERIFY_CHAIN()` returning
+`status = OK`. That is your measured RTO for a backup restore scenario. Update this
+table with the result after each quarterly drill.
+
+> ⚠ **Do not manufacture RTO/RPO numbers for marketing or compliance documents.**
+> Use only values measured against your actual deployment. Unverified estimates in
+> an SLA or audit report are a liability, not an asset.
+
+---
+
 *VectorGuard Labs — VectorLedger Operations Runbook*
-*For support: support@vectorguardlabs.com*
-*Security incidents: security@vectorguardlabs.com*
+*For support: pavon@vectorguardlabs.com*
+*Security incidents: pavon@vectorguardlabs.com*
