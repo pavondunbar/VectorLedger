@@ -107,6 +107,12 @@ in the range — the same leaf inputs used by the `--with-proofs` query engine
 and the `vledger audit-package` CLI command. An empty range returns
 `0000…0000` (32 zero bytes — `ZERO_HASH`).
 
+> **Note:** `MERKLE_ROOT()` does not require the server to be started with
+> `--with-proofs`. It is a standard SQL function available at all times to
+> any client with the `admin`, `operator`, or `auditor` role. The
+> `--with-proofs` flag is only needed if you want every `SELECT` to
+> automatically append a Merkle proof `NOTICE` — a separate, optional feature.
+
 **Privilege:** requires the `admin`, `operator`, or `auditor` role
 (`can_verify`). The `readonly` role cannot call `MERKLE_ROOT`.
 
@@ -939,7 +945,7 @@ SELECT VERIFY_CHAIN(1, 100000);
 -- Verify a single entry's hashes
 SELECT VERIFY_ENTRY(19678432);
 
--- Merkle root over a sequence range
+-- Merkle root over a sequence range (no --with-proofs flag required)
 SELECT MERKLE_ROOT(1, 100000);
 
 -- Merkle root for a single entry

@@ -70,7 +70,6 @@ nohup ./target/release/vledger start \
   --data-dir /var/lib/vledger/data \
   --bind 0.0.0.0:5433 \
   --pgwire \
-  --with-proofs \
   --wal-sync-mode group_commit \
   --group-commit-delay-ms 2 \
   --max-connections 200 \
@@ -81,14 +80,18 @@ nohup ./target/release/vledger start \
 echo $! > /var/run/vledger.pid
 ```
 
-> **`--with-proofs`:** When this flag is set, every SELECT response includes a
-> cryptographic Merkle proof over the returned result set. Via the native JSON
-> protocol (port 5433) the proof appears in `QueryResult.proof`. Via the pgwire
-> protocol (port 5432), the Merkle root is emitted as a PostgreSQL `NOTICE`
-> immediately after the data rows — visible in `psql` output and in every
-> standard PostgreSQL client library. See
-> [Merkle Proofs via pgwire](#merkle-proofs-via-pgwire) for details.
->
+> **Merkle roots without `--with-proofs`:** As of v1.0.36, the
+> `MERKLE_ROOT(from_seq, to_seq)` SQL function is available at all times
+> regardless of server startup flags. Any client with the `admin`,
+> `operator`, or `auditor` role can call it directly:
+> ```sql
+> SELECT MERKLE_ROOT(786000, 786500);
+> ```
+> The `--with-proofs` flag is a separate, optional feature that causes every
+> `SELECT` to automatically append a Merkle proof as a pgwire `NOTICE`. It
+> is not required to use `MERKLE_ROOT()` and is not included in the
+> recommended production command above. Add it only if you want automatic
+> per-query proofs on every SELECT result.
 
 > ⚠ **Network binding security notice:** The command above binds the database
 > interface (`--bind 0.0.0.0:5433`) and metrics endpoint (`--metrics-addr 0.0.0.0:9090`)
@@ -827,6 +830,12 @@ psql "host=127.0.0.1 port=5433 user=[USERNAME] dbname=vledger sslmode=require"
 
 ### Merkle Proofs via pgwire
 
+> **As of v1.0.36, you do not need `--with-proofs` to query Merkle roots.**
+> Use `SELECT MERKLE_ROOT(from_seq, to_seq)` from any SQL client — no server
+> flag required. The `--with-proofs` flag described below is a separate
+> feature that auto-attaches a proof `NOTICE` to every SELECT result. Use it
+> only if you want that automatic behaviour.
+
 When the server is started with `--with-proofs --pgwire`, VectorLedger computes a
 BLAKE3 Merkle root over every SELECT result set and delivers it to pgwire clients as
 a PostgreSQL `NoticeResponse` (message type `N`) immediately after the data rows and
@@ -871,8 +880,8 @@ Merkle root: <64-hex-char BLAKE3 root> (<N> leaf[s], verified: <true|false>)
   also appear in DBeaver's **Error Log** view regardless of that setting.
 - Notice messages are always emitted when `--with-proofs` is active — there is no
   per-query way to suppress them via pgwire. If you need proof-free responses on
-  specific queries, restart without `--with-proofs` and request proofs per-query
-  through the native JSON protocol instead (`"with_proof": true` in the request frame).
+  specific queries, restart without `--with-proofs` and use `SELECT MERKLE_ROOT(from, to)`
+  on demand instead — it requires no server flag and gives you the same root value.
 
 ### pgAdmin compatibility
 
