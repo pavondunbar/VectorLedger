@@ -83,6 +83,27 @@ VectorLedger enforces 16 financial invariants in code — not by policy or docum
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
 - `WalSyncMode::NoSync` is a **compile-time feature gate**, not a runtime guard — the `NoSync` variant does not exist in the type system of a standard release build. It is only compiled in when `--features dev-no-sync` is explicitly passed, making it structurally impossible to ship or misconfigure a production binary that skips fsyncs
 
+### Bug Fix (v1.0.38) — Column projection now works for all tables
+
+`SELECT sequence, content_hash FROM ledger WHERE sequence = 14395673` now
+returns only the requested columns instead of all 12. Works for `ledger`,
+`ledger_lines`, and `accounts`, and for all column types — timestamps,
+metadata JSON, hashes, UUIDs, amounts, lines.
+
+```sql
+-- Returns only sequence and content_hash
+SELECT sequence, content_hash FROM ledger WHERE sequence = 14395673;
+
+-- Returns only date, account_id, amount, currency
+SELECT date, account_id, amount, currency FROM ledger_lines WHERE sequence = 14395673;
+
+-- Returns only code and balance
+SELECT code, balance FROM accounts WHERE domain = 'main';
+```
+
+`SELECT *` continues to return all columns as before. Column order in the
+output follows the order specified in the SELECT list.
+
 ### Bug Fix (v1.0.37) — `MERKLE_ROOT()` now accepts a single argument
 
 `to_seq` is now optional. When omitted it defaults to `from_seq`, so a

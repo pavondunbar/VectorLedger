@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version     = "1.0.37"
+version     = "1.0.38"
 edition     = "2021"
 authors     = ["VectorGuard Labs <engineering@vectorguardlabs.com>"]
 license     = "BUSL-1.1"

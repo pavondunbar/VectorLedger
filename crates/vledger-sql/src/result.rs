@@ -159,6 +159,49 @@ impl QueryResult {
         self
     }
 
+    /// Return a new `QueryResult` containing only the named columns.
+    ///
+    /// Columns not present in the result are silently ignored.
+    /// If `keep` is empty the original result is returned unchanged
+    /// (empty = wildcard / "all columns").
+    pub fn project(self, keep: &[String]) -> Self {
+        if keep.is_empty() {
+            return self;
+        }
+        // Preserve the order the user specified, skip unknowns.
+        let new_cols: Vec<String> = keep
+            .iter()
+            .filter(|c| self.columns.iter().any(|x| x == *c))
+            .cloned()
+            .collect();
+        if new_cols.len() == self.columns.len() {
+            // All columns kept — nothing to trim.
+            return self;
+        }
+        let rows = self
+            .rows
+            .into_iter()
+            .map(|row| {
+                let vals = new_cols
+                    .iter()
+                    .map(|c| row.get(c).cloned().unwrap_or(Value::Null))
+                    .collect();
+                Row::new(new_cols.clone(), vals)
+            })
+            .collect();
+        Self {
+            columns: new_cols,
+            rows,
+            rows_affected: self.rows_affected,
+            proof: self.proof,
+            message: self.message,
+            entry_id: self.entry_id,
+            entry_sequence: self.entry_sequence,
+            domain: self.domain,
+            amount_sum: self.amount_sum,
+        }
+    }
+
     pub fn affected(n: usize, message: impl Into<String>) -> Self {
         Self {
             columns: vec![],

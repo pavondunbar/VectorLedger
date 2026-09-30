@@ -82,6 +82,13 @@ cosign verify-blob \
 `to_seq` is now optional — `MERKLE_ROOT(seq)` is equivalent to
 `MERKLE_ROOT(seq, seq)`. Previously a single argument returned an error.
 
+**Column projection fixed (v1.0.38)**
+
+`SELECT specific, columns FROM ledger` now returns only the requested
+columns. Previously all 12 columns were always returned regardless of the
+SELECT list. Works for all column types and all three tables (`ledger`,
+`ledger_lines`, `accounts`). `SELECT *` is unchanged.
+
 **`MERKLE_ROOT(from_seq, to_seq)` SQL function added (v1.0.36)**
 
 VectorLedger now exposes the BLAKE3 Merkle root as a first-class SQL function.

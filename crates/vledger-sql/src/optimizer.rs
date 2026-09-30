@@ -67,10 +67,12 @@ fn constant_fold(plan: LogicalPlan) -> LogicalPlan {
     match plan {
         LogicalPlan::ScanEntries {
             filter: Some(EntryFilter::Limit(0)),
+            projections,
         } => {
             // LIMIT 0 ⟹ empty result; keep plan but signal with Limit(0).
             LogicalPlan::ScanEntries {
                 filter: Some(EntryFilter::Limit(0)),
+                projections,
             }
         }
         LogicalPlan::Join(mut spec) => {
@@ -96,12 +98,12 @@ fn constant_fold(plan: LogicalPlan) -> LogicalPlan {
 pub fn explain(plan: &LogicalPlan, indent: usize) -> String {
     let pad = "  ".repeat(indent);
     match plan {
-        LogicalPlan::ScanEntries { filter } => format!("{pad}ScanEntries {{ filter: {filter:?} }}"),
-        LogicalPlan::ScanLedgerLines { filter } => {
-            format!("{pad}ScanLedgerLines {{ filter: {filter:?} }}")
+        LogicalPlan::ScanEntries { filter, projections } => format!("{pad}ScanEntries {{ filter: {filter:?}, projections: {projections:?} }}"),
+        LogicalPlan::ScanLedgerLines { filter, projections } => {
+            format!("{pad}ScanLedgerLines {{ filter: {filter:?}, projections: {projections:?} }}")
         }
-        LogicalPlan::ScanAccounts { filter } => {
-            format!("{pad}ScanAccounts {{ filter: {filter:?} }}")
+        LogicalPlan::ScanAccounts { filter, projections } => {
+            format!("{pad}ScanAccounts {{ filter: {filter:?}, projections: {projections:?} }}")
         }
         LogicalPlan::GetBalance { account_ref } => format!("{pad}GetBalance({account_ref})"),
         LogicalPlan::VerifyChain { from_seq, to_seq } => {

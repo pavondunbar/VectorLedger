@@ -574,30 +574,30 @@ fn apply_domain_filter(plan: LogicalPlan, domain: Option<String>) -> LogicalPlan
         _ => return plan, // no filter — pass through
     };
     match plan {
-        LogicalPlan::ScanEntries { filter } => {
+        LogicalPlan::ScanEntries { filter, projections } => {
             // Only inject if no existing domain filter already present.
             let filter = match filter {
                 Some(EntryFilter::ByDomain(_)) => Some(EntryFilter::ByDomain(d)),
                 Some(other) => Some(other), // respect explicit user filter
                 None => Some(EntryFilter::ByDomain(d)),
             };
-            LogicalPlan::ScanEntries { filter }
+            LogicalPlan::ScanEntries { filter, projections }
         }
-        LogicalPlan::ScanLedgerLines { filter } => {
+        LogicalPlan::ScanLedgerLines { filter, projections } => {
             let filter = match filter {
                 Some(EntryFilter::ByDomain(_)) => Some(EntryFilter::ByDomain(d)),
                 Some(other) => Some(other),
                 None => Some(EntryFilter::ByDomain(d)),
             };
-            LogicalPlan::ScanLedgerLines { filter }
+            LogicalPlan::ScanLedgerLines { filter, projections }
         }
-        LogicalPlan::ScanAccounts { filter } => {
+        LogicalPlan::ScanAccounts { filter, projections } => {
             let filter = match filter {
                 Some(EntryFilter::ByDomain(_)) => Some(EntryFilter::ByDomain(d)),
                 Some(other) => Some(other),
                 None => Some(EntryFilter::ByDomain(d)),
             };
-            LogicalPlan::ScanAccounts { filter }
+            LogicalPlan::ScanAccounts { filter, projections }
         }
         other => other,
     }

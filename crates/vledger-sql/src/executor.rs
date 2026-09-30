@@ -52,9 +52,15 @@ impl<'a> ReadExecutor<'a> {
     /// Returns `Err(SqlError::Unsupported)` if a write plan is passed.
     pub fn execute(&self, plan: LogicalPlan) -> Result<QueryResult, SqlError> {
         match plan {
-            LogicalPlan::ScanEntries { filter } => self.exec_scan_entries(filter),
-            LogicalPlan::ScanLedgerLines { filter } => self.exec_scan_ledger_lines(filter),
-            LogicalPlan::ScanAccounts { filter } => self.exec_scan_accounts(filter),
+            LogicalPlan::ScanEntries { filter, projections } => {
+                self.exec_scan_entries(filter).map(|r| r.project(&projections))
+            }
+            LogicalPlan::ScanLedgerLines { filter, projections } => {
+                self.exec_scan_ledger_lines(filter).map(|r| r.project(&projections))
+            }
+            LogicalPlan::ScanAccounts { filter, projections } => {
+                self.exec_scan_accounts(filter).map(|r| r.project(&projections))
+            }
             LogicalPlan::GetBalance { account_ref } => self.exec_get_balance(&account_ref),
             LogicalPlan::VerifyChain { from_seq, to_seq } => {
                 self.exec_verify_chain(from_seq, to_seq)

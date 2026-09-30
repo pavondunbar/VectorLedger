@@ -155,10 +155,12 @@ nc -z 127.0.0.1 5432 && echo "port 5432 open" || echo "port 5432 CLOSED"
 ./target/release/vledger sql \
   --server 127.0.0.1:5433 \
   --username admin \
-  --query "SELECT 1"
+  --query "SELECT sequence, status FROM ledger WHERE sequence = 1"
 ```
 
-Expected output: `1`
+Expected output: a single row with only `sequence` and `status` columns.
+Column projection is supported on all three tables — `ledger`,
+`ledger_lines`, and `accounts` — for all column types.
 
 ### Hash chain integrity
 

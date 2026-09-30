@@ -27,17 +27,17 @@ const TABLE_ACCOUNTS: &str = "accounts";
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     /// SELECT * FROM ledger [WHERE …]
-    ScanEntries { filter: Option<EntryFilter> },
+    ScanEntries { filter: Option<EntryFilter>, projections: Vec<String> },
 
     /// SELECT * FROM ledger_lines [WHERE …]
     ///
     /// Returns one row per journal line instead of one row per entry.
     /// Each row shows: sequence, date, account_id, description, domain,
     /// dr_cr, amount, currency — the traditional accountant's ledger view.
-    ScanLedgerLines { filter: Option<EntryFilter> },
+    ScanLedgerLines { filter: Option<EntryFilter>, projections: Vec<String> },
 
     /// SELECT * FROM accounts [WHERE …]
-    ScanAccounts { filter: Option<EntryFilter> },
+    ScanAccounts { filter: Option<EntryFilter>, projections: Vec<String> },
 
     /// SELECT BALANCE('<account_code_or_id>')
     GetBalance { account_ref: String },
@@ -475,14 +475,17 @@ impl LogicalPlanBuilder {
                 let n: usize = n
                     .parse()
                     .map_err(|_| SqlError::TypeError("LIMIT must be integer".into()))?;
+                let projections = parse_projections(&body.projection);
                 return match primary_table.as_str() {
                     TABLE_LEDGER => Ok(LogicalPlan::ScanEntries {
                         filter: Some(EntryFilter::Limit(n)),
+                        projections,
                     }),
                     TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines {
                         filter: Some(EntryFilter::Limit(n)),
+                        projections,
                     }),
-                    TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter: None }),
+                    TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter: None, projections }),
                     t => Err(SqlError::UnknownTable(t.into())),
                 };
             }
@@ -491,10 +494,11 @@ impl LogicalPlanBuilder {
             None
         };
 
+        let projections = parse_projections(&body.projection);
         match primary_table.as_str() {
-            TABLE_LEDGER => Ok(LogicalPlan::ScanEntries { filter }),
-            TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter }),
-            TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter }),
+            TABLE_LEDGER => Ok(LogicalPlan::ScanEntries { filter, projections }),
+            TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter, projections }),
+            TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter, projections }),
             t => Err(SqlError::UnknownTable(t.into())),
         }
     }
@@ -879,11 +883,31 @@ fn base_scan(
         None
     };
     match table {
-        TABLE_LEDGER => Ok(LogicalPlan::ScanEntries { filter }),
-        TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter }),
-        TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter }),
+        TABLE_LEDGER => Ok(LogicalPlan::ScanEntries { filter, projections: vec![] }),
+        TABLE_LEDGER_LINES => Ok(LogicalPlan::ScanLedgerLines { filter, projections: vec![] }),
+        TABLE_ACCOUNTS => Ok(LogicalPlan::ScanAccounts { filter, projections: vec![] }),
         t => Err(SqlError::UnknownTable(t.into())),
     }
+}
+
+/// Parse a SELECT projection list into a Vec<String> of column names.
+/// Returns an empty vec for `SELECT *` (wildcard) — the executor treats
+/// an empty projections list as "return all columns".
+fn parse_projections(items: &[SelectItem]) -> Vec<String> {
+    // If it's a pure wildcard SELECT *, return empty (= no filtering).
+    if items.iter().any(|p| matches!(p, SelectItem::Wildcard(_))) {
+        return vec![];
+    }
+    items
+        .iter()
+        .map(|p| match p {
+            SelectItem::UnnamedExpr(e) => expr_to_col_name(e),
+            SelectItem::ExprWithAlias { alias, .. } => alias.value.clone(),
+            SelectItem::Wildcard(_) => "*".into(),
+            _ => "*".into(),
+        })
+        .filter(|s| !s.is_empty() && s != "*")
+        .collect()
 }
 
 /// Extract aggregate function expressions from a SELECT projection list.
