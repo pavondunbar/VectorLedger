@@ -70,6 +70,7 @@ nohup ./target/release/vledger start \
   --data-dir /var/lib/vledger/data \
   --bind 0.0.0.0:5433 \
   --pgwire \
+  --with-proofs \
   --wal-sync-mode group_commit \
   --group-commit-delay-ms 2 \
   --max-connections 200 \
@@ -79,6 +80,15 @@ nohup ./target/release/vledger start \
 
 echo $! > /var/run/vledger.pid
 ```
+
+> **`--with-proofs`:** When this flag is set, every SELECT response includes a
+> cryptographic Merkle proof over the returned result set. Via the native JSON
+> protocol (port 5433) the proof appears in `QueryResult.proof`. Via the pgwire
+> protocol (port 5432), the Merkle root is emitted as a PostgreSQL `NOTICE`
+> immediately after the data rows — visible in `psql` output and in every
+> standard PostgreSQL client library. See
+> [Merkle Proofs via pgwire](#merkle-proofs-via-pgwire) for details.
+>
 
 > ⚠ **Network binding security notice:** The command above binds the database
 > interface (`--bind 0.0.0.0:5433`) and metrics endpoint (`--metrics-addr 0.0.0.0:9090`)
@@ -791,6 +801,55 @@ psql "host=127.0.0.1 port=5433 user=[USERNAME] dbname=vledger sslmode=require"
 > **Note:** Use `host=127.0.0.1` explicitly rather than `host=localhost`. On many
 > systems `localhost` resolves to `::1` (IPv6), which does not route through the
 > SSH tunnel. `127.0.0.1` forces IPv4 and connects correctly.
+
+### Merkle Proofs via pgwire
+
+When the server is started with `--with-proofs --pgwire`, VectorLedger computes a
+BLAKE3 Merkle root over every SELECT result set and delivers it to pgwire clients as
+a PostgreSQL `NoticeResponse` (message type `N`) immediately after the data rows and
+before `CommandComplete`.
+
+**psql output (with `\x` expanded display):**
+
+```
+pavon=> select * from ledger where sequence = '786295';
+-[ RECORD 1 ]+------------------------------------------------------------------
+sequence     | 786295
+id           | e99c3ea8-7761-419b-9a5a-79b570220a13
+status       | Posted
+description  | Cash withdrawal
+...
+NOTICE:  Merkle root: b34281d3a443635aa8e6915842ff199d37b53ec8458f9a056e6284838221a776 (1 leaf, verified: true)
+```
+
+The notice format is:
+
+```
+Merkle root: <64-hex-char BLAKE3 root> (<N> leaf[s], verified: <true|false>)
+```
+
+- **`root`** — BLAKE3 Merkle root computed over the `content_hash` of every returned
+  row (not the full ledger).
+- **`leaf count`** — number of rows in the result set.
+- **`verified: true`** — the server re-walked all leaf proof paths up to the root and
+  confirmed they all match. `false` means the signing key was unavailable (no integrity
+  failure — just no signature).
+
+**Important notes:**
+
+- The Merkle root covers the **query result set**, not the full ledger. Running
+  `SELECT * FROM ledger` and `SELECT * FROM ledger WHERE sequence = X` produce
+  different Merkle roots.
+- To get a Merkle root over the entire ledger, use `vledger audit-package`. That
+  command streams all entries, builds the full-ledger Merkle tree, and signs the root
+  with the database Ed25519 key.
+- DBeaver suppresses `NOTICE` messages by default. To surface them, open
+  **Preferences → Database → Notifications** and enable "Show server warnings". They
+  also appear in DBeaver's **Error Log** view regardless of that setting.
+- Notice messages are always emitted when `--with-proofs` is active — there is no
+  per-query way to suppress them via pgwire. If you need proof-free responses on
+  specific queries, restart without `--with-proofs` and request proofs per-query
+  through the native JSON protocol instead (`"with_proof": true` in the request frame).
 
 ### pgAdmin compatibility
 

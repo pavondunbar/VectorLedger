@@ -696,7 +696,7 @@ where
 async fn execute_query(
     sql: &str,
     ledger: &Arc<tokio::sync::RwLock<LedgerStore>>,
-    _attach_proofs: bool,
+    attach_proofs: bool,
     role: Role,
     tx_status: &mut u8,
 ) -> Vec<Vec<u8>> {
@@ -844,7 +844,7 @@ async fn execute_query(
         ];
     }
 
-    use vledger_sql::{executor::Executor, parser::parse_one, planner::LogicalPlanBuilder};
+    use vledger_sql::{executor::{Executor, ReadExecutor}, parser::parse_one, planner::LogicalPlanBuilder};
 
     let stmt = match parse_one(sql) {
         Ok(s) => s,
@@ -882,9 +882,16 @@ async fn execute_query(
         ];
     }
 
-    let result = {
+    let result = if matches!(plan, LogicalPlan::PostEntry(_) | LogicalPlan::CreateAccount(_)) {
         let mut ledger = ledger.write().await;
         Executor::new(&mut ledger).execute(plan)
+    } else {
+        let ledger = ledger.read().await;
+        if attach_proofs {
+            ReadExecutor::with_proofs(&ledger).execute(plan)
+        } else {
+            ReadExecutor::new(&ledger).execute(plan)
+        }
     };
 
     match result {
@@ -942,6 +949,19 @@ async fn execute_query(
                         .map(|col| row.get(col).map(|v| v.to_string()))
                         .collect();
                     msgs.push(messages::data_row(&vals));
+                }
+                // If a Merkle proof was computed (--with-proofs), surface the
+                // root hash as a NoticeResponse.  Notices are visible in psql
+                // (\set VERBOSITY default) and in every standard pg client.
+                if let Some(proof) = &qr.proof {
+                    let notice = format!(
+                        "Merkle root: {} ({} leaf{}, verified: {})",
+                        hex::encode(proof.root),
+                        proof.leaf_proofs.len(),
+                        if proof.leaf_proofs.len() == 1 { "" } else { "s" },
+                        proof.root_signature.is_some(),
+                    );
+                    msgs.push(messages::notice_response(&notice));
                 }
                 let tag = if sql_upper.starts_with("INSERT") {
                     format!("INSERT 0 {}", qr.rows_affected)

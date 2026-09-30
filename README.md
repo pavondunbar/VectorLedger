@@ -83,6 +83,52 @@ VectorLedger enforces 16 financial invariants in code — not by policy or docum
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
 - `WalSyncMode::NoSync` is a **compile-time feature gate**, not a runtime guard — the `NoSync` variant does not exist in the type system of a standard release build. It is only compiled in when `--features dev-no-sync` is explicitly passed, making it structurally impossible to ship or misconfigure a production binary that skips fsyncs
 
+### Bug Fix (v1.0.35)
+
+**pgwire `--with-proofs` flag was silently ignored — Merkle root never sent to SQL clients**
+
+When the server was started with `--with-proofs --pgwire`, the Merkle root was computed
+correctly by the SQL executor but was never surfaced to clients connecting via the
+PostgreSQL wire protocol (psql, DBeaver, etc.). The root was silently discarded at the
+pgwire boundary.
+
+Root cause: `execute_query` in `crates/vledger-pgwire/src/server.rs` declared its
+`attach_proofs` parameter as `_attach_proofs` (prefixed with an underscore, suppressing
+the compiler's unused-variable warning) and always called `Executor::new()` regardless
+of the flag value. As a result, the read executor was never built with proofs enabled,
+and `qr.proof` was always `None`.
+
+Three fixes applied to `crates/vledger-pgwire/src/server.rs`:
+
+1. **Parameter used**: renamed `_attach_proofs` → `attach_proofs` so the value is
+   consumed.
+
+2. **Correct executor selected**: replaced the always-write-lock `Executor::new()` call
+   with a branch:
+   - `PostEntry` / `CreateAccount` plans → write lock + `Executor::new()` (unchanged)
+   - All read plans → read lock + `ReadExecutor::new()` or `ReadExecutor::with_proofs()`
+     depending on the flag. This also fixes a secondary issue where read queries were
+     unnecessarily acquiring the write lock, which blocked concurrent reads.
+
+3. **Merkle root surfaced as `NoticeResponse`**: after the `DataRow` messages are sent,
+   if `qr.proof` is `Some`, a pgwire `NoticeResponse` (type `N`) is emitted carrying
+   the hex-encoded Merkle root, leaf count, and signing status. Notices are displayed
+   by psql automatically and are readable by every standard PostgreSQL client library.
+
+After this fix, a query run against a server started with `--with-proofs --pgwire`
+displays the Merkle root directly in psql output:
+
+```
+-[ RECORD 1 ]+-----------------------------------------------------------------
+sequence     | 786295
+id           | e99c3ea8-7761-419b-9a5a-79b570220a13
+...
+NOTICE:  Merkle root: b34281d3a443635aa8e6915842ff199d37b53ec8458f9a056e6284838221a776 (1 leaf, verified: true)
+```
+
+No changes to the on-disk format, wire protocol version, or any other behaviour.
+Existing databases and backups are fully compatible.
+
 ### Security & Reliability Hardening (v1.0.34)
 
 Three industry-standard verification methods added alongside the existing test suite.

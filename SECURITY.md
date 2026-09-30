@@ -75,6 +75,29 @@ cosign verify-blob \
   vledger-v0.1.0-checksums.txt
 ```
 
+## Bug Fixes
+
+**pgwire `--with-proofs` parameter silently ignored (fixed in v1.0.35)**
+
+The `execute_query` function in `crates/vledger-pgwire/src/server.rs` declared its
+`attach_proofs` argument as `_attach_proofs` and always called `Executor::new()`
+regardless of the flag value. As a consequence:
+
+1. All SELECT queries via the pgwire path always used a write lock, blocking
+   concurrent reads unnecessarily.
+2. `ReadExecutor::with_proofs()` was never called, so `qr.proof` was always `None`
+   and no Merkle root was ever computed or sent to pgwire clients — even when the
+   server was started with `--with-proofs`.
+
+Fixed by: renaming the parameter, routing read plans through `ReadExecutor` on a read
+lock (with or without proofs depending on the flag), and emitting the Merkle root as a
+pgwire `NoticeResponse` after the data rows when a proof is present.
+
+This was a correctness bug, not a security vulnerability. No data was exposed and no
+integrity guarantee was weakened — the Merkle root simply wasn't being delivered to
+pgwire clients. The native JSON protocol (port 5433) was unaffected and always sent
+proofs correctly when `--with-proofs` was set.
+
 ## Known Limitations
 
 The following known limitations are **by design** and are **not** security
