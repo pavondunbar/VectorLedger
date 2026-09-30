@@ -83,6 +83,23 @@ VectorLedger enforces 16 financial invariants in code — not by policy or docum
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
 - `WalSyncMode::NoSync` is a **compile-time feature gate**, not a runtime guard — the `NoSync` variant does not exist in the type system of a standard release build. It is only compiled in when `--features dev-no-sync` is explicitly passed, making it structurally impossible to ship or misconfigure a production binary that skips fsyncs
 
+### Bug Fix (v1.0.37) — `MERKLE_ROOT()` now accepts a single argument
+
+`to_seq` is now optional. When omitted it defaults to `from_seq`, so a
+single sequence number gives the Merkle root for that one entry:
+
+```sql
+-- Single-entry Merkle root (new — one argument)
+SELECT MERKLE_ROOT(14395673);
+
+-- Range Merkle root (unchanged)
+SELECT MERKLE_ROOT(786000, 786500);
+```
+
+Both forms are fully equivalent — `MERKLE_ROOT(n)` is identical to
+`MERKLE_ROOT(n, n)`. Previously passing a single argument returned an
+error requiring two arguments.
+
 ### Bug Fix (v1.0.36) — `MERKLE_ROOT(from_seq, to_seq)` SQL function
 
 VectorLedger now exposes the Merkle root directly as a queryable SQL function,
@@ -948,8 +965,8 @@ SELECT VERIFY_ENTRY(19678432);
 -- Merkle root over a sequence range (no --with-proofs flag required)
 SELECT MERKLE_ROOT(1, 100000);
 
--- Merkle root for a single entry
-SELECT MERKLE_ROOT(19678432, 19678432);
+-- Merkle root for a single entry — one argument, to_seq defaults to from_seq
+SELECT MERKLE_ROOT(19678432);
 ```
 
 ### Aggregates and joins

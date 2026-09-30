@@ -294,14 +294,12 @@ impl LogicalPlanBuilder {
                         let (from_opt, to_opt) = extract_optional_u64_range(&f.args)?;
                         let from_seq = from_opt.ok_or_else(|| {
                             SqlError::MissingField(
-                                "MERKLE_ROOT() requires two sequence number arguments: MERKLE_ROOT(from_seq, to_seq)".into(),
+                                "MERKLE_ROOT() requires at least one argument: MERKLE_ROOT(seq) or MERKLE_ROOT(from_seq, to_seq)".into(),
                             )
                         })?;
-                        let to_seq = to_opt.ok_or_else(|| {
-                            SqlError::MissingField(
-                                "MERKLE_ROOT() requires two sequence number arguments: MERKLE_ROOT(from_seq, to_seq)".into(),
-                            )
-                        })?;
+                        // to_seq is optional — defaults to from_seq for single-entry lookups.
+                        // MERKLE_ROOT(786295) is equivalent to MERKLE_ROOT(786295, 786295).
+                        let to_seq = to_opt.unwrap_or(from_seq);
                         return Ok(LogicalPlan::MerkleRoot { from_seq, to_seq });
                     }
                     "VERSION" => {

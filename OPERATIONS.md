@@ -186,6 +186,15 @@ sequence range and timestamp — re-run at any future point to confirm the
 range has not been tampered with. If the root changes for the same range,
 the ledger has been modified.
 
+For a single entry, pass the sequence number once:
+
+```bash
+./target/release/vledger sql \
+  --server 127.0.0.1:5433 \
+  --username admin \
+  --query "SELECT MERKLE_ROOT(786295)"
+```
+
 ### Prometheus metrics
 
 ```bash

@@ -1,0 +1,4 @@
+8c470ed517fad8a3ca3e361209263837aebbfe59313e04d40121a56380f2b79f  vledger-v1.0.37-linux-aarch64.tar.gz
+04f083f65cf69028dfb54f76ecb8d9d108f349f22c14aa879455ad0d6f9f3732  vledger-v1.0.37-linux-x86_64.tar.gz
+aca072306db2da47670541902a9dd753fe07dcbb83506a4e7147e2a5d45dfb45  vledger-v1.0.37-macos-aarch64.tar.gz
+c199f7c17f2fd0d05e65b8d9f55c1b3a6bc54cd72ffd8cf49903ac87b0ca2092  vledger-v1.0.37-macos-x86_64.tar.gz

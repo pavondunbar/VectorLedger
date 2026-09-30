@@ -77,6 +77,11 @@ cosign verify-blob \
 
 ## Bug Fixes
 
+**`MERKLE_ROOT()` single-argument form added (v1.0.37)**
+
+`to_seq` is now optional — `MERKLE_ROOT(seq)` is equivalent to
+`MERKLE_ROOT(seq, seq)`. Previously a single argument returned an error.
+
 **`MERKLE_ROOT(from_seq, to_seq)` SQL function added (v1.0.36)**
 
 VectorLedger now exposes the BLAKE3 Merkle root as a first-class SQL function.
