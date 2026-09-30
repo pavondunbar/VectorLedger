@@ -77,6 +77,21 @@ cosign verify-blob \
 
 ## Bug Fixes
 
+**`MERKLE_ROOT(from_seq, to_seq)` SQL function added (v1.0.36)**
+
+VectorLedger now exposes the BLAKE3 Merkle root as a first-class SQL function.
+Any client with `admin`, `operator`, or `auditor` role can call:
+
+```sql
+SELECT MERKLE_ROOT(1, 100000);
+```
+
+Returns `from_seq`, `to_seq`, `entry_count`, and `merkle_root` (64-char BLAKE3
+hex). The `readonly` role is blocked by the privilege check. The function uses
+the same leaf inputs (`content_hash` per entry) as the `--with-proofs` query
+engine and the audit package CLI, so roots produced by all three methods are
+directly comparable.
+
 **pgwire `--with-proofs` parameter silently ignored (fixed in v1.0.35)**
 
 The `execute_query` function in `crates/vledger-pgwire/src/server.rs` declared its

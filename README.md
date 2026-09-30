@@ -83,6 +83,45 @@ VectorLedger enforces 16 financial invariants in code — not by policy or docum
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
 - `WalSyncMode::NoSync` is a **compile-time feature gate**, not a runtime guard — the `NoSync` variant does not exist in the type system of a standard release build. It is only compiled in when `--features dev-no-sync` is explicitly passed, making it structurally impossible to ship or misconfigure a production binary that skips fsyncs
 
+### Bug Fix (v1.0.36) — `MERKLE_ROOT(from_seq, to_seq)` SQL function
+
+VectorLedger now exposes the Merkle root directly as a queryable SQL function,
+available from any SQL client — `psql`, DBeaver, or the native client.
+
+```sql
+-- Merkle root over a specific sequence range
+SELECT MERKLE_ROOT(786000, 786500);
+
+-- Merkle root for a single entry
+SELECT MERKLE_ROOT(786295, 786295);
+```
+
+Returns a single row:
+
+| `from_seq` | `to_seq` | `entry_count` | `merkle_root` |
+|---|---|---|---|
+| `786000` | `786500` | `501` | `a3f1c2e4…` (64 hex chars) |
+
+The root is a BLAKE3 Merkle tree built over the `content_hash` of every entry
+in the range — the same leaf inputs used by the `--with-proofs` query engine
+and the `vledger audit-package` CLI command. An empty range returns
+`0000…0000` (32 zero bytes — `ZERO_HASH`).
+
+**Privilege:** requires the `admin`, `operator`, or `auditor` role
+(`can_verify`). The `readonly` role cannot call `MERKLE_ROOT`.
+
+**Files changed:**
+- `crates/vledger-sql/src/planner.rs` — `MerkleRoot` variant added to
+  `LogicalPlan`; `"MERKLE_ROOT"` arm added to `plan_query` using the
+  existing `extract_optional_u64_range` helper
+- `crates/vledger-sql/src/executor.rs` — `MerkleRoot` arm in
+  `ReadExecutor::execute`; `exec_merkle_root` implementation
+- `crates/vledger-sql/src/optimizer.rs` — `MerkleRoot` arm in `explain()`
+- `crates/vledger-ledger/src/store.rs` — `entries_in_range(from, to)`
+  public method using the SQLite index scan `WHERE sequence >= ? AND <= ?`
+- `crates/vledger-server/src/auth.rs` — `MerkleRoot` privilege arm
+- `crates/vledger-pgwire/src/server.rs` — `MerkleRoot` privilege arm
+
 ### Bug Fix (v1.0.35)
 
 **pgwire `--with-proofs` flag was silently ignored — Merkle root never sent to SQL clients**
@@ -899,6 +938,12 @@ SELECT VERIFY_CHAIN(1, 100000);
 
 -- Verify a single entry's hashes
 SELECT VERIFY_ENTRY(19678432);
+
+-- Merkle root over a sequence range
+SELECT MERKLE_ROOT(1, 100000);
+
+-- Merkle root for a single entry
+SELECT MERKLE_ROOT(19678432, 19678432);
 ```
 
 ### Aggregates and joins

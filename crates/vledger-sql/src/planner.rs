@@ -53,6 +53,10 @@ pub enum LogicalPlan {
     /// SELECT VERIFY_ENTRY(sequence_number) — verify a single entry's hashes.
     VerifyEntry { sequence: u64 },
 
+    /// SELECT MERKLE_ROOT(from_seq, to_seq) — BLAKE3 Merkle root over entries
+    /// in the inclusive sequence range [from_seq, to_seq].
+    MerkleRoot { from_seq: u64, to_seq: u64 },
+
     /// SELECT TAMPER_ENTRY(seq, 'new_description') — FOR TESTING ONLY.
     /// Gated behind #[cfg(test)] — cannot be compiled into a release binary.
     /// Silently mutates an entry's description in memory without updating its
@@ -285,6 +289,20 @@ impl LogicalPlanBuilder {
                             )
                         })?;
                         return Ok(LogicalPlan::VerifyEntry { sequence });
+                    }
+                    "MERKLE_ROOT" => {
+                        let (from_opt, to_opt) = extract_optional_u64_range(&f.args)?;
+                        let from_seq = from_opt.ok_or_else(|| {
+                            SqlError::MissingField(
+                                "MERKLE_ROOT() requires two sequence number arguments: MERKLE_ROOT(from_seq, to_seq)".into(),
+                            )
+                        })?;
+                        let to_seq = to_opt.ok_or_else(|| {
+                            SqlError::MissingField(
+                                "MERKLE_ROOT() requires two sequence number arguments: MERKLE_ROOT(from_seq, to_seq)".into(),
+                            )
+                        })?;
+                        return Ok(LogicalPlan::MerkleRoot { from_seq, to_seq });
                     }
                     "VERSION" => {
                         return Ok(LogicalPlan::Constant {

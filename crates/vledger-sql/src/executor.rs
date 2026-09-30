@@ -60,6 +60,9 @@ impl<'a> ReadExecutor<'a> {
                 self.exec_verify_chain(from_seq, to_seq)
             }
             LogicalPlan::VerifyEntry { sequence } => self.exec_verify_entry(sequence),
+            LogicalPlan::MerkleRoot { from_seq, to_seq } => {
+                self.exec_merkle_root(from_seq, to_seq)
+            }
             LogicalPlan::Constant { col, val } => self.exec_constant(col, val),
             LogicalPlan::Join(spec) => self.exec_join(spec),
             LogicalPlan::Aggregate(spec) => self.exec_aggregate(spec),
@@ -693,6 +696,65 @@ impl<'a> ReadExecutor<'a> {
                 ))
             }
         }
+    }
+
+    // ── SELECT MERKLE_ROOT(from_seq, to_seq) ─────────────────────────────
+
+    fn exec_merkle_root(
+        &self,
+        from_seq: u64,
+        to_seq: u64,
+    ) -> Result<QueryResult, SqlError> {
+        let cols = vec![
+            "from_seq".into(),
+            "to_seq".into(),
+            "entry_count".into(),
+            "merkle_root".into(),
+        ];
+
+        let entries = self.ledger.entries_in_range(from_seq, to_seq);
+
+        if entries.is_empty() {
+            let rows = vec![Row::new(
+                cols.clone(),
+                vec![
+                    Value::BigInt(from_seq as i128),
+                    Value::BigInt(to_seq as i128),
+                    Value::BigInt(0),
+                    Value::Hash(hex::encode([0u8; 32])),
+                ],
+            )];
+            return Ok(QueryResult::rows(
+                cols,
+                rows,
+                format!("No entries in range [{from_seq}, {to_seq}]"),
+            ));
+        }
+
+        // The leaf inputs are each entry's content_hash — the same bytes used
+        // by build_scan_entries_result and exec_verify_chain for integrity checks.
+        let leaf_data: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|e| e.content_hash.to_vec())
+            .collect();
+
+        let root = merkle_root(&leaf_data);
+        let n = entries.len();
+
+        let rows = vec![Row::new(
+            cols.clone(),
+            vec![
+                Value::BigInt(from_seq as i128),
+                Value::BigInt(to_seq as i128),
+                Value::BigInt(n as i128),
+                Value::Hash(hex::encode(root)),
+            ],
+        )];
+        Ok(QueryResult::rows(
+            cols,
+            rows,
+            format!("Merkle root over {n} entries [{from_seq}, {to_seq}]"),
+        ))
     }
 
     // ── JOIN ──────────────────────────────────────────────────────────────

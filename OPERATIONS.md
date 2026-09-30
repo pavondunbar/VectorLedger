@@ -168,6 +168,21 @@ Expected output: `1`
 
 Expected output: `status = OK`. Run this after every restart and as a daily cron job.
 
+### Merkle root spot-check
+
+```bash
+./target/release/vledger sql \
+  --server 127.0.0.1:5433 \
+  --username admin \
+  --query "SELECT MERKLE_ROOT(1, 100000)"
+```
+
+Returns a single row with `from_seq`, `to_seq`, `entry_count`, and
+`merkle_root` (64-character BLAKE3 hex). Record the root alongside the
+sequence range and timestamp — re-run at any future point to confirm the
+range has not been tampered with. If the root changes for the same range,
+the ledger has been modified.
+
 ### Prometheus metrics
 
 ```bash
@@ -206,6 +221,14 @@ correctly with VectorLedger's append-only ledger model.
 0 2 * * * /opt/vledger/bin/vledger sql --server 127.0.0.1:5433 \
   --username admin --query "SELECT VERIFY_CHAIN()" \
   >> /var/log/vledger/chain-check.log 2>&1
+
+# Daily Merkle root snapshot — 2:05 AM UTC
+# Records the Merkle root for the full ledger range as a tamper-detection checkpoint.
+# Compare today's output against a prior run — any change for the same range is an incident.
+0 2 * * * /opt/vledger/bin/vledger sql --server 127.0.0.1:5433 \
+  --username admin \
+  --query "SELECT MERKLE_ROOT(1, (SELECT MAX(sequence) FROM ledger))" \
+  >> /var/log/vledger/merkle-root.log 2>&1
 
 # Daily backup — 3 AM UTC
 0 3 * * * /opt/vledger/scripts/daily-backup.sh >> /var/log/vledger/backup.log 2>&1

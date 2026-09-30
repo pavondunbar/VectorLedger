@@ -792,6 +792,9 @@ pub fn check_plan_privilege(
         VerifyChain { .. } if !session.role.can_verify() => {
             Err(format!("role '{}' cannot run VERIFY_CHAIN", session.role))
         }
+        MerkleRoot { .. } if !session.role.can_verify() => {
+            Err(format!("role '{}' cannot run MERKLE_ROOT", session.role))
+        }
         ScanEntries { .. }
         | ScanAccounts { .. }
         | GetBalance { .. }

@@ -1517,6 +1517,17 @@ impl LedgerStore {
             .unwrap_or_default()
     }
 
+    /// Return all entries in the inclusive sequence range [from_seq, to_seq],
+    /// ordered by sequence ascending.
+    ///
+    /// Uses a SQLite `WHERE sequence >= ? AND sequence <= ?` index scan — O(range)
+    /// not O(ledger). Safe to call on large ledgers with a bounded range.
+    pub fn entries_in_range(&self, from_seq: u64, to_seq: u64) -> Vec<JournalEntry> {
+        self.entry_db
+            .scan_range(from_seq, to_seq)
+            .unwrap_or_default()
+    }
+
     /// Return entries whose status matches `status` (SQLite index-accelerated).
     pub fn entries_by_status(&self, status: &str) -> Vec<JournalEntry> {
         // Normalise status string to match SQLite stored format (e.g. "Posted")

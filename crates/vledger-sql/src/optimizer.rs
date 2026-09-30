@@ -108,6 +108,9 @@ pub fn explain(plan: &LogicalPlan, indent: usize) -> String {
             format!("{pad}VerifyChain {{ from: {from_seq:?}, to: {to_seq:?} }}")
         }
         LogicalPlan::VerifyEntry { sequence } => format!("{pad}VerifyEntry({sequence})"),
+        LogicalPlan::MerkleRoot { from_seq, to_seq } => {
+            format!("{pad}MerkleRoot {{ from: {from_seq}, to: {to_seq} }}")
+        }
         LogicalPlan::Constant { col, val } => format!("{pad}Constant {{ {col}: {val} }}"),
         LogicalPlan::PostEntry(_) => format!("{pad}PostEntry"),
         LogicalPlan::CreateAccount(_) => format!("{pad}CreateAccount"),

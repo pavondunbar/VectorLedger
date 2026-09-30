@@ -991,6 +991,9 @@ fn check_plan_privilege(role: Role, plan: &LogicalPlan) -> Result<(), String> {
         VerifyChain { .. } if !role.can_verify() => {
             Err(format!("role '{role}' cannot run VERIFY_CHAIN"))
         }
+        MerkleRoot { .. } if !role.can_verify() => {
+            Err(format!("role '{role}' cannot run MERKLE_ROOT"))
+        }
         ScanEntries { .. }
         | ScanAccounts { .. }
         | GetBalance { .. }
