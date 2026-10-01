@@ -34,6 +34,7 @@ prefer to remain anonymous.
 - `vledger` binary and all crates in this repository
 - Official client SDKs (`clients/python`, `clients/typescript`, `clients/go`)
 - The WAL, crypto, ledger, server, pgwire, replication, and HSM subsystems
+- The MCP server (`crates/vledger-mcp`, `vledger mcp` subcommand, `vledger-mcp` binary)
 - Authentication and authorization logic
 - Cryptographic implementation correctness (key derivation, encryption,
   signing, hash chains)
@@ -76,6 +77,19 @@ cosign verify-blob \
 ```
 
 ## Bug Fixes
+
+**Merkle root display truncation fixed (v1.0.39)**
+
+The Merkle root displayed in three places — after `SELECT * FROM ledger` (inline
+proof display), after `verify-proof`, and in `verify-audit-package` output — was
+silently truncated to the first 32 hex characters (16 bytes) of the 32-byte BLAKE3
+hash. This was a display-only bug caused by `&root_hex[..root_hex.len().min(32)]`
+in three sites in `crates/vledger/src/main.rs`. The underlying hash was always
+computed and stored correctly; only the terminal printout was shortened.
+
+All three sites now print the full 64-character hash. This fixes a potential
+confusion where a human operator comparing the inline display against
+`SELECT MERKLE_ROOT()` output would see apparent mismatches.
 
 **`MERKLE_ROOT()` single-argument form added (v1.0.37)**
 
@@ -141,6 +155,15 @@ vulnerabilities:
 - The `file` key source stores the master key on disk in hex. This is
   documented as a development-only option and the server emits a loud
   warning at startup.
+- The MCP server (`vledger mcp` / `vledger-mcp`) does **not** implement TLS.
+  It should be bound to `127.0.0.1` (the default) or placed behind a
+  TLS-terminating reverse proxy when accessed over a network. All MCP tool
+  calls go through the same RBAC enforcement as direct SQL; the MCP server
+  itself does not bypass any access control. The `--ask` flag sends the
+  natural-language question and the ledger schema context to a third-party
+  LLM endpoint — do not include sensitive data in the question text.
+  No ledger data is sent to the LLM; only the schema description and the
+  user's question string are transmitted.
 
 ## Fuzz-Found Vulnerabilities (fixed)
 

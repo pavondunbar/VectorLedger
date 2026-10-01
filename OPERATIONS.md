@@ -23,6 +23,7 @@ engineer responsible for maintaining a deployed VectorLedger instance.
 13. [Log Reference](#13-log-reference)
 14. [SQL Syntax Notes and Client Compatibility](#14-sql-syntax-notes-and-client-compatibility)
 15. [Recovery Point and Time Objectives](#15-recovery-point-and-time-objectives)
+16. [MCP Server and Natural-Language Queries](#16-mcp-server-and-natural-language-queries)
 
 ---
 
@@ -36,6 +37,7 @@ engineer responsible for maintaining a deployed VectorLedger instance.
 │  Port 5432 — PostgreSQL wire protocol (--pgwire)         │
 │  Port 9090 — Prometheus metrics (--metrics-addr)         │
 │  Port 5434 — WAL replication (if replication.json exists)│
+│  Port 3000 — MCP server HTTP+SSE (vledger mcp)           │
 └──────────────────┬───────────────────────────────────────┘
                    │
    ┌───────────────┴────────────────┐
@@ -955,6 +957,108 @@ table with the result after each quarterly drill.
 > ⚠ **Do not manufacture RTO/RPO numbers for marketing or compliance documents.**
 > Use only values measured against your actual deployment. Unverified estimates in
 > an SLA or audit report are a liability, not an asset.
+
+---
+
+## 16. MCP Server and Natural-Language Queries
+
+### Starting the MCP server
+
+The MCP server lets AI assistants (Claude Desktop, Cursor, Kiro, etc.) query and
+write to the ledger without writing SQL. Start it alongside `vledger start`:
+
+```bash
+# Terminal 1 — main server
+nohup vledger start --data-dir /var/lib/vledger/data --pgwire &
+
+# Terminal 2 — MCP server (embedded mode)
+vledger mcp \
+  --data-dir /var/lib/vledger/data \
+  --bind 127.0.0.1:3000 \
+  --username admin
+# Password will be prompted interactively (or set VLEDGER_CLI_PASSWORD)
+```
+
+Or run the standalone binary in the background:
+
+```bash
+nohup vledger-mcp \
+  --data-dir /var/lib/vledger/data \
+  --bind 127.0.0.1:3000 \
+  >> /var/log/vledger/mcp.log 2>&1 &
+```
+
+### MCP client configuration
+
+Point any MCP-capable client at the SSE endpoint:
+
+```json
+{
+  "mcpServers": {
+    "vledger": { "url": "http://127.0.0.1:3000/sse" }
+  }
+}
+```
+
+For Claude Desktop, add this block to `~/Library/Application Support/Claude/claude_desktop_config.json`.
+For Cursor or Kiro, add it to `.kiro/settings/mcp.json` in your workspace.
+
+### Health check
+
+```bash
+curl -s http://127.0.0.1:3000/health
+# {"ok":true,"service":"vledger-mcp"}
+```
+
+Add this to your load-balancer health probe if running the MCP server behind a
+reverse proxy.
+
+### Firewall
+
+Port 3000 should **not** be exposed to the public Internet. Restrict it to the
+machine(s) running your AI client, or bind to `127.0.0.1` (the default) for
+local-only access.
+
+### Natural-language queries from the CLI (`--ask`)
+
+Any operator can ask questions in plain English from the terminal without opening
+the REPL:
+
+```bash
+export OPENAI_API_KEY=sk-...
+
+# Requires the server to be running (or data dir accessible)
+vledger sql --ask "show me all failed transactions in the last 7 days"
+vledger sql --ask "what is the balance of account CASH"
+vledger sql --ask "how many entries were posted today"
+```
+
+The generated SQL is printed to stderr before execution:
+
+```
+→ SQL: SELECT * FROM ledger WHERE status = 'Failed' AND effective_at >= '2026-09-24T00:00:00Z' LIMIT 100
+(results follow)
+```
+
+To use a local model (e.g. Ollama) instead of OpenAI:
+
+```bash
+export OPENAI_API_KEY=ollama          # any non-empty string
+export OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+export OPENAI_MODEL=llama3.2
+vledger sql --ask "list accounts with a balance over $50,000"
+```
+
+### Security considerations for the MCP server
+
+- The MCP server authenticates against the same `UserStore` as the main server.
+  Use a dedicated service account with the minimum required role (`operator` for
+  read/write, `auditor` for read-only queries).
+- Session tokens are issued per-startup and scoped to the configured username.
+- All tool calls are subject to the same RBAC enforcement as direct SQL — a
+  `readonly` user cannot call `post_entry`.
+- The MCP server does not implement TLS. Place it behind a TLS-terminating reverse
+  proxy (nginx, Caddy) if exposing over a network.
 
 ---
 

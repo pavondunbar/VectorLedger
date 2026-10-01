@@ -83,7 +83,89 @@ VectorLedger enforces 16 financial invariants in code — not by policy or docum
 - All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
 - `WalSyncMode::NoSync` is a **compile-time feature gate**, not a runtime guard — the `NoSync` variant does not exist in the type system of a standard release build. It is only compiled in when `--features dev-no-sync` is explicitly passed, making it structurally impossible to ship or misconfigure a production binary that skips fsyncs
 
-### Bug Fix (v1.0.38) — Column projection now works for all tables
+### Bug Fix (v1.0.39) — Merkle root display now shows full 64-character hash
+
+The inline Merkle root displayed after `SELECT * FROM ledger`, `verify-audit-package`,
+and `verify-proof` was silently truncated to 32 hex characters (16 bytes). All three
+display sites now print the full 64-character BLAKE3 hash, matching the output of
+`SELECT MERKLE_ROOT(from_seq, to_seq)`.
+
+```
+Before:  Merkle root  : 5a8b9ce38e7e95d66070c74d889fbe18
+After:   Merkle root  : 5a8b9ce38e7e95d66070c74d889fbe1811d9a19e459889839fc2384780a366f4
+```
+
+This was a display-only bug — no data integrity issue. The underlying hash was always
+computed and stored correctly; only the terminal output was truncated.
+
+### New in v1.0.39 — `vledger sql --ask` (natural-language queries)
+
+Ask the ledger questions in plain English. An LLM translates the question to SQL,
+prints the generated query, and executes it — no SQL knowledge required.
+
+```bash
+export OPENAI_API_KEY=sk-...
+vledger sql --ask "show me all payments over $10,000 last week"
+# → SQL: SELECT * FROM ledger WHERE ...
+# (executes and prints results normally)
+```
+
+```bash
+vledger sql --ask "what is the current balance of the CASH account"
+vledger sql --ask "list the last 5 failed transactions"
+vledger sql --ask "compute the Merkle root over entries 100000 to 200000"
+```
+
+Configuration via environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | — | **Required.** Your API key. |
+| `OPENAI_MODEL` | `gpt-4o` | Model to use for translation. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Override for Ollama, Groq, etc. |
+
+The generated SQL is printed to stderr as `→ SQL: ...` before execution so you
+always see exactly what will run. Works in both network mode (server running) and
+direct mode.
+
+### New in v1.0.39 — `vledger mcp` (Model Context Protocol server)
+
+Start an MCP server so AI assistants (Claude Desktop, Cursor, Kiro, and any other
+MCP-capable client) can query and write to the ledger directly — no SQL required.
+
+```bash
+# Embedded — uses the current data directory
+vledger mcp --bind 127.0.0.1:3000
+
+# Or run the standalone binary
+vledger-mcp --data-dir ./vledger-data --bind 127.0.0.1:3000
+```
+
+Then add it to your MCP client's config:
+```json
+{
+  "mcpServers": {
+    "vledger": { "url": "http://127.0.0.1:3000/sse" }
+  }
+}
+```
+
+**Tools exposed:**
+
+| Tool | Description |
+|---|---|
+| `query_ledger` | Run any read-only SELECT (SELECT, BALANCE, VERIFY_CHAIN, MERKLE_ROOT, …) |
+| `post_entry` | Record a new double-entry journal entry |
+| `get_balance` | Return the current balance of an account |
+| `list_accounts` | List all accounts with balances (optional domain/currency filter) |
+| `query_ledger_lines` | Query individual debit/credit lines |
+| `verify_chain` | Verify cryptographic chain integrity |
+| `merkle_root` | Compute BLAKE3 Merkle root over a sequence range |
+
+The MCP server uses HTTP + SSE transport as defined by the MCP spec. The
+`GET /health` endpoint returns `{"ok":true}` for load-balancer health checks.
+
+
 
 `SELECT sequence, content_hash FROM ledger WHERE sequence = 14395673` now
 returns only the requested columns instead of all 12. Works for `ledger`,
@@ -626,6 +708,12 @@ Benchmarked on Apple Silicon (MacBook, macOS) running in `group_commit` WAL mode
 │  └──────┬───────┘    └──────────────┬───────────────────┘   │
 │         └──────────────┬────────────┘                        │
 │                        │                                      │
+│  ┌──────────────────┐  │                                     │
+│  │  MCP Server      │  │  HTTP + SSE (port 3000)            │
+│  │  vledger mcp     │  │  AI tool calls, no SQL needed      │
+│  └──────────┬───────┘  │                                     │
+│             └──────────┤                                      │
+│                        │                                      │
 │              ┌─────────▼──────────┐                         │
 │              │  UserStore (auth)  │  Argon2id · RBAC        │
 │              │  4-role RBAC       │  Brute-force protection  │
@@ -744,6 +832,11 @@ rm vledger-data/catalog/.admin_initial_credentials
 Via the native REPL:
 ```bash
 vledger sql --data-dir ./vledger-data --username admin
+```
+
+Ask a natural-language question (requires `OPENAI_API_KEY`):
+```bash
+vledger sql --ask "show me all payments over $10,000 last week"
 ```
 
 Via psql (requires `--pgwire` and paid license):
@@ -1130,6 +1223,34 @@ vledger start [OPTIONS]
   --wal-sync-mode <MODE>         per_record | group_commit | no_sync (default: group_commit)
   --group-commit-delay-ms <MS>   Group-commit flush interval in ms (default: 2)
   --max-connections <N>          Max concurrent connections (default: 128)
+```
+
+### `vledger mcp`
+
+Start an embedded Model Context Protocol server backed by the local data directory.
+Any MCP-capable AI client can connect and use the ledger as a set of callable tools
+without writing SQL.
+
+```bash
+vledger mcp [OPTIONS]
+  --bind <ADDR>      Address to listen on (default: 127.0.0.1:3000)
+  --username <USER>  Auth username (falls back to VLEDGER_CLI_USER)
+  --password <PASS>  Auth password (falls back to VLEDGER_CLI_PASSWORD)
+```
+
+The server exposes three HTTP endpoints:
+- `GET  /sse`     — SSE stream; MCP clients connect here
+- `POST /message` — JSON-RPC 2.0 request handler
+- `GET  /health`  — Liveness check (`{"ok":true}`)
+
+See the *New in v1.0.39* section above for the full tool list and MCP client
+configuration snippet.
+
+A standalone `vledger-mcp` binary is also included for deployments where the MCP
+server needs to run as a separate process:
+
+```bash
+vledger-mcp --data-dir ./vledger-data --bind 127.0.0.1:3000 --log-level info
 ```
 
 Two background tasks run automatically after startup:
@@ -1603,6 +1724,18 @@ vledger license --data-dir ./vledger-data
 ---
 
 ## Changelog
+
+### v1.0.39 — NL-to-SQL, MCP server, Merkle root display fix
+
+- **`vledger sql --ask`** — natural-language-to-SQL via any OpenAI-compatible
+  LLM. Set `OPENAI_API_KEY`; optionally override `OPENAI_MODEL` (default `gpt-4o`)
+  and `OPENAI_BASE_URL` (for Ollama, Groq, etc.). The generated SQL is always
+  printed to stderr before execution.
+- **`vledger mcp`** — embedded MCP (Model Context Protocol) server. Exposes 7
+  tools over HTTP + SSE so AI assistants can query and write the ledger without SQL.
+  Also ships as a standalone `vledger-mcp` binary.
+- **fix** — Merkle root display truncated at 32 hex chars in three places; now
+  always shows the full 64-character BLAKE3 hash.
 
 ### v1.0.30 — FTS5 metadata index
 - Added SQLite FTS5 full-text index over all entry metadata (`entries_fts` virtual table, `unicode61` tokenizer)
