@@ -188,6 +188,19 @@ enum Commands {
         /// SQL statement to run (omit for interactive REPL).
         #[arg(short, long)]
         query: Option<String>,
+        /// Ask a natural-language question and let an LLM translate it to SQL.
+        ///
+        /// Requires OPENAI_API_KEY to be set in the environment.
+        /// Optionally set OPENAI_MODEL (default: gpt-4o) and
+        /// OPENAI_BASE_URL (default: https://api.openai.com/v1) to use a
+        /// different model or a compatible endpoint (e.g. Ollama, Groq).
+        ///
+        /// Examples:
+        ///   vledger sql --ask "show me all payments over $10,000 last week"
+        ///   vledger sql --ask "what is the current balance of the CASH account"
+        ///   vledger sql --ask "list the last 5 failed transactions"
+        #[arg(long)]
+        ask: Option<String>,
         /// Username to authenticate with.
         /// Falls back to VLEDGER_CLI_USER environment variable.
         #[arg(short, long)]
@@ -224,6 +237,34 @@ enum Commands {
     /// Run the Phase 3 production-hardening self-test suite.
     #[command(name = "self-test-phase3")]
     SelfTestPhase3,
+    /// Start a Model Context Protocol (MCP) server so AI assistants can
+    /// query and write to the ledger directly — no SQL required.
+    ///
+    /// The server implements the MCP spec (HTTP + SSE transport) and exposes
+    /// these tools: query_ledger, post_entry, get_balance, list_accounts,
+    /// query_ledger_lines, verify_chain, merkle_root.
+    ///
+    /// Any MCP-capable client (Claude Desktop, Cursor, Kiro, etc.) can be
+    /// pointed at this server by adding it to its MCP config:
+    ///
+    ///   { "url": "http://127.0.0.1:3000/sse" }
+    ///
+    /// Requires VLEDGER_CLI_USER / VLEDGER_CLI_PASSWORD or --username /
+    /// --password for authentication against the local user store.
+    #[command(name = "mcp")]
+    Mcp {
+        /// Address for the MCP server to bind on.
+        #[arg(long, default_value = "127.0.0.1:3000")]
+        bind: String,
+        /// Username to authenticate with the ledger.
+        /// Falls back to VLEDGER_CLI_USER environment variable.
+        #[arg(short, long)]
+        username: Option<String>,
+        /// Password for authentication.
+        /// Falls back to VLEDGER_CLI_PASSWORD environment variable.
+        #[arg(short, long)]
+        password: Option<String>,
+    },
 
     // ── Phase 3 CLI ───────────────────────────────────────────────────────
     /// Create a point-in-time backup snapshot (tar archive + BLAKE3 manifest).
@@ -799,6 +840,7 @@ async fn main() -> Result<()> {
         }
         Commands::Sql {
             query,
+            ask,
             username,
             password,
             server,
@@ -807,6 +849,7 @@ async fn main() -> Result<()> {
             cmd_sql(
                 &cli.data_dir,
                 query.as_deref(),
+                ask.as_deref(),
                 username.as_deref(),
                 password.as_deref(),
                 server.as_deref(),
@@ -816,6 +859,9 @@ async fn main() -> Result<()> {
         }
         Commands::SelfTest => cmd_self_test().await,
         Commands::SelfTestPhase3 => cmd_self_test_phase3().await,
+        Commands::Mcp { bind, username, password } => {
+            cmd_mcp(&cli.data_dir, &bind, username.as_deref(), password.as_deref()).await
+        }
         // Phase 3
         Commands::Backup { output } => cmd_backup(&cli.data_dir, output.as_deref()).await,
         Commands::Restore {
@@ -1727,14 +1773,147 @@ async fn cmd_verify(data_dir: &PathBuf) -> Result<()> {
 
 // ── sql ───────────────────────────────────────────────────────────────────────
 
+/// Schema context injected into the LLM system prompt so it can write
+/// accurate SQL for the VectorLedger query engine.
+const VLEDGER_SCHEMA_CONTEXT: &str = r#"
+You are a SQL expert for VectorLedger, a cryptographically verifiable
+financial ledger database.  Translate the user's natural-language question
+into a single, valid VectorLedger SQL statement.
+
+## Tables
+
+### ledger
+Each row is one double-entry journal entry.
+Columns: sequence (integer), id (uuid), status (text: 'Posted'|'Pending'|'Settled'|'Failed'),
+description (text), domain (text), effective_at (timestamp ISO-8601),
+posted_at (timestamp ISO-8601), external_ref (text), content_hash (text hex),
+chain_hash (text hex), lines (text — "uuid: Debit N CUR; uuid: Credit N CUR"),
+metadata (text JSON).
+WHERE filters: sequence = N, domain = '...', status = '...', external_ref = '...',
+               metadata LIKE/MATCH '...', LIMIT N.
+
+### ledger_lines
+One row per journal line (two per entry: debit + credit).
+Columns: date (YYYY-MM-DD), sequence, entry_id (uuid), description, domain,
+account_id (uuid), dr_cr (text: 'Debit'|'Credit'), amount (integer minor units,
+e.g. cents), currency (text), status, metadata.
+
+### accounts
+Columns: id (uuid), code (text), name (text),
+account_type (text: 'Asset'|'Liability'|'Equity'|'Income'|'Expense'),
+currency (text), status (text), domain (text), balance (integer minor units).
+WHERE filters: code = '...', name = '...', domain = '...', currency = '...'.
+
+## Special functions (use as SELECT expressions)
+- SELECT BALANCE('ACCOUNT_CODE')      — current balance of one account
+- SELECT BALANCE('uuid')              — by UUID
+- SELECT VERIFY_CHAIN()               — integrity check over entire ledger
+- SELECT VERIFY_CHAIN(from_seq, to_seq)
+- SELECT VERIFY_ENTRY(seq)            — verify one entry
+- SELECT MERKLE_ROOT(from_seq, to_seq) — Merkle root over a range
+
+## Rules
+- amount values are integer minor units (cents/pence/etc). Multiply dollar
+  amounts by 100, e.g. $10,000 = 1000000.
+- Dates are ISO-8601 strings; use comparisons like effective_at >= '2026-01-01'.
+- Return ONLY the raw SQL statement — no markdown fences, no explanation,
+  no trailing semicolon.
+"#;
+
+/// Translate a natural-language question to a VectorLedger SQL statement
+/// using an OpenAI-compatible chat completions endpoint.
+///
+/// Configuration via environment variables:
+///   OPENAI_API_KEY   — required
+///   OPENAI_MODEL     — optional, default "gpt-4o"
+///   OPENAI_BASE_URL  — optional, default "https://api.openai.com/v1"
+async fn translate_nl_to_sql(question: &str) -> Result<String> {
+    let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+        anyhow::anyhow!(
+            "OPENAI_API_KEY is not set.\n\
+             Export it before using --ask:\n\
+             \n  export OPENAI_API_KEY=sk-...\n"
+        )
+    })?;
+
+    let model =
+        std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
+    let base_url = std::env::var("OPENAI_BASE_URL")
+        .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+
+    let body = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "system",
+                "content": VLEDGER_SCHEMA_CONTEXT
+            },
+            {
+                "role": "user",
+                "content": question
+            }
+        ]
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .bearer_auth(&api_key)
+        .json(&body)
+        .send()
+        .await
+        .context("Failed to reach LLM endpoint")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("LLM API returned {status}: {text}");
+    }
+
+    let json: serde_json::Value = resp.json().await.context("Invalid JSON from LLM API")?;
+
+    let sql = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Unexpected LLM response shape: {json}"))?
+        .trim()
+        // Strip markdown code fences that some models insert anyway.
+        .trim_start_matches("```sql")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .trim_end_matches(';')
+        .to_string();
+
+    if sql.is_empty() {
+        anyhow::bail!("LLM returned an empty SQL statement for question: {question}");
+    }
+
+    Ok(sql)
+}
+
 async fn cmd_sql(
     data_dir: &PathBuf,
     query: Option<&str>,
+    ask: Option<&str>,
     username: Option<&str>,
     password: Option<&str>,
     server: Option<&str>,
     ca_cert: Option<&str>,
 ) -> Result<()> {
+    // If --ask was given, translate the natural-language question to SQL
+    // before doing anything else so that both network and direct paths see
+    // a plain SQL string.
+    let translated;
+    let query: Option<&str> = if let Some(question) = ask {
+        translated = translate_nl_to_sql(question).await?;
+        eprintln!("→ SQL: {translated}");
+        Some(&translated)
+    } else {
+        query
+    };
+
     // Resolve credentials first (needed for both network and direct modes).
     let resolved_username = resolve_username(username);
     let resolved_password = resolve_password(password);
@@ -2067,7 +2246,7 @@ async fn cmd_sql_network(
             };
             println!("   Merkle proof : {} ({} leaves)", verified_str, leaf_count);
             if !root_hex.is_empty() {
-                println!("   Merkle root  : {}", &root_hex[..root_hex.len().min(32)]);
+                println!("   Merkle root  : {}", root_hex);
             }
         }
 
@@ -2802,7 +2981,7 @@ fn run_sql_authenticated(
                 }
             );
             if let Some(ref proof) = result.proof {
-                println!("   Merkle root : {}", &hex::encode(proof.root)[..16]);
+                println!("   Merkle root : {}", &hex::encode(proof.root));
             }
             println!();
         }
@@ -4146,7 +4325,7 @@ async fn cmd_verify_audit_package(file: &std::path::Path) -> Result<()> {
         if !report.root_hex.is_empty() {
             println!(
                 "  Merkle root : {}",
-                &report.root_hex[..report.root_hex.len().min(32)]
+                &report.root_hex
             );
         }
         match report.sig_status {
@@ -6015,4 +6194,77 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
     );
 
     Ok(())
+}
+
+// ── mcp ───────────────────────────────────────────────────────────────────────
+
+/// Start an embedded MCP server backed by the local data directory.
+async fn cmd_mcp(
+    data_dir: &std::path::PathBuf,
+    bind: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<()> {
+    use std::sync::{Arc, RwLock};
+
+    let resolved_username = username
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("VLEDGER_CLI_USER").ok())
+        .unwrap_or_else(|| "admin".to_string());
+
+    let resolved_password = password
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("VLEDGER_CLI_PASSWORD").ok())
+        .unwrap_or_default();
+
+    if !data_dir.exists() {
+        anyhow::bail!(
+            "Data directory {:?} does not exist.\n\
+             Initialise first with `vledger init`.",
+            data_dir
+        );
+    }
+
+    let catalog_dir = data_dir.join("catalog");
+    let user_store = Arc::new(
+        vledger_server::UserStore::open(&catalog_dir)
+            .context("Failed to open user store")?,
+    );
+
+    let ledger = Arc::new(RwLock::new(
+        vledger_ledger::LedgerStore::open(data_dir)
+            .context("Failed to open ledger")?,
+    ));
+
+    println!("VectorLedger MCP server starting on http://{bind}");
+    println!("  SSE endpoint : http://{bind}/sse");
+    println!("  Health check : http://{bind}/health");
+    println!("  Tools        : query_ledger, post_entry, get_balance,");
+    println!("                 list_accounts, query_ledger_lines,");
+    println!("                 verify_chain, merkle_root");
+    println!();
+    println!("Point your MCP client at: http://{bind}/sse");
+    println!("Press Ctrl-C to stop.");
+    println!();
+
+    let config = vledger_mcp::McpConfig {
+        bind: bind.to_string(),
+        username: resolved_username,
+        password: resolved_password,
+    };
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for Ctrl-C");
+        info!("Shutdown signal received — stopping MCP server");
+        shutdown_clone.cancel();
+    });
+
+    vledger_mcp::McpServer::new(config, ledger, user_store)
+        .run(shutdown)
+        .await
 }

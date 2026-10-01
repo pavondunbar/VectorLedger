@@ -1,0 +1,36 @@
+[package]
+name        = "vledger-mcp"
+description = "Model Context Protocol (MCP) server for VectorLedger — exposes the ledger SQL surface as AI-callable tools"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[[bin]]
+name = "vledger-mcp"
+path = "src/main.rs"
+
+[lib]
+name = "vledger_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+vledger-sql         = { workspace = true }
+vledger-server      = { workspace = true }
+vledger-ledger      = { workspace = true }
+vledger-crypto      = { workspace = true }
+axum                = { workspace = true }
+tower-http          = { workspace = true }
+tokio               = { workspace = true }
+tokio-util          = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+anyhow              = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+uuid                = { workspace = true }
+chrono              = { workspace = true }
+hex                 = { workspace = true }
+async-stream        = "0.3.6"
+clap                = { workspace = true }

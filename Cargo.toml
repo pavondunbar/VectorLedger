@@ -19,12 +19,13 @@ members = [
     "crates/vledger-secrets",
     "crates/vledger-license",
     "crates/vledger",
+    "crates/vledger-mcp",
     "crates/vledger-kani",
     "tools/vledger-bench",
 ]
 
 [workspace.package]
-version     = "1.0.38"
+version     = "1.0.39"
 edition     = "2021"
 authors     = ["VectorGuard Labs <engineering@vectorguardlabs.com>"]
 license     = "BUSL-1.1"
@@ -143,6 +144,7 @@ vledger-compliance  = { path = "crates/vledger-compliance" }
 vledger-foureyes    = { path = "crates/vledger-foureyes" }
 vledger-secrets     = { path = "crates/vledger-secrets" }
 vledger-license     = { path = "crates/vledger-license" }
+vledger-mcp         = { path = "crates/vledger-mcp" }
 
 [profile.release]
 opt-level     = 3
