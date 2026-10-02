@@ -34,3 +34,5 @@ chrono              = { workspace = true }
 hex                 = { workspace = true }
 async-stream        = "0.3.6"
 clap                = { workspace = true }
+rustls-pemfile      = { workspace = true }
+tokio-rustls        = { workspace = true }

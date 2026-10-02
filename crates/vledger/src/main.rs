@@ -256,6 +256,20 @@ enum Commands {
         /// Address for the MCP server to bind on.
         #[arg(long, default_value = "127.0.0.1:3000")]
         bind: String,
+        /// Connect to a running vledger server instead of opening the data
+        /// directory directly. Use this whenever `vledger start` is active.
+        /// Format: host:port  (default: 127.0.0.1:5433)
+        ///
+        /// When --server is provided, the MCP server proxies all tool calls
+        /// through the running server over TLS — no data directory lock conflict.
+        /// When omitted, the MCP server auto-detects a running server on the
+        /// default port. If none is found, it falls back to direct mode.
+        #[arg(long)]
+        server: Option<String>,
+        /// Path to a PEM CA certificate for verifying the vledger server's
+        /// TLS certificate. Required for non-loopback --server addresses.
+        #[arg(long)]
+        ca_cert: Option<String>,
         /// Username to authenticate with the ledger.
         /// Falls back to VLEDGER_CLI_USER environment variable.
         #[arg(short, long)]
@@ -859,8 +873,8 @@ async fn main() -> Result<()> {
         }
         Commands::SelfTest => cmd_self_test().await,
         Commands::SelfTestPhase3 => cmd_self_test_phase3().await,
-        Commands::Mcp { bind, username, password } => {
-            cmd_mcp(&cli.data_dir, &bind, username.as_deref(), password.as_deref()).await
+        Commands::Mcp { bind, server, ca_cert, username, password } => {
+            cmd_mcp(&cli.data_dir, &bind, server.as_deref(), ca_cert.as_deref(), username.as_deref(), password.as_deref()).await
         }
         // Phase 3
         Commands::Backup { output } => cmd_backup(&cli.data_dir, output.as_deref()).await,
@@ -6317,10 +6331,17 @@ async fn cmd_migrate_to_sqlite(data_dir: &std::path::Path) -> anyhow::Result<()>
 
 // ── mcp ───────────────────────────────────────────────────────────────────────
 
-/// Start an embedded MCP server backed by the local data directory.
+/// Start an embedded MCP server.
+///
+/// Mode selection:
+/// 1. `--server host:port` provided → network mode (proxy through running server)
+/// 2. No `--server`, but default port 5433 is reachable → network mode (auto-detect)
+/// 3. Neither → direct mode (open data directory; fails if `vledger start` is running)
 async fn cmd_mcp(
     data_dir: &std::path::PathBuf,
     bind: &str,
+    server: Option<&str>,
+    ca_cert: Option<&str>,
     username: Option<&str>,
     password: Option<&str>,
 ) -> Result<()> {
@@ -6336,54 +6357,92 @@ async fn cmd_mcp(
         .or_else(|| std::env::var("VLEDGER_CLI_PASSWORD").ok())
         .unwrap_or_default();
 
-    if !data_dir.exists() {
-        anyhow::bail!(
-            "Data directory {:?} does not exist.\n\
-             Initialise first with `vledger init`.",
-            data_dir
-        );
-    }
-
-    let catalog_dir = data_dir.join("catalog");
-    let user_store = Arc::new(
-        vledger_server::UserStore::open(&catalog_dir)
-            .context("Failed to open user store")?,
-    );
-
-    let ledger = Arc::new(RwLock::new(
-        vledger_ledger::LedgerStore::open(data_dir)
-            .context("Failed to open ledger")?,
-    ));
-
-    println!("VectorLedger MCP server starting on http://{bind}");
-    println!("  SSE endpoint : http://{bind}/sse");
-    println!("  Health check : http://{bind}/health");
-    println!("  Tools        : query_ledger, post_entry, get_balance,");
-    println!("                 list_accounts, query_ledger_lines,");
-    println!("                 verify_chain, merkle_root");
-    println!();
-    println!("Point your MCP client at: http://{bind}/sse");
-    println!("Press Ctrl-C to stop.");
-    println!();
+    // ── Resolve server address ────────────────────────────────────────────────
+    let server_addr = server.map(|s| s.to_string()).or_else(|| {
+        let addr = "127.0.0.1:5433";
+        if std::net::TcpStream::connect_timeout(
+            &addr.parse().unwrap(),
+            std::time::Duration::from_millis(200),
+        ).is_ok() {
+            Some(addr.to_string())
+        } else {
+            None
+        }
+    });
 
     let config = vledger_mcp::McpConfig {
         bind: bind.to_string(),
-        username: resolved_username,
-        password: resolved_password,
+        username: resolved_username.clone(),
+        password: resolved_password.clone(),
     };
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let shutdown_clone = shutdown.clone();
-
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl-C");
+        tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl-C");
         info!("Shutdown signal received — stopping MCP server");
         shutdown_clone.cancel();
     });
 
-    vledger_mcp::McpServer::new(config, ledger, user_store)
-        .run(shutdown)
-        .await
+    if let Some(addr) = server_addr {
+        // ── Network mode ──────────────────────────────────────────────────────
+        println!("VectorLedger MCP server starting on http://{bind}");
+        println!("  Mode         : network (proxying through vledger server at {addr})");
+        println!("  SSE endpoint : http://{bind}/sse");
+        println!("  Health check : http://{bind}/health");
+        println!("  Tools        : 12 (7 query/write + 5 financial reasoning)");
+        println!();
+        println!("Point your MCP client at: http://{bind}/sse");
+        println!("Press Ctrl-C to stop.");
+        println!();
+
+        let conn = vledger_mcp::network::NetworkConnection::connect(
+            &addr,
+            &resolved_username,
+            &resolved_password,
+            ca_cert,
+        ).await.with_context(|| format!(
+            "Failed to connect MCP server to vledger at {addr}.\n\
+             Make sure `vledger start` is running and the credentials are correct."
+        ))?;
+
+        vledger_mcp::McpServer::new_network(config, Arc::new(conn))
+            .run(shutdown)
+            .await
+    } else {
+        // ── Direct mode ───────────────────────────────────────────────────────
+        if !data_dir.exists() {
+            anyhow::bail!(
+                "Data directory {:?} does not exist.\n\
+                 Initialise first with `vledger init`, or start the server with\n\
+                 `vledger start` and use `vledger mcp --server 127.0.0.1:5433`.",
+                data_dir
+            );
+        }
+
+        println!("VectorLedger MCP server starting on http://{bind}");
+        println!("  Mode         : direct (opening data directory)");
+        println!("  SSE endpoint : http://{bind}/sse");
+        println!("  Health check : http://{bind}/health");
+        println!("  Tools        : 12 (7 query/write + 5 financial reasoning)");
+        println!();
+        println!("Point your MCP client at: http://{bind}/sse");
+        println!("Press Ctrl-C to stop.");
+        println!();
+
+        let catalog_dir = data_dir.join("catalog");
+        let user_store = Arc::new(
+            vledger_server::UserStore::open(&catalog_dir)
+                .context("Failed to open user store")?,
+        );
+        let ledger = Arc::new(RwLock::new(
+            vledger_ledger::LedgerStore::open(data_dir)
+                .context("Failed to open ledger — is `vledger start` already running?\n\
+                          If so, use: vledger mcp --server 127.0.0.1:5433")?,
+        ));
+
+        vledger_mcp::McpServer::new(config, ledger, user_store)
+            .run(shutdown)
+            .await
+    }
 }

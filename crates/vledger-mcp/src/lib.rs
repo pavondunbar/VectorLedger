@@ -29,6 +29,7 @@
 //! ```
 
 pub mod tools;
+pub mod network;
 
 use std::sync::{Arc, RwLock};
 
@@ -114,10 +115,16 @@ impl JsonRpcResponse {
 
 // ── Shared server state ───────────────────────────────────────────────────────
 
+/// Shared server state — holds either direct ledger access OR a network
+/// connection to a running `vledger start` instance (never both).
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub ledger: Arc<RwLock<LedgerStore>>,
-    pub session: Arc<Session>,
+    /// Direct mode: shared ledger store (None in network mode).
+    pub ledger: Option<Arc<RwLock<LedgerStore>>>,
+    /// Direct mode: authenticated session (None in network mode).
+    pub session: Option<Arc<Session>>,
+    /// Network mode: proxy connection to a running vledger server (None in direct mode).
+    pub network: Option<Arc<network::NetworkConnection>>,
     /// Broadcast channel used to push SSE events to connected clients.
     pub sse_tx: broadcast::Sender<String>,
 }
@@ -510,7 +517,15 @@ async fn dispatch(state: AppState, req: JsonRpcRequest) -> Result<Value> {
                 .ok_or_else(|| anyhow::anyhow!("Missing 'name' in tools/call params"))?;
             let args = &req.params["arguments"];
 
-            tools::dispatch_tool(tool_name, args, &state.ledger, &state.session)
+            if let Some(ref net) = state.network {
+                // Network mode: proxy through running vledger server
+                network::dispatch_tool_network(tool_name, args, net).await
+            } else if let (Some(ref ledger), Some(ref session)) = (&state.ledger, &state.session) {
+                // Direct mode: access data directory
+                tools::dispatch_tool(tool_name, args, ledger, session)
+            } else {
+                anyhow::bail!("MCP server has no ledger connection")
+            }
         }
 
         // ── Unknown method ────────────────────────────────────────────────
@@ -521,39 +536,81 @@ async fn dispatch(state: AppState, req: JsonRpcRequest) -> Result<Value> {
 // ── McpServer ─────────────────────────────────────────────────────────────────
 
 /// The MCP HTTP server.
+///
+/// Supports two modes:
+/// - **Direct mode** (`McpServer::new`): opens the data directory directly.
+///   Only usable when no `vledger start` process is running.
+/// - **Network mode** (`McpServer::new_network`): proxies all tool calls
+///   through a running `vledger start` server over TLS. Use this when
+///   `vledger start` is already running and holds the data directory lock.
 pub struct McpServer {
     config: McpConfig,
-    ledger: Arc<RwLock<LedgerStore>>,
-    user_store: Arc<UserStore>,
+    ledger: Option<Arc<RwLock<LedgerStore>>>,
+    user_store: Option<Arc<UserStore>>,
+    network: Option<Arc<network::NetworkConnection>>,
 }
 
 impl McpServer {
-    /// Create a new MCP server.
+    /// Create a new MCP server in **direct mode**.
     ///
-    /// `ledger` should be an already-opened `LedgerStore` wrapped in an
-    /// `Arc<RwLock<…>>` so it can be shared with the main vledger process.
+    /// Opens the data directory directly. Only use when `vledger start` is
+    /// NOT running — they cannot hold the same data directory lock.
     pub fn new(
         config: McpConfig,
         ledger: Arc<RwLock<LedgerStore>>,
         user_store: Arc<UserStore>,
     ) -> Self {
-        Self { config, ledger, user_store }
+        Self {
+            config,
+            ledger: Some(ledger),
+            user_store: Some(user_store),
+            network: None,
+        }
+    }
+
+    /// Create a new MCP server in **network mode**.
+    ///
+    /// All tool calls are proxied to the running `vledger start` server.
+    /// The data directory is never opened — no lock conflict.
+    pub fn new_network(
+        config: McpConfig,
+        network: Arc<network::NetworkConnection>,
+    ) -> Self {
+        Self {
+            config,
+            ledger: None,
+            user_store: None,
+            network: Some(network),
+        }
     }
 
     /// Bind the HTTP listener and serve until `shutdown` fires.
     pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
-        let session = Arc::new(
-            self.user_store
-                .authenticate(&self.config.username, &self.config.password)
-                .map_err(|e| anyhow::anyhow!("MCP server auth failed: {e}"))?,
-        );
-
         let (sse_tx, _) = broadcast::channel::<String>(64);
 
-        let state = AppState {
-            ledger: self.ledger,
-            session,
-            sse_tx,
+        let state = if let Some(net) = self.network {
+            // Network mode — no local auth needed, connection already authenticated
+            AppState {
+                ledger: None,
+                session: None,
+                network: Some(net),
+                sse_tx,
+            }
+        } else {
+            // Direct mode — authenticate against local user store
+            let session = Arc::new(
+                self.user_store
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("No user store configured"))?
+                    .authenticate(&self.config.username, &self.config.password)
+                    .map_err(|e| anyhow::anyhow!("MCP server auth failed: {e}"))?,
+            );
+            AppState {
+                ledger: self.ledger,
+                session: Some(session),
+                network: None,
+                sse_tx,
+            }
         };
 
         let app = Router::new()
