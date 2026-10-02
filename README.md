@@ -1756,6 +1756,547 @@ vledger license --data-dir ./vledger-data
 
 ---
 
+## Connecting AI Clients to VectorLedger
+
+VectorLedger exposes two agentic surfaces:
+
+| Surface | How it works | Best for |
+|---|---|---|
+| `vledger sql --ask` | Single LLM call: question → SQL → result | Quick one-off queries from the terminal |
+| `vledger mcp` | MCP server: AI agent calls tools in a loop | Full agentic workflows, multi-step reasoning, any MCP client |
+
+The sections below cover every supported client for both surfaces, for both **local
+installations** (VectorLedger running on your laptop) and **cloud instances**
+(VectorLedger running on EC2, GCP, Azure, etc.).
+
+---
+
+### Part 1 — `vledger sql --ask` (natural-language CLI queries)
+
+No server setup required. Works anywhere you can run the `vledger` binary.
+
+#### Prerequisites
+
+Set at least `OPENAI_API_KEY`. The other two variables are optional:
+
+```bash
+export OPENAI_API_KEY=sk-...          # required
+export OPENAI_MODEL=gpt-4o            # optional — default: gpt-4o
+export OPENAI_BASE_URL=https://api.openai.com/v1  # optional — see provider table below
+```
+
+#### Usage
+
+```bash
+# Local installation
+vledger sql --ask "show me all failed payments in the last 30 days"
+vledger sql --ask "what is the current balance of the CASH account"
+vledger sql --ask "list the 10 largest transactions this month"
+vledger sql --ask "compute the Merkle root over the last 1000 entries"
+vledger sql --ask "how many entries were posted today"
+```
+
+For a cloud instance, add `--server` to route through the running server instead
+of opening the data directory directly:
+
+```bash
+# Cloud / remote server
+vledger sql --server 127.0.0.1:5433 --ask "show me all failed payments last week"
+```
+
+The generated SQL is always printed to stderr before execution so you can see
+exactly what ran:
+
+```
+→ SQL: SELECT * FROM ledger WHERE status = 'Failed'
+       AND effective_at >= '2026-09-01T00:00:00Z' LIMIT 100
+(results follow)
+```
+
+#### Supported LLM providers
+
+Any OpenAI-compatible chat completions endpoint works. Set `OPENAI_BASE_URL` and
+`OPENAI_MODEL` to switch providers — no code changes required.
+
+| Provider | `OPENAI_BASE_URL` | `OPENAI_MODEL` examples | Notes |
+|---|---|---|---|
+| **OpenAI** (default) | `https://api.openai.com/v1` | `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo` | Default — no env var needed |
+| **Anthropic** | `https://api.anthropic.com/v1` | `claude-opus-4-5`, `claude-sonnet-4-5` | Requires Anthropic API key |
+| **Groq** | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile`, `mixtral-8x7b-32768` | Fast inference, free tier available |
+| **Together AI** | `https://api.together.xyz/v1` | `meta-llama/Llama-3-70b-chat-hf` | Good for open models |
+| **Mistral** | `https://api.mistral.ai/v1` | `mistral-large-latest`, `mistral-medium` | European data residency |
+| **Ollama** (local) | `http://127.0.0.1:11434/v1` | `llama3.2`, `mistral`, `codellama` | Fully local, no API key needed |
+| **LM Studio** (local) | `http://127.0.0.1:1234/v1` | (model loaded in LM Studio) | GUI-based local model runner |
+| **vLLM** (self-hosted) | `http://your-host:8000/v1` | any HuggingFace model | Self-hosted on GPU server |
+| **llama.cpp server** | `http://127.0.0.1:8080/v1` | any GGUF model | Ultra-lightweight local inference |
+
+**Example — using Ollama locally (no API key, no internet):**
+
+```bash
+# Install Ollama: https://ollama.com
+ollama pull llama3.2
+
+export OPENAI_API_KEY=ollama    # any non-empty string
+export OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+export OPENAI_MODEL=llama3.2
+
+vledger sql --ask "show me the last 5 transactions"
+```
+
+**Example — using Groq (fast, free tier):**
+
+```bash
+export OPENAI_API_KEY=gsk_...   # Groq API key from console.groq.com
+export OPENAI_BASE_URL=https://api.groq.com/openai/v1
+export OPENAI_MODEL=llama-3.3-70b-versatile
+
+vledger sql --ask "what accounts have a balance over $100,000"
+```
+
+---
+
+### Part 2 — `vledger mcp` (full agentic MCP server)
+
+The MCP server exposes VectorLedger as a set of callable tools that any AI agent
+can use autonomously — reading data, posting entries, verifying integrity — in a
+reasoning loop without any human typing SQL.
+
+#### Step 1 — Start the MCP server
+
+**Local installation:**
+
+```bash
+# Embedded mode (uses existing data dir, shares the process)
+vledger mcp --bind 127.0.0.1:3000 --username admin
+
+# Standalone binary (separate process)
+vledger-mcp --data-dir ./vledger-data --bind 127.0.0.1:3000 --username admin
+```
+
+**Cloud instance (EC2 / GCP / Azure):**
+
+SSH into your instance and start the MCP server:
+
+```bash
+ssh -i './YourKey.pem' ubuntu@YOUR-INSTANCE-IP
+
+# On the instance:
+vledger mcp --bind 127.0.0.1:3000 --username admin
+# Or as a background process:
+nohup vledger-mcp --data-dir /var/lib/vledger/data \
+  --bind 127.0.0.1:3000 \
+  >> /var/log/vledger/mcp.log 2>&1 &
+```
+
+> **Security:** Always bind to `127.0.0.1`, not `0.0.0.0`. The MCP server has no
+> TLS. Access it from outside the instance using an SSH tunnel (see below) or a
+> TLS-terminating reverse proxy.
+
+**Verify it is running:**
+
+```bash
+curl -s http://127.0.0.1:3000/health
+# {"ok":true,"service":"vledger-mcp"}
+```
+
+---
+
+#### Step 2 — Connect your AI client
+
+Choose the client that fits your workflow:
+
+---
+
+##### Option A — Kiro CLI
+
+**Local VectorLedger (MCP server on same machine):**
+
+Create `.kiro/settings/mcp.json` in your workspace:
+
+```bash
+mkdir -p .kiro/settings
+cat > .kiro/settings/mcp.json << 'EOF'
+{
+  "mcpServers": {
+    "vledger": {
+      "url": "http://127.0.0.1:3000/sse",
+      "disabled": false
+    }
+  }
+}
+EOF
+```
+
+**Cloud VectorLedger (EC2 / GCP / Azure):**
+
+First, open an SSH tunnel in a separate terminal and leave it running:
+
+```bash
+# Replace with your key file and instance IP
+ssh -i './YourKey.pem' -L 3000:127.0.0.1:3000 -N ubuntu@YOUR-INSTANCE-IP
+```
+
+Then create the same `.kiro/settings/mcp.json` — Kiro connects through the tunnel
+transparently:
+
+```bash
+mkdir -p .kiro/settings
+cat > .kiro/settings/mcp.json << 'EOF'
+{
+  "mcpServers": {
+    "vledger": {
+      "url": "http://127.0.0.1:3000/sse",
+      "disabled": false
+    }
+  }
+}
+EOF
+```
+
+Restart Kiro CLI. Then ask it naturally:
+
+```
+"Query the vledger and show me the last 10 posted entries"
+"What is the balance of the CASH account?"
+"Post a payment of $500 from CASH to REVENUE with description 'Monthly fee'"
+"Verify the chain integrity and show me the result"
+"Compute the Merkle root over entries 1 to 10000"
+```
+
+Kiro will call the appropriate MCP tools against your live ledger and show the results.
+
+---
+
+##### Option B — Claude Desktop
+
+**Local VectorLedger:**
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (create it if
+it doesn't exist):
+
+```json
+{
+  "mcpServers": {
+    "vledger": {
+      "url": "http://127.0.0.1:3000/sse"
+    }
+  }
+}
+```
+
+Restart Claude Desktop. A hammer icon appears in the chat input when tools are loaded.
+
+**Cloud VectorLedger:**
+
+Open the SSH tunnel first (leave running in a separate terminal):
+
+```bash
+ssh -i './YourKey.pem' -L 3000:127.0.0.1:3000 -N ubuntu@YOUR-INSTANCE-IP
+```
+
+Use the exact same `claude_desktop_config.json` as above — the tunnel makes
+`127.0.0.1:3000` point to your cloud instance transparently. Restart Claude Desktop.
+
+---
+
+##### Option C — Cursor
+
+Edit `.cursor/mcp.json` in your project root (or `~/.cursor/mcp.json` globally):
+
+```json
+{
+  "mcpServers": {
+    "vledger": {
+      "url": "http://127.0.0.1:3000/sse"
+    }
+  }
+}
+```
+
+For cloud: open the SSH tunnel first (same as above), then use the same config.
+Restart Cursor or reload the MCP servers from Settings → Features → MCP.
+
+---
+
+##### Option D — Continue.dev (VS Code / JetBrains)
+
+Edit `~/.continue/config.json`:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "vledger",
+      "transport": {
+        "type": "sse",
+        "url": "http://127.0.0.1:3000/sse"
+      }
+    }
+  ]
+}
+```
+
+For cloud: open the SSH tunnel first, then use the same config.
+
+---
+
+##### Option E — LangChain (Python)
+
+Install the adapter:
+
+```bash
+pip install langchain-mcp-adapters langchain-openai langgraph
+```
+
+```python
+import asyncio
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from langchain_mcp_adapters.tools import load_mcp_tools
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+
+async def main():
+    # For cloud: keep your SSH tunnel running, then use 127.0.0.1:3000
+    async with sse_client("http://127.0.0.1:3000/sse") as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = await load_mcp_tools(session)
+
+            llm = ChatOpenAI(model="gpt-4o")
+            agent = create_react_agent(llm, tools)
+
+            result = await agent.ainvoke({
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        "Show me all failed transactions from the last 7 days, "
+                        "then verify the chain integrity, and summarise the findings."
+                    )
+                }]
+            })
+            print(result["messages"][-1].content)
+
+asyncio.run(main())
+```
+
+The agent will autonomously call `query_ledger`, then `verify_chain`, chain the
+results, and give you a natural-language summary — no SQL written anywhere.
+
+---
+
+##### Option F — OpenAI Agents SDK (Python)
+
+```bash
+pip install openai-agents mcp
+```
+
+```python
+import asyncio
+from agents import Agent, Runner
+from agents.mcp import MCPServerSse
+
+async def main():
+    # For cloud: SSH tunnel must be running first
+    async with MCPServerSse("http://127.0.0.1:3000/sse") as vledger:
+        agent = Agent(
+            name="VectorLedger Agent",
+            instructions=(
+                "You are a financial ledger assistant with direct access to VectorLedger. "
+                "Use the available tools to answer questions about transactions, balances, "
+                "and ledger integrity. Always verify the chain after posting entries."
+            ),
+            mcp_servers=[vledger],
+        )
+        result = await Runner.run(
+            agent,
+            "Post a $1,000 payment from CASH to REVENUE described as 'Invoice #1042', "
+            "then verify the chain and show me the Merkle root."
+        )
+        print(result.final_output)
+
+asyncio.run(main())
+```
+
+---
+
+##### Option G — LlamaIndex (Python)
+
+```bash
+pip install llama-index-tools-mcp llama-index-llms-openai
+```
+
+```python
+import asyncio
+from llama_index.tools.mcp import McpToolSpec
+from llama_index.llms.openai import OpenAI
+from llama_index.core.agent import ReActAgent
+
+async def main():
+    # For cloud: SSH tunnel must be running first
+    mcp_tool_spec = McpToolSpec(url="http://127.0.0.1:3000/sse")
+    tools = await mcp_tool_spec.to_tool_list_async()
+
+    llm = OpenAI(model="gpt-4o")
+    agent = ReActAgent.from_tools(tools, llm=llm, verbose=True)
+
+    response = agent.chat(
+        "What are the top 5 accounts by balance? Show me the numbers."
+    )
+    print(response)
+
+asyncio.run(main())
+```
+
+---
+
+##### Option H — Raw HTTP / curl (no AI client needed)
+
+The MCP server accepts plain JSON-RPC 2.0 POST requests. Any script, cron job,
+or monitoring system can call it directly — no AI framework required.
+
+```bash
+BASE="http://127.0.0.1:3000"  # or tunnel URL for cloud
+
+# List all available tools
+curl -s -X POST $BASE/message \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+
+# Query the ledger
+curl -s -X POST $BASE/message \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", "id": 2,
+    "method": "tools/call",
+    "params": {
+      "name": "query_ledger",
+      "arguments": { "sql": "SELECT * FROM ledger LIMIT 10" }
+    }
+  }'
+
+# Get account balance
+curl -s -X POST $BASE/message \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "get_balance",
+      "arguments": { "account": "CASH" }
+    }
+  }'
+
+# Post a new entry
+curl -s -X POST $BASE/message \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", "id": 4,
+    "method": "tools/call",
+    "params": {
+      "name": "post_entry",
+      "arguments": {
+        "description": "Monthly fee",
+        "debit_account": "CASH",
+        "credit_account": "REVENUE",
+        "amount": 50000,
+        "currency": "USD",
+        "domain": "main"
+      }
+    }
+  }'
+
+# Verify chain integrity
+curl -s -X POST $BASE/message \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", "id": 5,
+    "method": "tools/call",
+    "params": { "name": "verify_chain", "arguments": {} }
+  }'
+
+# Compute Merkle root over a range
+curl -s -X POST $BASE/message \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", "id": 6,
+    "method": "tools/call",
+    "params": {
+      "name": "merkle_root",
+      "arguments": { "from_seq": 1, "to_seq": 10000 }
+    }
+  }'
+```
+
+---
+
+#### Cloud deployment: SSH tunnel reference
+
+All of the clients above use `http://127.0.0.1:3000` — the SSH tunnel makes your
+cloud instance's port 3000 appear as a local port. Here is the complete tunnel
+reference:
+
+**Basic tunnel (interactive — keeps a shell open):**
+
+```bash
+ssh -i './YourKey.pem' -L 3000:127.0.0.1:3000 ubuntu@YOUR-INSTANCE-IP
+```
+
+**Background tunnel (no shell, tunnel only):**
+
+```bash
+ssh -i './YourKey.pem' -L 3000:127.0.0.1:3000 -N ubuntu@YOUR-INSTANCE-IP
+```
+
+**Background tunnel that auto-reconnects (recommended for long sessions):**
+
+```bash
+ssh -i './YourKey.pem' \
+  -L 3000:127.0.0.1:3000 \
+  -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  ubuntu@YOUR-INSTANCE-IP &
+```
+
+**Common cloud provider usernames:**
+
+| Cloud | Default username |
+|---|---|
+| AWS EC2 (Ubuntu) | `ubuntu` |
+| AWS EC2 (Amazon Linux) | `ec2-user` |
+| GCP Compute Engine | your Google account username |
+| Azure VM (Ubuntu) | `azureuser` |
+| DigitalOcean Droplet | `root` or `ubuntu` |
+| Hetzner Cloud | `root` |
+
+**Check the tunnel is working:**
+
+```bash
+curl -s http://127.0.0.1:3000/health
+# {"ok":true,"service":"vledger-mcp"}
+```
+
+If that returns successfully, every AI client above will work.
+
+---
+
+#### Client selection guide
+
+Not sure which option to pick? Use this:
+
+| You want to… | Best option |
+|---|---|
+| Ask quick questions from the terminal | `vledger sql --ask` (Part 1) |
+| Chat with your ledger in a GUI | **Claude Desktop** (Option B) |
+| Work inside VS Code | **Continue.dev** (Option D) or **Cursor** (Option C) |
+| Work inside Kiro CLI | **Kiro** (Option A) |
+| Build a Python automation or agent pipeline | **LangChain** (Option E) or **OpenAI Agents SDK** (Option F) |
+| Integrate from a script, cron job, or monitoring system | **Raw HTTP / curl** (Option H) |
+| Build a RAG or document-query system | **LlamaIndex** (Option G) |
+| Use a local model with no API key or internet | `--ask` with Ollama (Part 1) |
+| Maximum privacy — no data leaves your network | Ollama + `--ask`, or MCP server on localhost only |
+
+---
+
 ## Built With
 
 | Component | Library |
