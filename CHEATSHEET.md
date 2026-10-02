@@ -374,15 +374,20 @@ The MCP server exposes VectorLedger as callable tools for any AI agent — no SQ
 
 ### Tools exposed
 
-| Tool | What it does |
-|---|---|
-| `query_ledger` | Run any SELECT, BALANCE(), VERIFY_CHAIN(), MERKLE_ROOT() |
-| `post_entry` | Record a new double-entry journal entry |
-| `get_balance` | Return current balance for an account |
-| `list_accounts` | List all accounts with balances (optional domain/currency filter) |
-| `query_ledger_lines` | Query individual debit/credit lines |
-| `verify_chain` | Verify cryptographic chain integrity |
-| `merkle_root` | Compute BLAKE3 Merkle root over a sequence range |
+| Tool | Category | What it does |
+|---|---|---|
+| `query_ledger` | Query | Run any SELECT, BALANCE(), VERIFY_CHAIN(), MERKLE_ROOT() |
+| `post_entry` | Write | Record a new double-entry journal entry |
+| `get_balance` | Query | Return current balance for an account |
+| `list_accounts` | Query | List all accounts with balances |
+| `query_ledger_lines` | Query | Query individual debit/credit lines |
+| `verify_chain` | Integrity | Verify BLAKE3 cryptographic chain integrity |
+| `merkle_root` | Integrity | Compute BLAKE3 Merkle commitment over a range |
+| `explain_balance` | Reasoning | Why is an account at its current balance? |
+| `reconcile_account` | Reasoning | Does the balance match the sum of posted lines? |
+| `find_policy_violations` | Reasoning | Large txns, pending-too-long, missing refs, failures |
+| `summarize_period` | Reasoning | Natural-language period summary |
+| `audit_report` | Reasoning | Full cryptographic audit evidence report |
 
 ### Start the MCP server
 
@@ -667,7 +672,146 @@ curl -s -X POST $BASE/message -H "Content-Type: application/json" \
 
 ---
 
-## 14. AUDIT REPORTS
+## 14. FINANCIAL AI REASONING TOOLS (v1.4.0)
+
+Five high-order tools chain multiple queries internally and return structured financial
+narratives. Call them via any MCP client or raw curl. No SQL required.
+
+### explain_balance — why is an account at its current balance?
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+    "name":"explain_balance",
+    "arguments":{"account":"SETTLEMENT","limit":20}
+  }}'
+```
+
+Returns: account type, normal balance direction, recent debits table, recent credits
+table, totals, and a narrative interpretation. Use when a user asks *"why is X account
+$82,400 lower than expected?"*
+
+### reconcile_account — does the balance match posted lines?
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+    "name":"reconcile_account",
+    "arguments":{"account":"CASH"}
+  }}'
+```
+
+Returns: total debits, total credits, computed balance, stored balance, discrepancy,
+and BALANCED / DISCREPANCY DETECTED verdict. If a discrepancy is found, includes
+remediation steps.
+
+### find_policy_violations — scan for rule-breaking transactions
+
+```bash
+# Default: large txns > $50k, pending too long, missing external refs, failed entries
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+    "name":"find_policy_violations",
+    "arguments":{
+      "large_amount_threshold_minor_units": 5000000,
+      "pending_days_threshold": 3,
+      "check_large_amounts": true,
+      "check_pending_too_long": true,
+      "check_missing_external_ref": true,
+      "check_failed_entries": true
+    }
+  }}'
+```
+
+Returns: categorised violation report with counts and entry details per category.
+
+### summarize_period — natural-language period summary
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+    "name":"summarize_period",
+    "arguments":{"from":"2026-09-01","to":"2026-09-30","domain":"main"}
+  }}'
+```
+
+Returns: entry counts by status (Posted / Pending / Failed), total debit volume,
+success rate, sequence range, Merkle root for the period, chain integrity status,
+and a narrative paragraph.
+
+### audit_report — full cryptographic audit evidence report
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+    "name":"audit_report",
+    "arguments":{
+      "from":"2026-09-01",
+      "to":"2026-09-30",
+      "tenant":"Acme Financial",
+      "domain":"main"
+    }
+  }}'
+```
+
+Returns: ledger summary, hash chain verification result, BLAKE3 Merkle commitment,
+sample entries with content hashes, and bash commands for independent auditor
+verification. Suitable for presenting to an auditor or regulator.
+
+---
+
+### AGENT_SYSTEM_PROMPT — financially-aware agent instructions
+
+When building Python agents, use the built-in prompt from `vledger-mcp`. It is
+also returned automatically in the MCP `initialize` response (`instructions` field)
+so GUI clients (Kiro, Claude Desktop, etc.) pick it up without manual configuration.
+
+```python
+# OpenAI Agents SDK
+from agents import Agent
+from agents.mcp import MCPServerSse
+
+async with MCPServerSse("http://127.0.0.1:3000/sse") as vledger:
+    # initialize() returns AGENT_SYSTEM_PROMPT in the instructions field
+    # — the SDK applies it automatically. Or set it explicitly:
+    agent = Agent(
+        name="VectorLedger Agent",
+        instructions="""You are a financial operations assistant for VectorLedger.
+Amounts are always in minor units (cents) — $100.00 = 10000.
+Every entry has exactly one Debit and one Credit line.
+The ledger is append-only — corrections require reversal entries.
+Never fabricate data — always call a tool. Always verify chain after posting.""",
+        mcp_servers=[vledger],
+    )
+```
+
+### Example multi-step agent workflows (v1.4.0)
+
+These questions now trigger autonomous multi-step reasoning chains:
+
+```
+"Why is our settlement account $82,400 lower than expected?"
+→ explain_balance("SETTLEMENT") → reconcile_account("SETTLEMENT")
+
+"Find transactions that violate our settlement policy"
+→ find_policy_violations(pending_days_threshold=1, large_amount_threshold_minor_units=1000000)
+
+"Summarize last month's activity"
+→ summarize_period(from="2026-09-01", to="2026-09-30")
+
+"Generate an audit report for Q3"
+→ audit_report(from="2026-07-01", to="2026-09-30", tenant="Acme Financial")
+
+"Show me all transactions over $50,000 that don't have an associated approval"
+→ find_policy_violations(check_missing_external_ref=true, large_amount_threshold_minor_units=5000000)
+
+"Reconcile yesterday's transactions"
+→ list_accounts() → reconcile_account() for each account with activity
+```
+
+---
+
+## 15. AUDIT REPORTS
 
 Stop the server first — audit commands open the data directory directly.
 
@@ -706,7 +850,7 @@ vledger verify-audit-package --file entry-[ENTRY NUMBER]-proof.json
 
 ---
 
-## 15. COMPLIANCE REPORTS
+## 16. COMPLIANCE REPORTS
 
 Stop the server first.
 
@@ -738,7 +882,7 @@ Controls checked against real filesystem state:
 
 ---
 
-## 16. RECONCILIATION
+## 17. RECONCILIATION
 
 Stop the server first, then reconcile.
 
@@ -758,7 +902,7 @@ vledger reconcile --data-dir ./vledger-data --format json --output reconcile.jso
 
 ---
 
-## 17. COMMON VLEDGER SQL COMMANDS
+## 18. COMMON VLEDGER SQL COMMANDS
 
 **REPL controls:**
 - `\x` — toggle expanded (vertical) display
@@ -979,7 +1123,7 @@ Think of it this way:
 
 ---
 
-## 18. LICENSING
+## 19. LICENSING
 
 Install a license:
 
@@ -1004,7 +1148,7 @@ License tiers:
 
 ---
 
-## 19. LICENSING (FROM SOURCE — OPERATORS ONLY)
+## 20. LICENSING (FROM SOURCE — OPERATORS ONLY)
 
 Build the license generator:
 
@@ -1036,7 +1180,7 @@ Then send `acme-bank-license.json` to the client.
 
 ---
 
-## 20. ADMINISTRATION
+## 21. ADMINISTRATION
 
 VectorLedger has four built-in roles:
 
@@ -1098,7 +1242,7 @@ vledger user set-role --username [username] --role readonly
 
 ---
 
-## 21. HOW TO QUERY IMPORTS DIRECTLY IN THE TERMINAL
+## 22. HOW TO QUERY IMPORTS DIRECTLY IN THE TERMINAL
 
 Get the CSV headers first:
 
@@ -1117,19 +1261,19 @@ print "────────────────────────�
 
 ---
 
-## 22. UPGRADE BINARY
+## 23. UPGRADE BINARY
 
 ```bash
 pkill vledger
-wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.0.39/vledger-v1.0.39-linux-aarch64.tar.gz
-tar -xzf vledger-v1.0.39-linux-aarch64.tar.gz
+wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.0.39/vledger-v1.4.0-linux-aarch64.tar.gz
+tar -xzf vledger-v1.4.0-linux-aarch64.tar.gz
 chmod +x vledger && sudo mv vledger $(which vledger)
 vledger --version
 ```
 
 ---
 
-## 23. DEMO VECTORLEDGER TO CLIENTS USING YOUR IMPORTED DATA
+## 24. DEMO VECTORLEDGER TO CLIENTS USING YOUR IMPORTED DATA
 
 Install Nginx:
 
@@ -1153,7 +1297,7 @@ psql "host=[PUBLIC IP] port=5432 user=admin sslmode=require"
 
 ---
 
-## 24. RUN DBEAVER FOR VECTORLEDGER
+## 25. RUN DBEAVER FOR VECTORLEDGER
 
 Make sure VectorLedger server is running with the `--pgwire` flag:
 
@@ -1234,7 +1378,7 @@ To start over with a fresh DBeaver connection: right-click the VectorLedger conn
 
 ---
 
-## 25. RUN TESTS ON VECTORLEDGER (OPERATORS ONLY)
+## 26. RUN TESTS ON VECTORLEDGER (OPERATORS ONLY)
 
 ### Regression tests (3 tests)
 

@@ -35,6 +35,9 @@ prefer to remain anonymous.
 - Official client SDKs (`clients/python`, `clients/typescript`, `clients/go`)
 - The WAL, crypto, ledger, server, pgwire, replication, and HSM subsystems
 - The MCP server (`crates/vledger-mcp`, `vledger mcp` subcommand, `vledger-mcp` binary)
+- The financial AI reasoning tools (`explain_balance`, `reconcile_account`,
+  `find_policy_violations`, `summarize_period`, `audit_report`) and their
+  underlying SQL execution paths
 - Authentication and authorization logic
 - Cryptographic implementation correctness (key derivation, encryption,
   signing, hash chains)
@@ -90,6 +93,24 @@ computed and stored correctly; only the terminal printout was shortened.
 All three sites now print the full 64-character hash. This fixes a potential
 confusion where a human operator comparing the inline display against
 `SELECT MERKLE_ROOT()` output would see apparent mismatches.
+
+**Financial semantic layer and reasoning tools (v1.4.0)**
+
+The agentic AI layer was significantly upgraded. Security-relevant notes:
+
+- All 12 MCP tools (including the 5 new financial reasoning tools:
+  `explain_balance`, `reconcile_account`, `find_policy_violations`,
+  `summarize_period`, `audit_report`) execute through the same
+  parse → plan → privilege-check → execute pipeline as direct SQL.
+  No tool bypasses RBAC. An `auditor` role cannot call `post_entry`
+  through a reasoning tool any more than through direct SQL.
+- The `find_policy_violations` and `audit_report` tools read ledger data
+  only — they make no writes and require at minimum the `auditor` role.
+- `AGENT_SYSTEM_PROMPT` is a static string constant with no secrets. It is
+  safe to embed in client-side code or return in the `initialize` response.
+- The `--ask` flag sends only the user's question text and the static
+  `VLEDGER_SCHEMA_CONTEXT` to the configured LLM endpoint. No ledger data,
+  credentials, or key material is ever transmitted to the LLM provider.
 
 **`MERKLE_ROOT()` single-argument form added (v1.0.37)**
 
@@ -158,7 +179,8 @@ vulnerabilities:
 - The MCP server (`vledger mcp` / `vledger-mcp`) does **not** implement TLS.
   It should be bound to `127.0.0.1` (the default) or placed behind a
   TLS-terminating reverse proxy when accessed over a network. All MCP tool
-  calls go through the same RBAC enforcement as direct SQL; the MCP server
+  calls — including the 5 financial reasoning tools added in v1.4.0 —
+  go through the same RBAC enforcement as direct SQL; the MCP server
   itself does not bypass any access control. The `--ask` flag sends the
   natural-language question and the ledger schema context to a third-party
   LLM endpoint — do not include sensitive data in the question text.

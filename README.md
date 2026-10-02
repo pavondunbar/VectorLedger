@@ -98,7 +98,66 @@ After:   Merkle root  : 5a8b9ce38e7e95d66070c74d889fbe1811d9a19e459889839fc23847
 This was a display-only bug — no data integrity issue. The underlying hash was always
 computed and stored correctly; only the terminal output was truncated.
 
-### New in v1.0.39 — `vledger sql --ask` (natural-language queries)
+### New in v1.4.0 — Financial Semantic Layer and Agent Reasoning Tools
+
+VectorLedger's agentic AI layer received a major upgrade in v1.4.0. The system
+no longer just translates natural language to SQL — it understands financial
+operations, reasons across multiple tool calls, and produces structured evidence.
+
+#### Richer `--ask` schema context
+
+The LLM prompt behind `vledger sql --ask` now contains full financial domain
+knowledge, not just raw column names:
+
+- Double-entry accounting rules (every entry balances; debits == credits)
+- Minor-units semantics with dollar examples ($10,000 = 1000000)
+- Account type normal balance directions (Asset/Expense → Debit; Liability/Equity/Income → Credit)
+- Full entry status lifecycle (Posted, Pending, Settled, Failed, Reversal, PendingApproval)
+- Cryptographic field meanings (content_hash, chain_hash, merkle_root)
+- Common financial question → SQL query patterns
+
+This means `--ask` now gives correct answers to questions like:
+- *"show me all income accounts with a negative balance"* (knows that's normal for Income type)
+- *"total debits posted in September"* (knows to filter status='Posted' and use minor units)
+
+#### Five new MCP financial reasoning tools
+
+| Tool | What it does |
+|---|---|
+| `explain_balance` | Why is an account at its current balance? Chains account metadata → recent debits → recent credits → narrative with account type interpretation |
+| `reconcile_account` | Does the stored balance match sum(debits) − sum(credits)? Returns BALANCED or flags the exact discrepancy with remediation steps |
+| `find_policy_violations` | Scan for large transactions, entries pending too long, missing external refs, failed entries — all thresholds configurable |
+| `summarize_period` | Natural-language period summary: counts by status, total volume, Merkle commitment, chain integrity |
+| `audit_report` | Full cryptographic audit evidence narrative: chain verify, Merkle root, sample entries with hashes, auditor verification instructions |
+
+These tools let an agent autonomously answer questions like:
+- *"Why is our settlement account $82,400 lower than expected?"* → `explain_balance` + `reconcile_account`
+- *"Find transactions that violate our settlement policy"* → `find_policy_violations`
+- *"Summarize last quarter"* → `summarize_period`
+- *"Generate an audit report for September"* → `audit_report`
+
+#### `AGENT_SYSTEM_PROMPT` — financially-aware agent instructions
+
+A public `AGENT_SYSTEM_PROMPT` constant is now exported from `vledger-mcp`. It
+contains financially-aware instructions covering amounts in minor units, double-entry
+rules, account type semantics, status meanings, tool routing guidance, and behavioral
+rules (never fabricate data, always verify chain, confirm before posting).
+
+It is returned automatically in the MCP `initialize` response so MCP clients that
+support the `instructions` field pick it up without any manual configuration. Use
+it as the `system` / `instructions` field when building Python agents:
+
+```python
+from vledger_mcp import AGENT_SYSTEM_PROMPT  # or copy from the crate docs
+
+agent = Agent(
+    name="VectorLedger Agent",
+    instructions=AGENT_SYSTEM_PROMPT,  # financially-aware, not just schema-aware
+    mcp_servers=[vledger],
+)
+```
+
+
 
 Ask the ledger questions in plain English. An LLM translates the question to SQL,
 prints the generated query, and executes it — no SQL knowledge required.
@@ -161,6 +220,11 @@ Then add it to your MCP client's config:
 | `query_ledger_lines` | Query individual debit/credit lines |
 | `verify_chain` | Verify cryptographic chain integrity |
 | `merkle_root` | Compute BLAKE3 Merkle root over a sequence range |
+| `explain_balance` | Why is an account at its current balance? (v1.4.0) |
+| `reconcile_account` | Verify stored balance matches sum of posted lines (v1.4.0) |
+| `find_policy_violations` | Scan for large txns, pending-too-long, missing refs, failures (v1.4.0) |
+| `summarize_period` | Natural-language period summary with Merkle commitment (v1.4.0) |
+| `audit_report` | Full cryptographic audit evidence report for a period (v1.4.0) |
 
 The MCP server uses HTTP + SSE transport as defined by the MCP spec. The
 `GET /health` endpoint returns `{"ok":true}` for load-balancer health checks.
@@ -1725,6 +1789,22 @@ vledger license --data-dir ./vledger-data
 
 ## Changelog
 
+### v1.4.0 — Financial semantic layer, 5 new reasoning tools, agent system prompt
+
+- **Financial semantic layer for `--ask`** — `VLEDGER_SCHEMA_CONTEXT` rewritten
+  with full financial domain knowledge: double-entry rules, minor-unit semantics,
+  account type normal balance directions, entry status lifecycle, cryptographic
+  field meanings, and common query patterns. `--ask` now understands finance,
+  not just schema.
+- **5 new MCP financial reasoning tools** — `explain_balance`, `reconcile_account`,
+  `find_policy_violations`, `summarize_period`, `audit_report`. Each chains multiple
+  internal queries and returns structured financial narrative, not just raw rows.
+- **`AGENT_SYSTEM_PROMPT`** — public constant in `vledger-mcp` with financially-aware
+  agent instructions. Returned in MCP `initialize` response automatically; usable as
+  the `instructions` field for any Python or GUI agent.
+- **12 MCP tools total** (7 low-level + 5 high-order). `/health` now returns tool
+  count and version.
+
 ### v1.0.39 — NL-to-SQL, MCP server, Merkle root display fix
 
 - **`vledger sql --ask`** — natural-language-to-SQL via any OpenAI-compatible
@@ -2131,16 +2211,22 @@ async def main():
         agent = Agent(
             name="VectorLedger Agent",
             instructions=(
+                # Use the built-in AGENT_SYSTEM_PROMPT from vledger-mcp for
+                # financially-aware instructions (returned automatically in the
+                # MCP initialize response), or paste it inline here.
                 "You are a financial ledger assistant with direct access to VectorLedger. "
-                "Use the available tools to answer questions about transactions, balances, "
-                "and ledger integrity. Always verify the chain after posting entries."
+                "Amounts are always in integer minor units (cents) — $100.00 = 10000. "
+                "Every entry has exactly one Debit and one Credit line that must balance. "
+                "The ledger is append-only — corrections require reversal entries. "
+                "Always verify the chain after posting entries. Never fabricate data — "
+                "always call a tool to get real numbers."
             ),
             mcp_servers=[vledger],
         )
         result = await Runner.run(
             agent,
-            "Post a $1,000 payment from CASH to REVENUE described as 'Invoice #1042', "
-            "then verify the chain and show me the Merkle root."
+            "Why is the SETTLEMENT account $82,400 lower than expected? "
+            "Investigate and produce a reconciliation report."
         )
         print(result.final_output)
 
@@ -2418,6 +2504,11 @@ Not sure which option to pick? Use this:
 | Build a RAG or document-query system | **LlamaIndex** (Option G) |
 | Use a local model with no API key or internet | `--ask` with Ollama (Part 1) |
 | Maximum privacy — no data leaves your network | Ollama + `--ask`, or MCP server on localhost only |
+| Explain why an account balance changed | `explain_balance` tool via any MCP client |
+| Verify balance matches posted lines | `reconcile_account` tool via any MCP client |
+| Find compliance issues or suspicious transactions | `find_policy_violations` tool |
+| Summarize a period in natural language | `summarize_period` tool |
+| Generate an auditor-ready report | `audit_report` tool |
 
 ---
 

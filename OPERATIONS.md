@@ -965,7 +965,11 @@ table with the result after each quarterly drill.
 ### Starting the MCP server
 
 The MCP server lets AI assistants (Claude Desktop, Cursor, Kiro, etc.) query and
-write to the ledger without writing SQL. Start it alongside `vledger start`:
+write to the ledger without writing SQL. As of v1.4.0 it exposes 12 tools —
+7 low-level query/write tools and 5 financial reasoning tools that chain multiple
+queries and return structured financial narratives.
+
+Start it alongside `vledger start`:
 
 ```bash
 # Terminal 1 — main server
@@ -1007,11 +1011,66 @@ For Cursor or Kiro, add it to `.kiro/settings/mcp.json` in your workspace.
 
 ```bash
 curl -s http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp"}
+# {"ok":true,"service":"vledger-mcp","version":"1.4.0","tools":12}
 ```
 
 Add this to your load-balancer health probe if running the MCP server behind a
 reverse proxy.
+
+### Tools — 12 total (v1.4.0)
+
+| Tool | Category | Description |
+|---|---|---|
+| `query_ledger` | Query | Run any SELECT, BALANCE(), VERIFY_CHAIN(), MERKLE_ROOT() |
+| `post_entry` | Write | Record a new double-entry journal entry |
+| `get_balance` | Query | Current balance of any account |
+| `list_accounts` | Query | All accounts with balances |
+| `query_ledger_lines` | Query | Individual debit/credit lines |
+| `verify_chain` | Integrity | Verify BLAKE3 hash chain |
+| `merkle_root` | Integrity | BLAKE3 Merkle commitment over a range |
+| `explain_balance` | Reasoning | Why is an account at its current balance? |
+| `reconcile_account` | Reasoning | Does stored balance match sum of posted lines? |
+| `find_policy_violations` | Reasoning | Large txns, pending-too-long, missing refs, failures |
+| `summarize_period` | Reasoning | Natural-language period summary with Merkle commitment |
+| `audit_report` | Reasoning | Full cryptographic audit evidence report |
+
+### Financial reasoning tool usage
+
+The 5 reasoning tools (v1.4.0) are designed for multi-step financial questions:
+
+```bash
+# Explain why an account balance changed
+# Chains: account metadata → recent debits → recent credits → narrative
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"explain_balance","arguments":{"account":"SETTLEMENT"}}}'
+
+# Verify a balance matches its posted lines — use for pre-audit checks
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"reconcile_account","arguments":{"account":"CASH"}}}'
+
+# Scan for policy violations (large txns, pending-too-long, missing refs, failures)
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find_policy_violations","arguments":{}}}'
+
+# Period summary — entry counts, volume, Merkle root, chain status
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"summarize_period","arguments":{"from":"2026-09-01","to":"2026-09-30"}}}'
+
+# Full audit evidence report
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"audit_report","arguments":{"from":"2026-09-01","to":"2026-09-30","tenant":"Acme Financial"}}}'
+```
+
+### AGENT_SYSTEM_PROMPT — automatic financially-aware agent configuration
+
+As of v1.4.0, the MCP server returns a financially-aware `AGENT_SYSTEM_PROMPT`
+in the `initialize` response (`instructions` field). MCP clients that support
+this field (Claude Desktop, Cursor, Kiro) apply it automatically. It covers:
+amounts in minor units, double-entry rules, account type semantics, entry status
+lifecycle, tool routing guidance, and behavioral rules.
+
+No manual configuration needed — connect the client to the SSE endpoint and
+the financially-aware instructions are applied automatically.
 
 ### Firewall
 
