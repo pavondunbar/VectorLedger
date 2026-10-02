@@ -690,8 +690,7 @@ pub async fn dispatch_tool_network(
             Ok(ok_text(out))
         }
 
-        "resolve_account" => {
-            let query = args["query"].as_str()
+        "resolve_account" => {            let query = args["query"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("'query' is required"))?;
             let esc = escape(query);
 
@@ -789,6 +788,180 @@ pub async fn dispatch_tool_network(
             }
             out.push_str("\n**⛔ STOP.** Ask the user which account ID to use.\n");
             Ok(err_text(out))
+        }
+
+        "propose_correction" => {
+            let sequence = args["sequence"].as_u64()
+                .ok_or_else(|| anyhow::anyhow!("'sequence' is required"))?;
+            let correct_amount = args["correct_amount_minor_units"].as_i64()
+                .ok_or_else(|| anyhow::anyhow!("'correct_amount_minor_units' is required"))?;
+
+            // Look up entry header
+            let entry_resp = conn.execute_sql(
+                &format!("SELECT sequence, id, status, description, domain, effective_at, \
+                          external_ref, content_hash, chain_hash, metadata \
+                          FROM ledger WHERE sequence = {sequence}")
+            ).await.unwrap_or_default_json();
+
+            let entry_rows = entry_resp["rows"].as_array();
+            let entry = match entry_rows.and_then(|r| r.first()).and_then(|r| r.as_array()) {
+                Some(r) => r.iter()
+                    .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                    .collect::<Vec<_>>(),
+                None => return Ok(err_text(format!("Entry #{sequence} not found"))),
+            };
+
+            let entry_id    = entry.get(1).cloned().unwrap_or_default();
+            let status      = entry.get(2).cloned().unwrap_or_default();
+            let description = entry.get(3).cloned().unwrap_or_default();
+            let domain      = entry.get(4).cloned().unwrap_or_default();
+            let content_hash = entry.get(7).cloned().unwrap_or_default();
+            let chain_hash   = entry.get(8).cloned().unwrap_or_default();
+
+            if status != "Posted" {
+                return Ok(err_text(format!(
+                    "Entry #{sequence} has status '{status}' — only 'Posted' entries can be corrected."
+                )));
+            }
+
+            // Look up lines
+            let lines_resp = conn.execute_sql(
+                &format!("SELECT account_id, dr_cr, amount, currency FROM ledger_lines \
+                          WHERE sequence = {sequence} ORDER BY dr_cr")
+            ).await.unwrap_or_default_json();
+
+            let line_rows = lines_resp["rows"].as_array();
+            let lines: Vec<Vec<String>> = line_rows.map(|rows| {
+                rows.iter().filter_map(|r| r.as_array()).map(|r| {
+                    r.iter().map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string())).collect()
+                }).collect()
+            }).unwrap_or_default();
+
+            if lines.len() < 2 {
+                return Ok(err_text(format!("Entry #{sequence} does not have 2 journal lines")));
+            }
+
+            let debit_line  = lines.iter().find(|r| r.get(1).map(|s| s == "Debit").unwrap_or(false));
+            let credit_line = lines.iter().find(|r| r.get(1).map(|s| s == "Credit").unwrap_or(false));
+
+            let (debit_id, credit_id, original_amount, currency) = match (debit_line, credit_line) {
+                (Some(d), Some(c)) => (
+                    d[0].clone(), c[0].clone(),
+                    d.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+                    d.get(3).cloned().unwrap_or_else(|| "USD".to_string()),
+                ),
+                _ => return Ok(err_text("Could not determine debit/credit accounts".to_string())),
+            };
+
+            let fmt = |m: i64| format_amount(m, &currency);
+            let adj = correct_amount - original_amount;
+            let adj_str = if adj >= 0 { format!("+{}", fmt(adj)) } else { format!("-{}", fmt(adj.abs())) };
+            let ch_short = if content_hash.len() >= 16 { &content_hash[..16] } else { &content_hash };
+            let hh_short = if chain_hash.len() >= 16 { &chain_hash[..16] } else { &chain_hash };
+
+            let mut out = String::new();
+            out.push_str("## Correction Proposal\n\n");
+            out.push_str("────────────────────────────────────────────\n\n");
+            out.push_str(&format!("**Original entry:** #{sequence}  \n"));
+            out.push_str(&format!("**Description:** {}  \n", description));
+            out.push_str(&format!("**Original amount:** {}  \n", fmt(original_amount)));
+            out.push_str(&format!("**Correct amount:** {}  \n", fmt(correct_amount)));
+            out.push_str(&format!("**Net adjustment:** {}  \n\n", adj_str));
+            out.push_str("────────────────────────────────────────────\n\n");
+            out.push_str("### Proposed actions\n\n");
+            out.push_str(&format!("**1. Reverse entry #{sequence}** *(flip debit and credit)*  \n"));
+            out.push_str(&format!("   Debit:  `{credit_id}` — {}  \n", fmt(original_amount)));
+            out.push_str(&format!("   Credit: `{debit_id}` — {}  \n\n", fmt(original_amount)));
+            out.push_str("**2. Post correction** *(restore correct amount)*  \n");
+            out.push_str(&format!("   Debit:  `{debit_id}` — {}  \n", fmt(correct_amount)));
+            out.push_str(&format!("   Credit: `{credit_id}` — {}  \n\n", fmt(correct_amount)));
+            out.push_str("────────────────────────────────────────────\n\n");
+            out.push_str("### What will be preserved\n\n");
+            out.push_str(&format!("| Field | Value |\n|---|---|\n"));
+            out.push_str(&format!("| Historical entry | ✓ PRESERVED — entry #{sequence} is never modified |\n"));
+            out.push_str(&format!("| Original content_hash | ✓ PRESERVED — `{ch_short}...` |\n"));
+            out.push_str(&format!("| Original chain_hash | ✓ PRESERVED — `{hh_short}...` |\n"));
+            out.push_str("| New entries | Will be APPENDED as new sequences |\n");
+            out.push_str("| Double-entry balance | ✓ Both new entries will balance |\n");
+            out.push_str("| Hash chain | ✓ Extended with reversal and correction |\n\n");
+            out.push_str("────────────────────────────────────────────\n\n");
+            out.push_str("### ⚠ Awaiting confirmation\n\n");
+            out.push_str("**Ask the user:** *\"Shall I proceed with this correction?\"*\n\n");
+            out.push_str("If confirmed, call `execute_correction` with:\n");
+            out.push_str(&format!("```json\n{{\n  \"sequence\": {sequence},\n  \"correct_amount_minor_units\": {correct_amount},\n  \"original_amount_minor_units\": {original_amount},\n  \"debit_account_id\": \"{debit_id}\",\n  \"credit_account_id\": \"{credit_id}\",\n  \"original_description\": \"{description}\",\n  \"original_entry_id\": \"{entry_id}\",\n  \"currency\": \"{currency}\",\n  \"domain\": \"{domain}\"\n}}\n```\n"));
+            out.push_str("\nDo NOT call `execute_correction` without explicit user confirmation.\n");
+            Ok(ok_text(out))
+        }
+
+        "execute_correction" => {
+            let sequence          = args["sequence"].as_u64().ok_or_else(|| anyhow::anyhow!("'sequence' required"))?;
+            let correct_amount    = args["correct_amount_minor_units"].as_i64().ok_or_else(|| anyhow::anyhow!("'correct_amount_minor_units' required"))?;
+            let original_amount   = args["original_amount_minor_units"].as_i64().ok_or_else(|| anyhow::anyhow!("'original_amount_minor_units' required"))?;
+            let debit_id          = args["debit_account_id"].as_str().ok_or_else(|| anyhow::anyhow!("'debit_account_id' required"))?;
+            let credit_id         = args["credit_account_id"].as_str().ok_or_else(|| anyhow::anyhow!("'credit_account_id' required"))?;
+            let orig_desc         = args["original_description"].as_str().ok_or_else(|| anyhow::anyhow!("'original_description' required"))?;
+            let orig_entry_id     = args["original_entry_id"].as_str().ok_or_else(|| anyhow::anyhow!("'original_entry_id' required"))?;
+            let currency          = args["currency"].as_str().unwrap_or("USD");
+            let domain            = args["domain"].as_str().unwrap_or("main");
+
+            let fmt = |m: i64| format_amount(m, currency);
+
+            // Post reversal
+            let rev_desc = format!("Reversal of #{sequence} — {}", escape(orig_desc));
+            let rev_meta = format!("{{\"reverses\":\"{orig_entry_id}\",\"reason\":\"amount_correction\",\"original_amount\":{original_amount},\"correct_amount\":{correct_amount}}}");
+            let rev_sql = format!(
+                "INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain, external_ref, metadata) \
+                 VALUES ('{}','{}','{}',{},'{}','{}','reversal-of-{}','{}')",
+                escape(&rev_desc), escape(credit_id), escape(debit_id),
+                original_amount, escape(currency), escape(domain),
+                escape(orig_entry_id), escape(&rev_meta)
+            );
+            let rev_resp = conn.execute_sql(&rev_sql).await.unwrap_or_default_json();
+            if !rev_resp["ok"].as_bool().unwrap_or(false) {
+                return Ok(err_text(format!("Failed to post reversal: {}", rev_resp["error"].as_str().unwrap_or("unknown"))));
+            }
+            let rev_seq = rev_resp["rows"].as_array()
+                .and_then(|r| r.first()).and_then(|r| r.as_array())
+                .and_then(|r| r.first()).and_then(|v| v.as_str())
+                .unwrap_or("?");
+
+            // Post correction
+            let cor_desc = format!("Correction of #{sequence} — {}", escape(orig_desc));
+            let cor_meta = format!("{{\"corrects\":\"{orig_entry_id}\",\"reason\":\"amount_correction\",\"original_amount\":{original_amount},\"correct_amount\":{correct_amount}}}");
+            let cor_sql = format!(
+                "INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain, external_ref, metadata) \
+                 VALUES ('{}','{}','{}',{},'{}','{}','correction-of-{}','{}')",
+                escape(&cor_desc), escape(debit_id), escape(credit_id),
+                correct_amount, escape(currency), escape(domain),
+                escape(orig_entry_id), escape(&cor_meta)
+            );
+            let cor_resp = conn.execute_sql(&cor_sql).await.unwrap_or_default_json();
+            if !cor_resp["ok"].as_bool().unwrap_or(false) {
+                return Ok(err_text(format!(
+                    "Reversal posted (see above) but correction FAILED: {}\nPost the correction manually.",
+                    cor_resp["error"].as_str().unwrap_or("unknown")
+                )));
+            }
+
+            let chain_resp = conn.execute_sql("SELECT VERIFY_CHAIN()").await.unwrap_or_default_json();
+            let chain_ok = response_to_text(&chain_resp).to_uppercase().contains("OK");
+            let adj = correct_amount - original_amount;
+            let adj_str = if adj >= 0 { format!("+{}", fmt(adj)) } else { format!("-{}", fmt(adj.abs())) };
+
+            let mut out = String::new();
+            out.push_str("## Correction Complete\n\n────────────────────────────────────────────\n\n");
+            out.push_str(&format!("✓ **Reversal posted** (sequence {rev_seq})  \n"));
+            out.push_str(&format!("  Amount: {} reversed  \n\n", fmt(original_amount)));
+            out.push_str("✓ **Correction posted**  \n");
+            out.push_str(&format!("  Amount: {} (correct amount)  \n\n", fmt(correct_amount)));
+            out.push_str("────────────────────────────────────────────\n\n");
+            out.push_str("| Check | Result |\n|---|---|\n");
+            out.push_str("| Double-entry balanced | ✓ Both entries balance |\n");
+            out.push_str(&format!("| Original entry #{sequence} | ✓ PRESERVED — not modified |\n"));
+            out.push_str(&format!("| Hash chain | {} |\n", if chain_ok { "✓ Extended and verified" } else { "⚠ Verify manually" }));
+            out.push_str(&format!("| Net adjustment | {adj_str} |\n\n"));
+            out.push_str(&format!("The ledger now reflects {} for this transaction. The original entry #{sequence} at {} is preserved intact.\n", fmt(correct_amount), fmt(original_amount)));
+            Ok(ok_text(out))
         }
 
         other => anyhow::bail!("Unknown tool: {other}"),

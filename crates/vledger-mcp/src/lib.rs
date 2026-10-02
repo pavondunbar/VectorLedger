@@ -231,7 +231,22 @@ You can call the following tools:
 6. When a question is ambiguous (which account? which period?), ask for clarification
    rather than guessing.
 
-## MANDATORY write operation protocol
+## MANDATORY correction workflow
+
+When a user wants to change the amount, description, or any field of a posted entry:
+
+1. Call `propose_correction` with the sequence number and correct amount.
+2. Show the user the FULL proposal — original amount, reversal, correction, net
+   adjustment, what is preserved — exactly as returned by the tool.
+3. Ask: *"Shall I proceed with this correction?"*
+4. Only call `execute_correction` after explicit user confirmation.
+5. Never call `post_entry` directly to correct an existing entry.
+6. Never attempt UPDATE or DELETE — the ledger is append-only by design.
+
+The correct accounting workflow for corrections is:
+  Original → Reversal (-original amount) → Correction (+correct amount)
+
+This preserves the historical record while updating the ledger's economic state.
 
 Before calling `post_entry` for any transaction involving named individuals or entities:
 
@@ -471,6 +486,55 @@ pub fn tool_list() -> Value {
                     },
                     "required": ["query"]
                 }
+            },
+            {
+                "name": "propose_correction",
+                "description": "Step 1 of the correction workflow. When a user wants to change the amount \
+                                of a posted entry, call this tool FIRST. It looks up the original entry, \
+                                constructs the full reversal + correction plan, and returns a structured \
+                                proposal showing exactly what will happen — BEFORE anything is written. \
+                                The agent MUST show this proposal to the user and receive explicit \
+                                confirmation before calling execute_correction. \
+                                Never skip this step and go directly to execute_correction or post_entry.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sequence": {
+                            "type": "integer",
+                            "description": "The sequence number of the entry to correct."
+                        },
+                        "correct_amount_minor_units": {
+                            "type": "integer",
+                            "description": "The correct amount in minor units (e.g. 40192 for $401.92 USD)."
+                        }
+                    },
+                    "required": ["sequence", "correct_amount_minor_units"]
+                }
+            },
+            {
+                "name": "execute_correction",
+                "description": "Step 2 of the correction workflow. Execute the reversal and correction \
+                                entries ONLY after propose_correction has been shown to the user and they \
+                                have explicitly confirmed they want to proceed. Posts the reversal entry \
+                                (flipped debit/credit at original amount) and the correction entry \
+                                (correct amount), then verifies chain integrity and returns a full \
+                                confirmation summary.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sequence":                    { "type": "integer", "description": "Original entry sequence number." },
+                        "correct_amount_minor_units":  { "type": "integer", "description": "Correct amount in minor units." },
+                        "original_amount_minor_units": { "type": "integer", "description": "Original amount in minor units (from propose_correction)." },
+                        "debit_account_id":            { "type": "string",  "description": "UUID of the original debit account." },
+                        "credit_account_id":           { "type": "string",  "description": "UUID of the original credit account." },
+                        "original_description":        { "type": "string",  "description": "Description of the original entry." },
+                        "original_entry_id":           { "type": "string",  "description": "UUID of the original entry." },
+                        "currency":                    { "type": "string",  "description": "Currency code (default: USD)." },
+                        "domain":                      { "type": "string",  "description": "Domain (default: main)." }
+                    },
+                    "required": ["sequence", "correct_amount_minor_units", "original_amount_minor_units",
+                                 "debit_account_id", "credit_account_id", "original_description", "original_entry_id"]
+                }
             }
         ]
     })
@@ -550,7 +614,7 @@ async fn handle_health() -> impl IntoResponse {
         "ok": true,
         "service": "vledger-mcp",
         "version": env!("CARGO_PKG_VERSION"),
-        "tools": 13
+        "tools": 15
     }))
 }
 
