@@ -1821,6 +1821,7 @@ Any OpenAI-compatible chat completions endpoint works. Set `OPENAI_BASE_URL` and
 | Provider | `OPENAI_BASE_URL` | `OPENAI_MODEL` examples | Notes |
 |---|---|---|---|
 | **OpenAI** (default) | `https://api.openai.com/v1` | `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo` | Default — no env var needed |
+| **xAI Grok** | `https://api.x.ai/v1` | `grok-3`, `grok-3-mini`, `grok-2` | xAI's Grok models; API key from console.x.ai |
 | **Anthropic** | `https://api.anthropic.com/v1` | `claude-opus-4-5`, `claude-sonnet-4-5` | Requires Anthropic API key |
 | **Groq** | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile`, `mixtral-8x7b-32768` | Fast inference, free tier available |
 | **Together AI** | `https://api.together.xyz/v1` | `meta-llama/Llama-3-70b-chat-hf` | Good for open models |
@@ -1842,6 +1843,34 @@ export OPENAI_MODEL=llama3.2
 
 vledger sql --ask "show me the last 5 transactions"
 ```
+
+**Example — using xAI Grok:**
+
+```bash
+export OPENAI_API_KEY=xai-...   # Grok API key from console.x.ai
+export OPENAI_BASE_URL=https://api.x.ai/v1
+export OPENAI_MODEL=grok-3
+
+vledger sql --ask "show me all payments over $10,000 last week"
+vledger sql --ask "what is the balance of the CASH account"
+```
+
+**Example — using Kiro with Grok:**
+
+Kiro itself uses whatever model is configured in your Kiro session, but `--ask`
+is a separate CLI call that goes directly to the LLM you configure. To use Grok
+as the translation engine while working inside Kiro:
+
+```bash
+export OPENAI_API_KEY=xai-...
+export OPENAI_BASE_URL=https://api.x.ai/v1
+export OPENAI_MODEL=grok-3
+
+# Run this from a terminal inside or alongside your Kiro session
+vledger sql --ask "list all accounts with a balance over $50,000"
+```
+
+Kiro itself orchestrates the workflow; Grok handles the SQL translation.
 
 **Example — using Groq (fast, free tier):**
 
@@ -2279,6 +2308,99 @@ If that returns successfully, every AI client above will work.
 
 ---
 
+##### Option I — xAI Grok (Python agent via MCP)
+
+Grok's API is fully OpenAI-compatible. Use it as the reasoning engine behind
+any of the Python MCP clients (LangChain, OpenAI Agents SDK, LlamaIndex) by
+swapping the LLM initialisation.
+
+**With LangChain:**
+
+```bash
+pip install langchain-mcp-adapters langchain-openai langgraph
+```
+
+```python
+import asyncio, os
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from langchain_mcp_adapters.tools import load_mcp_tools
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+
+async def main():
+    # For cloud: keep your SSH tunnel running, then use 127.0.0.1:3000
+    async with sse_client("http://127.0.0.1:3000/sse") as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = await load_mcp_tools(session)
+
+            # Point LangChain at xAI's Grok endpoint
+            llm = ChatOpenAI(
+                model="grok-3",
+                openai_api_key=os.environ["XAI_API_KEY"],
+                openai_api_base="https://api.x.ai/v1",
+            )
+            agent = create_react_agent(llm, tools)
+
+            result = await agent.ainvoke({
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        "Show me all failed transactions from the last 7 days, "
+                        "then verify the chain integrity and summarise the findings."
+                    )
+                }]
+            })
+            print(result["messages"][-1].content)
+
+asyncio.run(main())
+```
+
+**With OpenAI Agents SDK:**
+
+```bash
+pip install openai-agents mcp
+```
+
+```python
+import asyncio, os
+from openai import AsyncOpenAI
+from agents import Agent, Runner, set_default_openai_client
+from agents.mcp import MCPServerSse
+
+async def main():
+    # Point the Agents SDK at xAI
+    grok_client = AsyncOpenAI(
+        api_key=os.environ["XAI_API_KEY"],
+        base_url="https://api.x.ai/v1",
+    )
+    set_default_openai_client(grok_client)
+
+    # For cloud: SSH tunnel must be running first
+    async with MCPServerSse("http://127.0.0.1:3000/sse") as vledger:
+        agent = Agent(
+            name="VectorLedger Grok Agent",
+            model="grok-3",
+            instructions=(
+                "You are a financial ledger assistant with direct access to VectorLedger. "
+                "Use the available tools to answer questions, post entries, and verify integrity."
+            ),
+            mcp_servers=[vledger],
+        )
+        result = await Runner.run(
+            agent,
+            "What are the top 5 accounts by balance? Verify the chain after showing me."
+        )
+        print(result.final_output)
+
+asyncio.run(main())
+```
+
+Get a Grok API key at [console.x.ai](https://console.x.ai).
+
+---
+
 #### Client selection guide
 
 Not sure which option to pick? Use this:
@@ -2286,9 +2408,11 @@ Not sure which option to pick? Use this:
 | You want to… | Best option |
 |---|---|
 | Ask quick questions from the terminal | `vledger sql --ask` (Part 1) |
+| Use xAI Grok for SQL translation | `--ask` with Grok env vars (Part 1) |
 | Chat with your ledger in a GUI | **Claude Desktop** (Option B) |
 | Work inside VS Code | **Continue.dev** (Option D) or **Cursor** (Option C) |
 | Work inside Kiro CLI | **Kiro** (Option A) |
+| Use Grok as the agent reasoning engine | **LangChain + Grok** or **OpenAI Agents SDK + Grok** (Option I) |
 | Build a Python automation or agent pipeline | **LangChain** (Option E) or **OpenAI Agents SDK** (Option F) |
 | Integrate from a script, cron job, or monitoring system | **Raw HTTP / curl** (Option H) |
 | Build a RAG or document-query system | **LlamaIndex** (Option G) |
