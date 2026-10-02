@@ -127,6 +127,8 @@ pub(crate) struct AppState {
     pub network: Option<Arc<network::NetworkConnection>>,
     /// Broadcast channel used to push SSE events to connected clients.
     pub sse_tx: broadcast::Sender<String>,
+    /// Bind address used to construct the absolute message URL for SSE clients.
+    pub bind_addr: String,
 }
 
 // ── MCP tool registry ─────────────────────────────────────────────────────────
@@ -437,14 +439,15 @@ pub fn tool_list() -> Value {
 /// `GET /sse` — open an SSE stream and advertise the `/message` endpoint.
 async fn handle_sse(State(state): State<AppState>) -> impl IntoResponse {
     let mut rx = state.sse_tx.subscribe();
+    let message_url = format!("http://{}/message", state.bind_addr);
 
     let stream = async_stream::stream! {
-        // Send the MCP endpoint event immediately so the client knows where
-        // to POST its JSON-RPC requests.
+        // Send the MCP endpoint event with the full absolute URL so that
+        // clients like Kiro V3 that require a full URL can resolve it.
         yield Ok::<Event, std::convert::Infallible>(
             Event::default()
                 .event("endpoint")
-                .data("/message")
+                .data(message_url)
         );
 
         // Forward any broadcast messages (server-initiated notifications).
@@ -595,6 +598,7 @@ impl McpServer {
                 session: None,
                 network: Some(net),
                 sse_tx,
+                bind_addr: self.config.bind.clone(),
             }
         } else {
             // Direct mode — authenticate against local user store
@@ -610,6 +614,7 @@ impl McpServer {
                 session: Some(session),
                 network: None,
                 sse_tx,
+                bind_addr: self.config.bind.clone(),
             }
         };
 
