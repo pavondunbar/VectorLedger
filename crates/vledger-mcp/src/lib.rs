@@ -464,16 +464,32 @@ async fn handle_sse(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// `POST /message` — receive a JSON-RPC 2.0 request and return the response.
+///
+/// Notifications (requests without an `id`) must receive NO response per the
+/// JSON-RPC spec. We return HTTP 204 No Content for those.
 async fn handle_message(
     State(state): State<AppState>,
     Json(req): Json<JsonRpcRequest>,
-) -> Json<JsonRpcResponse> {
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // JSON-RPC notifications have no `id` — return 204, no body.
+    let is_notification = req.id.is_none();
+
+    if is_notification {
+        // Still dispatch so the server can act on it (e.g. log it),
+        // but do not return any response body.
+        let _ = dispatch(state, req).await;
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     let id = req.id.clone();
     let resp = dispatch(state, req).await;
     Json(match resp {
         Ok(result) => JsonRpcResponse::ok(id, result),
         Err(e) => JsonRpcResponse::err(id, -32000, e.to_string()),
-    })
+    }).into_response()
 }
 
 /// `GET /health` — simple liveness check.
