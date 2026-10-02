@@ -2573,7 +2573,7 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "vledger"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-audit"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "blake3",
  "chrono",
@@ -2637,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-bench"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-compliance"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "chrono",
  "serde",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-crypto"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-foureyes"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "chrono",
  "hex",
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-hsm"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-index"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "bincode",
  "hex",
@@ -2737,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-kani"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "vledger-crypto",
  "vledger-ledger",
@@ -2747,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-ledger"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "bincode",
  "blake3",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-license"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-mcp"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-pages"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "bincode",
  "chrono",
@@ -2833,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-pgwire"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2856,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-replication"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-secrets"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-server"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2941,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-sql"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "chrono",
  "hex",
@@ -2959,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-transaction"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "bincode",
  "blake3",
@@ -2977,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-wal"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "aes-gcm",
  "bincode",

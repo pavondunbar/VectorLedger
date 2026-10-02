@@ -474,12 +474,22 @@ async fn handle_message(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    // Log every incoming request so we can debug client handshakes.
+    tracing::debug!(
+        method = %req.method,
+        id = ?req.id,
+        "MCP request received"
+    );
+    tracing::info!(
+        method = %req.method,
+        has_id = req.id.is_some(),
+        "MCP request"
+    );
+
     // JSON-RPC notifications have no `id` — return 204, no body.
     let is_notification = req.id.is_none();
 
     if is_notification {
-        // Still dispatch so the server can act on it (e.g. log it),
-        // but do not return any response body.
         let _ = dispatch(state, req).await;
         return StatusCode::NO_CONTENT.into_response();
     }
@@ -553,6 +563,18 @@ async fn dispatch(state: AppState, req: JsonRpcRequest) -> Result<Value> {
 }
 
 // ── McpServer ─────────────────────────────────────────────────────────────────
+
+/// Fallback handler — logs any request to an unexpected path so we can
+/// debug client behaviour during development.
+async fn handle_fallback(req: axum::extract::Request) -> impl IntoResponse {
+    use axum::http::StatusCode;
+    tracing::warn!(
+        method = %req.method(),
+        uri    = %req.uri(),
+        "MCP server received request to unknown path"
+    );
+    StatusCode::NOT_FOUND
+}
 
 /// The MCP HTTP server.
 ///
@@ -638,6 +660,9 @@ impl McpServer {
             .route("/sse", get(handle_sse))
             .route("/message", post(handle_message))
             .route("/health", get(handle_health))
+            // Kiro V3 may POST to the SSE path directly — handle both
+            .route("/sse", post(handle_message))
+            .fallback(handle_fallback)
             .with_state(state)
             .layer(
                 tower_http::cors::CorsLayer::new()
@@ -648,7 +673,8 @@ impl McpServer {
                         axum::http::Method::OPTIONS,
                     ])
                     .allow_headers(tower_http::cors::Any),
-            );
+            )
+            .layer(tower_http::trace::TraceLayer::new_for_http());
 
         let listener = tokio::net::TcpListener::bind(&self.config.bind)
             .await
