@@ -642,8 +642,7 @@ pub async fn dispatch_tool_network(
 
         "audit_report" => {
             let from   = args["from"].as_str().ok_or_else(|| anyhow::anyhow!("'from' required"))?;
-            let to     = args["to"].as_str().ok_or_else(|| anyhow::anyhow!("'to' required"))?;
-            let tenant = args["tenant"].as_str().unwrap_or("VectorLedger Customer");
+            let to     = args["to"].as_str().ok_or_else(|| anyhow::anyhow!("'to' required"))?;            let tenant = args["tenant"].as_str().unwrap_or("VectorLedger Customer");
             let domain = args["domain"].as_str().unwrap_or("main");
             let from_ts = if from.contains('T') { from.to_string() } else { format!("{from}T00:00:00Z") };
             let to_ts   = if to.contains('T')   { to.to_string()   } else { format!("{to}T23:59:59Z") };
@@ -689,6 +688,107 @@ pub async fn dispatch_tool_network(
             out.push_str("\n## 4. Verification\n\n```bash\nvledger verify-audit-package --file audit.json\n```\n");
 
             Ok(ok_text(out))
+        }
+
+        "resolve_account" => {
+            let query = args["query"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("'query' is required"))?;
+            let esc = escape(query);
+
+            // Search by code, name, and UUID
+            let by_code = conn.execute_sql(
+                &format!("SELECT id, code, name, account_type, currency, domain, balance \
+                          FROM accounts WHERE code = '{esc}'")
+            ).await.unwrap_or_default_json();
+
+            let by_name = conn.execute_sql(
+                &format!("SELECT id, code, name, account_type, currency, domain, balance \
+                          FROM accounts WHERE name = '{esc}'")
+            ).await.unwrap_or_default_json();
+
+            let by_uuid = conn.execute_sql(
+                &format!("SELECT id, code, name, account_type, currency, domain, balance \
+                          FROM accounts WHERE id = '{esc}'")
+            ).await.unwrap_or_default_json();
+
+            // Search metadata for name mentions
+            let by_meta = conn.execute_sql(
+                &format!("SELECT sequence, description, metadata FROM ledger \
+                          WHERE metadata LIKE '%{esc}%' LIMIT 5")
+            ).await.unwrap_or_default_json();
+
+            // Collect unique matches across all three lookups
+            let mut matches: Vec<Vec<String>> = Vec::new();
+            for resp in [&by_code, &by_name, &by_uuid] {
+                if let Some(rows) = resp["rows"].as_array() {
+                    for row in rows {
+                        if let Some(vals) = row.as_array() {
+                            let v: Vec<String> = vals.iter()
+                                .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                                .collect();
+                            if !matches.iter().any(|m| m.first() == v.first()) {
+                                matches.push(v);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut out = format!("## Account Resolution — \"{query}\"\n\n");
+
+            if matches.is_empty() {
+                // Check metadata mentions
+                let meta_rows = by_meta["rows"].as_array()
+                    .map(|a| a.len()).unwrap_or(0);
+
+                out.push_str("### ✗ NOT FOUND\n\n");
+                out.push_str(&format!("No account found matching `{query}`.\n\n"));
+
+                if meta_rows > 0 {
+                    out.push_str("This name appears in transaction metadata, but metadata names \
+                                  do NOT identify accounts — they are free-text fields. \
+                                  A person's name in metadata cannot be used to determine \
+                                  their account ID.\n\n");
+                }
+
+                out.push_str("**⛔ STOP — do not post this entry.**\n\n");
+                out.push_str("Ask the user to provide the exact account code or UUID, \
+                              or look up prior transactions for this person and identify \
+                              their account_id from the ledger_lines table.\n\n");
+                out.push_str("Never assign a random or unverified account to a named individual.\n");
+
+                return Ok(err_text(out));
+            }
+
+            if matches.len() == 1 {
+                let r = &matches[0];
+                out.push_str("### ✓ FOUND — single match\n\n");
+                out.push_str("| Field | Value |\n|---|---|\n");
+                let fields = ["Account ID", "Code", "Name", "Type", "Currency", "Domain", "Balance"];
+                for (i, field) in fields.iter().enumerate() {
+                    let val = r.get(i).map(|s| s.as_str()).unwrap_or("?");
+                    out.push_str(&format!("| {field} | `{val}` |\n"));
+                }
+                out.push_str("\n✓ Confirmed. Use the Account ID above in `post_entry`.\n\n");
+                out.push_str("**Confirm with the user** that this is the correct account \
+                              before posting.\n");
+                return Ok(ok_text(out));
+            }
+
+            // Multiple matches
+            out.push_str(&format!("### ⚠ {} MATCHES — disambiguation required\n\n", matches.len()));
+            out.push_str("| Account ID | Code | Name | Type | Balance |\n|---|---|---|---|---|\n");
+            for r in &matches {
+                out.push_str(&format!("| `{}` | {} | {} | {} | {} |\n",
+                    r.get(0).map(|s| s.as_str()).unwrap_or("?"),
+                    r.get(1).map(|s| s.as_str()).unwrap_or("?"),
+                    r.get(2).map(|s| s.as_str()).unwrap_or("?"),
+                    r.get(3).map(|s| s.as_str()).unwrap_or("?"),
+                    r.get(6).map(|s| s.as_str()).unwrap_or("?"),
+                ));
+            }
+            out.push_str("\n**⛔ STOP.** Ask the user which account ID to use.\n");
+            Ok(err_text(out))
         }
 
         other => anyhow::bail!("Unknown tool: {other}"),

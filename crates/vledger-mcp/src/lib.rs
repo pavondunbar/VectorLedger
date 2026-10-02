@@ -230,7 +230,27 @@ You can call the following tools:
    before proceeding.
 6. When a question is ambiguous (which account? which period?), ask for clarification
    rather than guessing.
-"#;
+
+## MANDATORY write operation protocol
+
+Before calling `post_entry` for any transaction involving named individuals or entities:
+
+1. Call `resolve_account` for EVERY named party (debit side AND credit side).
+2. If resolve_account returns NOT_FOUND or MULTIPLE_FOUND — STOP. Do not post.
+   Ask the user to provide the correct account code or UUID.
+3. If resolve_account returns a single confirmed match — show the user the
+   account details and ask them to confirm before posting.
+4. Only call `post_entry` after explicit user confirmation of the resolved accounts.
+
+This is the identity → authorization → accounting chain:
+- Identity:      Who is this person? (resolve_account)
+- Authorization: Is this the right account? (user confirms)
+- Accounting:    Record the double-entry (post_entry)
+
+NEVER skip steps 1–3. NEVER assign a random or unverified account to a named
+individual. Cryptographic integrity proves the recorded transaction wasn't altered —
+it does NOT prove the transaction was correctly authorized or that the accounts
+were correctly identified. That responsibility belongs to the agent and the user."#;
 
 /// Returns the static MCP `tools/list` response payload describing every
 /// available tool and its JSON Schema input shape.
@@ -429,6 +449,28 @@ pub fn tool_list() -> Value {
                     },
                     "required": ["from", "to"]
                 }
+            },
+            {
+                "name": "resolve_account",
+                "description": "MANDATORY before any write operation involving a named person or entity. \
+                                Resolves an account by code, name, or UUID and returns the authoritative \
+                                account ID. If no match is found, returns NOT_FOUND and instructs the agent \
+                                to STOP and ask the user — never guess or use a random account. If multiple \
+                                matches are found, returns all candidates for the user to disambiguate. \
+                                This tool enforces the identity→authorization→accounting separation: \
+                                the agent must never infer which account belongs to a named individual \
+                                without explicit confirmation.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The name, account code, or UUID to resolve. \
+                                            Examples: 'Duane Livingston', 'CASH', 'c164acd1-f975-41fc-ae78-d0598d803138'"
+                        }
+                    },
+                    "required": ["query"]
+                }
             }
         ]
     })
@@ -508,7 +550,7 @@ async fn handle_health() -> impl IntoResponse {
         "ok": true,
         "service": "vledger-mcp",
         "version": env!("CARGO_PKG_VERSION"),
-        "tools": 12
+        "tools": 13
     }))
 }
 

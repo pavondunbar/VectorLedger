@@ -1951,6 +1951,10 @@ SELECT MERKLE_ROOT(seq)             -- root for a single entry
 5. For "posted" or "committed" transactions, filter status = 'Posted'.
 6. Prefer point-lookups (sequence = N) and explicit LIMIT clauses.
    Unbounded full-table scans are capped at 10,000 rows automatically.
+7. NEVER infer account identity from a person's name alone. A person's name
+   appearing in metadata does not identify their account. Always use
+   the `resolve_account` MCP tool to look up the authoritative account ID
+   before constructing any INSERT INTO ledger statement.
 "#;
 
 /// Translate a natural-language question to a VectorLedger SQL statement

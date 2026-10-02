@@ -49,6 +49,8 @@ pub fn dispatch_tool(
         "find_policy_violations"  => tool_find_policy_violations(args, ledger, session),
         "summarize_period"        => tool_summarize_period(args, ledger, session),
         "audit_report"            => tool_audit_report(args, ledger, session),
+        // Identity and authorization tools
+        "resolve_account"         => tool_resolve_account(args, ledger, session),
         other => anyhow::bail!("Unknown tool: {other}"),
     }
 }
@@ -944,4 +946,164 @@ fn tool_audit_report(
                   audit — it does not by itself constitute regulatory compliance.*\n");
 
     Ok(ok_text(out))
+}
+
+// ── Identity resolution tool ──────────────────────────────────────────────────
+
+/// Resolve an account identity from a name, code, or UUID.
+///
+/// This is the MANDATORY first step before any write operation involving a
+/// named person or entity. It searches the accounts table by code, name,
+/// and UUID and returns either:
+///
+/// - FOUND: the account id, code, name, type, currency, and current balance
+/// - NOT_FOUND: a clear refusal with instructions — the agent must STOP and
+///   ask the user to clarify rather than guessing or using a random account
+/// - MULTIPLE_FOUND: a list of candidates — the agent must ask the user to
+///   disambiguate before proceeding
+///
+/// The agent MUST call this tool for EVERY named party before calling
+/// `post_entry`. Never infer account identity from transaction context.
+fn tool_resolve_account(
+    args: &Value,
+    ledger: &Arc<RwLock<LedgerStore>>,
+    session: &Session,
+) -> Result<Value> {
+    let query = args["query"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("'query' is required — name, code, or UUID to resolve"))?;
+
+    let esc = query.replace('\'', "''");
+
+    // Try exact code match
+    let by_code = run_sql(
+        &format!("SELECT id, code, name, account_type, currency, domain, balance \
+                  FROM accounts WHERE code = '{esc}'"),
+        ledger, session,
+    );
+
+    // Try exact name match
+    let by_name = run_sql(
+        &format!("SELECT id, code, name, account_type, currency, domain, balance \
+                  FROM accounts WHERE name = '{esc}'"),
+        ledger, session,
+    );
+
+    // Try UUID match
+    let by_uuid = run_sql(
+        &format!("SELECT id, code, name, account_type, currency, domain, balance \
+                  FROM accounts WHERE id = '{esc}'"),
+        ledger, session,
+    );
+
+    // Try metadata search in ledger for entries mentioning this name
+    let by_metadata = run_sql(
+        &format!("SELECT sequence, description, metadata FROM ledger \
+                  WHERE metadata LIKE '%{esc}%' LIMIT 5"),
+        ledger, session,
+    );
+
+    // Collect all direct account matches
+    let mut matches: Vec<Vec<String>> = Vec::new();
+
+    for result in [by_code, by_name, by_uuid] {
+        if let Ok(r) = result {
+            for row in &r.rows {
+                let vals: Vec<String> = row.values.iter().map(|v| ledger_value_to_string(v)).collect();
+                // Deduplicate by account id (first column)
+                if !matches.iter().any(|m| m.first() == vals.first()) {
+                    matches.push(vals);
+                }
+            }
+        }
+    }
+
+    let mut out = format!("## Account Resolution — \"{query}\"\n\n");
+
+    if matches.is_empty() {
+        // No direct account match — check if they appear in transaction metadata
+        let metadata_rows = by_metadata.ok()
+            .map(|r| rows_as_strings(&r))
+            .unwrap_or_default();
+
+        out.push_str("### ✗ NOT FOUND\n\n");
+        out.push_str(&format!(
+            "No account found with code, name, or UUID matching `{query}`.\n\n"
+        ));
+
+        if !metadata_rows.is_empty() {
+            out.push_str("This name appears in transaction metadata (as sender/receiver), \
+                          but VectorLedger accounts use numeric codes — the person's name \
+                          in metadata does not identify their account.\n\n");
+            out.push_str("**Recent transactions mentioning this name:**\n\n");
+            for row in &metadata_rows {
+                let seq  = row.get(0).map(|s| s.as_str()).unwrap_or("?");
+                let desc = row.get(1).map(|s| s.as_str()).unwrap_or("?");
+                out.push_str(&format!("- Sequence {seq}: {desc}\n"));
+            }
+            out.push('\n');
+            out.push_str("To find the actual account, look up the ledger_lines for one \
+                          of these entries and identify the account UUID from the \
+                          `account_id` column. Then use that UUID as the debit or credit \
+                          account in `post_entry`.\n\n");
+        }
+
+        out.push_str("**⛔ STOP — do not post this entry.**\n\n");
+        out.push_str("The correct action is to:\n");
+        out.push_str("1. Ask the user to provide the exact account code or UUID for each party, OR\n");
+        out.push_str("2. Ask the user to look up the account in their system of record and provide it, OR\n");
+        out.push_str("3. Use `query_ledger` with `SELECT * FROM ledger_lines WHERE account_id = '<uuid>'` \
+                      to confirm an account belongs to the correct person before using it.\n\n");
+        out.push_str("Never assign a random or unverified account to a named individual.\n");
+
+        return Ok(err_text(out));
+    }
+
+    if matches.len() == 1 {
+        let r = &matches[0];
+        let acct_id   = r.get(0).map(|s| s.as_str()).unwrap_or("?");
+        let acct_code = r.get(1).map(|s| s.as_str()).unwrap_or("?");
+        let acct_name = r.get(2).map(|s| s.as_str()).unwrap_or("?");
+        let acct_type = r.get(3).map(|s| s.as_str()).unwrap_or("?");
+        let currency  = r.get(4).map(|s| s.as_str()).unwrap_or("?");
+        let domain    = r.get(5).map(|s| s.as_str()).unwrap_or("?");
+        let balance: i64 = r.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        out.push_str("### ✓ FOUND — single match\n\n");
+        out.push_str("| Field | Value |\n|---|---|\n");
+        out.push_str(&format!("| Account ID | `{acct_id}` |\n"));
+        out.push_str(&format!("| Code | {acct_code} |\n"));
+        out.push_str(&format!("| Name | {acct_name} |\n"));
+        out.push_str(&format!("| Type | {acct_type} |\n"));
+        out.push_str(&format!("| Currency | {currency} |\n"));
+        out.push_str(&format!("| Domain | {domain} |\n"));
+        out.push_str(&format!("| Balance | {} minor units |\n\n", balance));
+        out.push_str("✓ This account can be used in `post_entry` as `debit_account` or \
+                      `credit_account` using the Account ID above.\n\n");
+        out.push_str("**Before posting, confirm with the user** that this is the correct \
+                      account for the intended party.\n");
+
+        return Ok(ok_text(out));
+    }
+
+    // Multiple matches — must disambiguate
+    out.push_str(&format!("### ⚠ MULTIPLE MATCHES ({} accounts found)\n\n", matches.len()));
+    out.push_str("| Account ID | Code | Name | Type | Currency | Balance |\n|---|---|---|---|---|---|\n");
+    for r in &matches {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | {} |\n",
+            r.get(0).map(|s| s.as_str()).unwrap_or("?"),
+            r.get(1).map(|s| s.as_str()).unwrap_or("?"),
+            r.get(2).map(|s| s.as_str()).unwrap_or("?"),
+            r.get(3).map(|s| s.as_str()).unwrap_or("?"),
+            r.get(4).map(|s| s.as_str()).unwrap_or("?"),
+            r.get(6).map(|s| s.as_str()).unwrap_or("?"),
+        ));
+    }
+    out.push('\n');
+    out.push_str("**⛔ STOP — do not post this entry.**\n\n");
+    out.push_str("Multiple accounts match this query. Ask the user to specify \
+                  which account ID to use before proceeding.\n");
+
+    Ok(err_text(out))
 }
