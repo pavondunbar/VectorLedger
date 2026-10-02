@@ -97,7 +97,7 @@ pub struct ProofStep {
 }
 
 /// The complete result of a SQL query.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueryResult {
     /// Column names in result order.
     pub columns: Vec<String>,
