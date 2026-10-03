@@ -965,9 +965,9 @@ table with the result after each quarterly drill.
 ### Starting the MCP server
 
 The MCP server lets AI assistants (Claude Desktop, Cursor, Kiro, etc.) query and
-write to the ledger without writing SQL. As of v1.4.0 it exposes 12 tools —
-7 low-level query/write tools and 5 financial reasoning tools that chain multiple
-queries and return structured financial narratives.
+write to the ledger without writing SQL. As of v1.4.5 it exposes 15 tools —
+7 low-level query/write tools, 5 financial reasoning tools, 1 identity enforcement
+tool, and 2 correction workflow tools.
 
 Start it alongside `vledger start`:
 
@@ -1017,7 +1017,7 @@ curl -s http://127.0.0.1:3000/health
 Add this to your load-balancer health probe if running the MCP server behind a
 reverse proxy.
 
-### Tools — 12 total (v1.4.0)
+### Tools — 15 total (v1.4.5)
 
 | Tool | Category | Description |
 |---|---|---|
@@ -1033,6 +1033,9 @@ reverse proxy.
 | `find_policy_violations` | Reasoning | Large txns, pending-too-long, missing refs, failures |
 | `summarize_period` | Reasoning | Natural-language period summary with Merkle commitment |
 | `audit_report` | Reasoning | Full cryptographic audit evidence report |
+| `resolve_account` | Identity | Resolve name/code/UUID → authoritative account ID (mandatory before writes) |
+| `propose_correction` | Correction | Show reversal+correction plan before writing — Step 1 |
+| `execute_correction` | Correction | Post reversal+correction after user confirms — Step 2 |
 
 ### Financial reasoning tool usage
 
@@ -1061,13 +1064,55 @@ curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json
   -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"audit_report","arguments":{"from":"2026-09-01","to":"2026-09-30","tenant":"Acme Financial"}}}'
 ```
 
+### Identity enforcement — resolve_account (v1.4.4)
+
+**Mandatory before any write involving a named person or entity.** Never assign a
+random or unverified account to a named individual.
+
+```bash
+# Resolve by name — returns FOUND / NOT_FOUND / MULTIPLE_FOUND
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"resolve_account","arguments":{"query":"Duane Livingston"}}}'
+
+# Resolve by account code
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"resolve_account","arguments":{"query":"CASH"}}}'
+```
+
+The tool enforces the **identity → authorization → accounting** chain:
+- `NOT_FOUND` → ⛔ STOP — ask the operator for the correct account code/UUID
+- `MULTIPLE_FOUND` → ⛔ STOP — ask operator to disambiguate
+- `FOUND` (single) → show to operator, get confirmation, then `post_entry`
+
+### Correction workflow — propose_correction + execute_correction (v1.4.5)
+
+When an operator needs to correct an entry amount, the agent must show the full plan
+and get confirmation before writing anything. Use these tools instead of `post_entry`
+directly for corrections.
+
+```bash
+# Step 1: propose the correction (no writes)
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"propose_correction","arguments":{"sequence":12467895,"correct_amount_minor_units":40192}}}'
+
+# Step 2: execute ONLY after operator confirms
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"execute_correction","arguments":{"sequence":12467895,"correct_amount_minor_units":40192,"original_amount_minor_units":30192,"debit_account_id":"<uuid>","credit_account_id":"<uuid>","original_description":"Payment to Martha Mughrabi","original_entry_id":"de696756-1b49-4623-9ec6-3e82c6f9121d","currency":"USD","domain":"main"}}}'
+```
+
+The proposal output shows: original amount, correct amount, net adjustment, the
+reversal entry, the correction entry, what hashes are preserved, and an explicit
+stop gate before any write occurs.
+
 ### AGENT_SYSTEM_PROMPT — automatic financially-aware agent configuration
 
 As of v1.4.0, the MCP server returns a financially-aware `AGENT_SYSTEM_PROMPT`
 in the `initialize` response (`instructions` field). MCP clients that support
 this field (Claude Desktop, Cursor, Kiro) apply it automatically. It covers:
 amounts in minor units, double-entry rules, account type semantics, entry status
-lifecycle, tool routing guidance, and behavioral rules.
+lifecycle, tool routing guidance, mandatory `resolve_account` protocol before
+writes, mandatory `propose_correction` protocol before corrections, and behavioral
+rules (never fabricate data, always verify chain, confirm before posting).
 
 No manual configuration needed — connect the client to the SSE endpoint and
 the financially-aware instructions are applied automatically.

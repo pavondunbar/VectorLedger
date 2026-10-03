@@ -157,6 +157,82 @@ agent = Agent(
 )
 ```
 
+---
+
+### New in v1.4.4 — `resolve_account`: identity enforcement before writes
+
+Fixes a semantic integrity problem where the agent could assign random accounts to
+named individuals without verification — producing entries that were cryptographically
+correct but semantically wrong.
+
+**`resolve_account`** is now mandatory before any write involving named parties. It
+searches by code, name, and UUID and enforces a hard gate:
+
+| Result | Agent action |
+|---|---|
+| `✓ FOUND` (single match) | Show to user, get confirmation, then post |
+| `✗ NOT_FOUND` | ⛔ STOP — ask user for the correct account code/UUID |
+| `⚠ MULTIPLE_FOUND` | ⛔ STOP — ask user to disambiguate |
+
+If a name only appears in transaction metadata, the tool explains that metadata names
+are not account identities and halts the operation.
+
+This enforces the **identity → authorization → accounting** chain:
+the ledger guarantees cryptographic integrity; `resolve_account` guarantees semantic
+correctness — the right account belongs to the right person.
+
+---
+
+### New in v1.4.5 — Structured correction workflow
+
+When a user asks to change an amount on a posted entry, the agent now shows a full
+plan and waits for explicit confirmation before writing anything.
+
+**Step 1 — `propose_correction`** (writes nothing):
+
+```
+Correction Proposal
+────────────────────────────────────────────
+Original entry: #12467895   Description: Payment to Martha Mughrabi
+Original amount: $301.92    Correct amount: $401.92   Net adjustment: +$100.00
+
+Proposed actions:
+1. Reverse entry #12467895 (flip debit/credit) — $301.92
+2. Post correction — $401.92
+
+What will be preserved:
+  Historical entry    ✓ PRESERVED — entry #12467895 is never modified
+  Original hash       ✓ PRESERVED — 5a8b9ce38e7e...
+  New entries         WILL BE APPENDED as new sequences
+
+⚠ Awaiting confirmation — "Shall I proceed?"
+```
+
+**Step 2 — `execute_correction`** (only after user confirms):
+
+```
+✓ Reversal posted     (sequence 25000006)
+✓ Correction posted   (sequence 25000007)
+✓ Double-entry balanced
+✓ Original entry #12467895 PRESERVED
+✓ Hash chain extended and verified
+Net adjustment: +$100.00
+```
+
+> *"Ask your ledger. Don't edit it."* The agent understands what you want.
+> VectorLedger's accounting rules determine how that request gets executed.
+
+---
+
+### v1.4.1–v1.4.3 — MCP server network mode and Kiro V3 compatibility
+
+- **v1.4.1** — `vledger mcp` auto-detects a running `vledger start` on port 5433
+  and switches to network mode, eliminating the data directory lock conflict
+- **v1.4.2** — SSE `endpoint` event now sends the full absolute URL
+  (`http://host:port/message`) required by Kiro CLI V3
+- **v1.4.3** — JSON-RPC notifications (no `id` field) now return HTTP 204
+  instead of `{"result":null}`, fixing Kiro V3 stuck on `◌ loading`
+
 
 
 Ask the ledger questions in plain English. An LLM translates the question to SQL,
@@ -225,9 +301,12 @@ Then add it to your MCP client's config:
 | `find_policy_violations` | Scan for large txns, pending-too-long, missing refs, failures (v1.4.0) |
 | `summarize_period` | Natural-language period summary with Merkle commitment (v1.4.0) |
 | `audit_report` | Full cryptographic audit evidence report for a period (v1.4.0) |
+| `resolve_account` | Resolve a name/code/UUID to an authoritative account ID before any write (v1.4.4) |
+| `propose_correction` | Show a structured reversal+correction plan before writing anything (v1.4.5) |
+| `execute_correction` | Execute a confirmed correction: post reversal + correction entries (v1.4.5) |
 
 The MCP server uses HTTP + SSE transport as defined by the MCP spec. The
-`GET /health` endpoint returns `{"ok":true}` for load-balancer health checks.
+`GET /health` endpoint returns `{"ok":true,"tools":15}` for load-balancer health checks.
 
 
 
@@ -1789,6 +1868,30 @@ vledger license --data-dir ./vledger-data
 
 ## Changelog
 
+### v1.4.5 — Structured correction workflow
+
+- **`propose_correction`** — Step 1: look up original entry, show full reversal+correction
+  plan (amounts, accounts, net adjustment, what is preserved) and wait for confirmation.
+  Nothing is written.
+- **`execute_correction`** — Step 2: after user confirms, post the reversal and correction
+  entries, verify chain, return full summary.
+- **`AGENT_SYSTEM_PROMPT`** updated with mandatory correction protocol.
+- *"Ask your ledger. Don't edit it."*
+
+### v1.4.4 — `resolve_account` identity enforcement
+
+- **`resolve_account`** — mandatory before any write involving named parties. Returns
+  FOUND/NOT_FOUND/MULTIPLE_FOUND. Explicit ⛔ STOP on ambiguous identity. Explains
+  why metadata names ≠ account identities.
+- Enforces identity → authorization → accounting chain.
+
+### v1.4.1–v1.4.3 — MCP network mode and Kiro V3 fixes
+
+- **v1.4.1** — `vledger mcp` auto-detects running server, uses network mode (no data
+  directory lock conflict)
+- **v1.4.2** — SSE endpoint event sends full absolute URL (Kiro V3 compatibility)
+- **v1.4.3** — HTTP 204 for JSON-RPC notifications; Kiro V3 `◌ loading` fixed
+
 ### v1.4.0 — Financial semantic layer, 5 new reasoning tools, agent system prompt
 
 - **Financial semantic layer for `--ask`** — `VLEDGER_SCHEMA_CONTEXT` rewritten
@@ -2005,7 +2108,7 @@ nohup vledger-mcp --data-dir /var/lib/vledger/data \
 
 ```bash
 curl -s http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp"}
+# {"ok":true,"service":"vledger-mcp","version":"1.4.5","tools":15}
 ```
 
 ---
@@ -2387,7 +2490,7 @@ ssh -i './YourKey.pem' \
 
 ```bash
 curl -s http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp"}
+# {"ok":true,"service":"vledger-mcp","version":"1.4.5","tools":15}
 ```
 
 If that returns successfully, every AI client above will work.
@@ -2509,6 +2612,8 @@ Not sure which option to pick? Use this:
 | Find compliance issues or suspicious transactions | `find_policy_violations` tool |
 | Summarize a period in natural language | `summarize_period` tool |
 | Generate an auditor-ready report | `audit_report` tool |
+| Resolve a person's name to their account before posting | `resolve_account` tool |
+| Correct an entry amount with full audit trail | `propose_correction` → confirm → `execute_correction` |
 
 ---
 

@@ -38,6 +38,9 @@ prefer to remain anonymous.
 - The financial AI reasoning tools (`explain_balance`, `reconcile_account`,
   `find_policy_violations`, `summarize_period`, `audit_report`) and their
   underlying SQL execution paths
+- The identity enforcement tool (`resolve_account`) and its account lookup logic
+- The correction workflow tools (`propose_correction`, `execute_correction`) and
+  their reversal/correction entry posting paths
 - Authentication and authorization logic
 - Cryptographic implementation correctness (key derivation, encryption,
   signing, hash chains)
@@ -98,12 +101,11 @@ confusion where a human operator comparing the inline display against
 
 The agentic AI layer was significantly upgraded. Security-relevant notes:
 
-- All 12 MCP tools (including the 5 new financial reasoning tools:
-  `explain_balance`, `reconcile_account`, `find_policy_violations`,
-  `summarize_period`, `audit_report`) execute through the same
+- All 15 MCP tools (including the 5 financial reasoning tools, `resolve_account`,
+  `propose_correction`, and `execute_correction`) execute through the same
   parse → plan → privilege-check → execute pipeline as direct SQL.
-  No tool bypasses RBAC. An `auditor` role cannot call `post_entry`
-  through a reasoning tool any more than through direct SQL.
+  No tool bypasses RBAC. An `auditor` role cannot call `post_entry` or
+  `execute_correction` through a tool any more than through direct SQL.
 - The `find_policy_violations` and `audit_report` tools read ledger data
   only — they make no writes and require at minimum the `auditor` role.
 - `AGENT_SYSTEM_PROMPT` is a static string constant with no secrets. It is
@@ -111,6 +113,26 @@ The agentic AI layer was significantly upgraded. Security-relevant notes:
 - The `--ask` flag sends only the user's question text and the static
   `VLEDGER_SCHEMA_CONTEXT` to the configured LLM endpoint. No ledger data,
   credentials, or key material is ever transmitted to the LLM provider.
+
+**`resolve_account` identity enforcement (v1.4.4)**
+
+The agent was observed assigning random Suspense accounts to named individuals
+without verification — producing entries that were cryptographically correct but
+semantically wrong. `resolve_account` enforces a mandatory identity gate before
+any write operation: it returns `NOT_FOUND` or `MULTIPLE_FOUND` with explicit
+stop instructions when account identity cannot be confirmed.
+
+Security note: the tool searches account codes, names, and UUIDs but does NOT
+expose all accounts in one call — it requires a specific query term. All lookups
+are subject to the caller's RBAC session.
+
+**Correction workflow (v1.4.5)**
+
+`propose_correction` and `execute_correction` implement a two-step write protocol
+with mandatory human confirmation between proposal and execution. Neither tool can
+modify or delete existing entries — both post new reversal and correction entries
+through the normal `post_entry` pipeline, subject to the same RBAC and financial
+invariant enforcement as any other write.
 
 **`MERKLE_ROOT()` single-argument form added (v1.0.37)**
 
@@ -179,13 +201,14 @@ vulnerabilities:
 - The MCP server (`vledger mcp` / `vledger-mcp`) does **not** implement TLS.
   It should be bound to `127.0.0.1` (the default) or placed behind a
   TLS-terminating reverse proxy when accessed over a network. All MCP tool
-  calls — including the 5 financial reasoning tools added in v1.4.0 —
-  go through the same RBAC enforcement as direct SQL; the MCP server
-  itself does not bypass any access control. The `--ask` flag sends the
-  natural-language question and the ledger schema context to a third-party
-  LLM endpoint — do not include sensitive data in the question text.
-  No ledger data is sent to the LLM; only the schema description and the
-  user's question string are transmitted.
+  calls — including the identity enforcement and correction workflow tools
+  added in v1.4.4 and v1.4.5 — go through the same RBAC enforcement as
+  direct SQL; the MCP server itself does not bypass any access control.
+  The `--ask` flag sends only the user's question text and the static schema
+  context to the LLM endpoint — no ledger data, credentials, or key material
+  is transmitted to the LLM provider. `resolve_account` enforces semantic
+  correctness (right account → right person) but cannot substitute for
+  organizational authorization policies outside the ledger engine.
 
 ## Fuzz-Found Vulnerabilities (fixed)
 

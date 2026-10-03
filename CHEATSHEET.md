@@ -388,6 +388,9 @@ The MCP server exposes VectorLedger as callable tools for any AI agent — no SQ
 | `find_policy_violations` | Reasoning | Large txns, pending-too-long, missing refs, failures |
 | `summarize_period` | Reasoning | Natural-language period summary |
 | `audit_report` | Reasoning | Full cryptographic audit evidence report |
+| `resolve_account` | Identity | Resolve name/code/UUID → authoritative account ID |
+| `propose_correction` | Correction | Show reversal+correction plan — Step 1 (no writes) |
+| `execute_correction` | Correction | Post reversal+correction after confirmation — Step 2 |
 
 ### Start the MCP server
 
@@ -808,6 +811,108 @@ These questions now trigger autonomous multi-step reasoning chains:
 "Reconcile yesterday's transactions"
 → list_accounts() → reconcile_account() for each account with activity
 ```
+
+---
+
+### resolve_account — identity enforcement before writes (v1.4.4)
+
+**MANDATORY before any write involving a named person or entity.**
+Never guess or assign a random account to a named individual.
+
+```bash
+# Resolve by name
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+    "name":"resolve_account",
+    "arguments":{"query":"Duane Livingston"}
+  }}'
+```
+
+Three possible results:
+
+| Result | What it means | Agent action |
+|---|---|---|
+| `✓ FOUND` | Single confirmed match — shows account ID, code, type, balance | Show to user, get confirmation, then post |
+| `✗ NOT_FOUND` | No account matches the name/code/UUID | ⛔ STOP — ask user for correct account code/UUID |
+| `⚠ MULTIPLE_FOUND` | More than one match | ⛔ STOP — ask user to pick the correct account |
+
+> **Important:** A person's name appearing in transaction metadata (e.g. `sender_name`)
+> does **not** identify their account. The tool explicitly explains this and halts.
+
+---
+
+### propose_correction + execute_correction — structured correction workflow (v1.4.5)
+
+When a user wants to change an amount on a posted entry, the agent must show the full
+plan and get confirmation before writing anything.
+
+**Step 1 — propose_correction (writes nothing):**
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+    "name":"propose_correction",
+    "arguments":{
+      "sequence": 12467895,
+      "correct_amount_minor_units": 40192
+    }
+  }}'
+```
+
+Returns the full structured proposal:
+
+```
+Correction Proposal
+────────────────────────────────────────────
+Original entry: #12467895
+Original amount: $301.92
+Correct amount:  $401.92
+Net adjustment: +$100.00
+
+Proposed actions:
+1. Reverse entry #12467895 (flip debit/credit) — $301.92
+2. Post correction — $401.92
+
+What will be preserved:
+  Historical entry    ✓ PRESERVED — never modified
+  Original hash       ✓ PRESERVED
+  New entries         WILL BE APPENDED
+
+⚠ Awaiting confirmation
+```
+
+**Step 2 — execute_correction (only after user confirms):**
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/message -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+    "name":"execute_correction",
+    "arguments":{
+      "sequence": 12467895,
+      "correct_amount_minor_units": 40192,
+      "original_amount_minor_units": 30192,
+      "debit_account_id": "<uuid-from-propose>",
+      "credit_account_id": "<uuid-from-propose>",
+      "original_description": "Payment to Martha Mughrabi",
+      "original_entry_id": "de696756-1b49-4623-9ec6-3e82c6f9121d",
+      "currency": "USD",
+      "domain": "main"
+    }
+  }}'
+```
+
+Returns confirmation:
+
+```
+✓ Reversal posted     (sequence 25000006)
+✓ Correction posted   (sequence 25000007)
+✓ Double-entry balanced
+✓ Original entry #12467895 PRESERVED
+✓ Hash chain extended and verified
+Net adjustment: +$100.00
+```
+
+> *"Ask your ledger. Don't edit it."*
 
 ---
 
@@ -1265,8 +1370,8 @@ print "────────────────────────�
 
 ```bash
 pkill vledger
-wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.0.39/vledger-v1.4.0-linux-aarch64.tar.gz
-tar -xzf vledger-v1.4.0-linux-aarch64.tar.gz
+wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.0.39/vledger-v1.4.5-linux-aarch64.tar.gz
+tar -xzf vledger-v1.4.5-linux-aarch64.tar.gz
 chmod +x vledger && sudo mv vledger $(which vledger)
 vledger --version
 ```
