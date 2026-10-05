@@ -18,6 +18,10 @@ pub enum Feature {
     AuditExportUnlimited,
     /// Multiple node deployments.
     MultiNode,
+    /// Agentic AI features: `vledger mcp` server and `vledger sql --ask`
+    /// natural-language query translation.
+    /// Available on Starter, Growth, and Enterprise tiers.
+    AgenticAi,
 }
 
 impl std::fmt::Display for Feature {
@@ -29,6 +33,7 @@ impl std::fmt::Display for Feature {
             Feature::ComplianceReport => "compliance_report",
             Feature::AuditExportUnlimited => "audit_export_unlimited",
             Feature::MultiNode => "multi_node",
+            Feature::AgenticAi => "agentic_ai",
         };
         write!(f, "{s}")
     }
@@ -44,6 +49,7 @@ impl std::str::FromStr for Feature {
             "compliance_report" => Ok(Feature::ComplianceReport),
             "audit_export_unlimited" => Ok(Feature::AuditExportUnlimited),
             "multi_node" => Ok(Feature::MultiNode),
+            "agentic_ai" => Ok(Feature::AgenticAi),
             other => Err(format!("unknown feature '{other}'")),
         }
     }
@@ -88,12 +94,15 @@ impl LicenseTier {
                 // No replication, no compliance report, 90-day audit export
                 // (enforced at export time by checking the license tier).
                 Feature::PgWire,
+                // Agentic AI: vledger mcp server and vledger sql --ask.
+                Feature::AgenticAi,
             ],
             LicenseTier::Growth => vec![
                 Feature::PgWire,
                 Feature::Replication,
                 Feature::ComplianceReport,
                 Feature::AuditExportUnlimited,
+                Feature::AgenticAi,
             ],
             LicenseTier::Enterprise => vec![
                 Feature::PgWire,
@@ -102,6 +111,7 @@ impl LicenseTier {
                 Feature::ComplianceReport,
                 Feature::AuditExportUnlimited,
                 Feature::MultiNode,
+                Feature::AgenticAi,
             ],
         }
     }

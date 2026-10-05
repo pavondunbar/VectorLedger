@@ -875,8 +875,7 @@ async fn main() -> Result<()> {
         Commands::SelfTestPhase3 => cmd_self_test_phase3().await,
         Commands::Mcp { bind, server, ca_cert, username, password } => {
             cmd_mcp(&cli.data_dir, &bind, server.as_deref(), ca_cert.as_deref(), username.as_deref(), password.as_deref()).await
-        }
-        // Phase 3
+        }        // Phase 3
         Commands::Backup { output } => cmd_backup(&cli.data_dir, output.as_deref()).await,
         Commands::Restore {
             from,
@@ -2044,6 +2043,18 @@ async fn cmd_sql(
     // a plain SQL string.
     let translated;
     let query: Option<&str> = if let Some(question) = ask {
+        // Gate --ask behind the AgenticAi license feature.
+        let license = vledger_license::LicenseStore::load_or_free(data_dir);
+        license
+            .require_feature(vledger_license::Feature::AgenticAi)
+            .map_err(|_| anyhow::anyhow!(
+                "The --ask feature requires a Starter, Growth, or Enterprise license.\n\
+                 \n\
+                 Current tier: {}\n\
+                 \n\
+                 To upgrade: contact pavon@vectorguardlabs.com",
+                license.tier
+            ))?;
         translated = translate_nl_to_sql(question).await?;
         eprintln!("→ SQL: {translated}");
         Some(&translated)
@@ -2663,6 +2674,7 @@ fn cmd_license(data_dir: &PathBuf) -> Result<()> {
         vledger_license::Feature::ComplianceReport,
         vledger_license::Feature::AuditExportUnlimited,
         vledger_license::Feature::MultiNode,
+        vledger_license::Feature::AgenticAi,
     ];
 
     println!("  Features:");
@@ -6350,6 +6362,20 @@ async fn cmd_mcp(
     password: Option<&str>,
 ) -> Result<()> {
     use std::sync::{Arc, RwLock};
+
+    // ── License gate ──────────────────────────────────────────────────────────
+    let license = vledger_license::LicenseStore::load_or_free(data_dir);
+    license
+        .require_feature(vledger_license::Feature::AgenticAi)
+        .map_err(|_| anyhow::anyhow!(
+            "The Agentic AI feature (vledger mcp) requires a Starter, Growth, or Enterprise license.\n\
+             \n\
+             Current tier: {}\n\
+             \n\
+             To upgrade: contact pavon@vectorguardlabs.com\n\
+             Pricing:    https://github.com/pavondunbar/VectorLedger#licensing",
+            license.tier
+        ))?;
 
     let resolved_username = username
         .map(|s| s.to_string())
