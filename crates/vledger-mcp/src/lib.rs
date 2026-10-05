@@ -30,6 +30,7 @@
 
 pub mod tools;
 pub mod network;
+pub mod counter;
 
 use std::sync::{Arc, RwLock};
 
@@ -40,12 +41,14 @@ use axum::response::IntoResponse;use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use vledger_ledger::LedgerStore;
 use vledger_server::auth::{Session, UserStore};
+
+pub use counter::{AgentQueryCounter, RunCounter, LIMIT_STARTER, LIMIT_GROWTH, LIMIT_UNLIMITED};
 
 // ── Public configuration ──────────────────────────────────────────────────────
 
@@ -58,6 +61,11 @@ pub struct McpConfig {
     pub username: String,
     /// Password for the above user.
     pub password: String,
+    /// Monthly Agent Run limit. 0 = unlimited (Enterprise).
+    /// Starter = 10, Growth = 100.
+    pub monthly_limit: u64,
+    /// Data directory used to persist the run counter.
+    pub data_dir: std::path::PathBuf,
 }
 
 impl Default for McpConfig {
@@ -66,6 +74,8 @@ impl Default for McpConfig {
             bind: "127.0.0.1:3000".to_string(),
             username: "admin".to_string(),
             password: String::new(),
+            monthly_limit: LIMIT_UNLIMITED,
+            data_dir: std::path::PathBuf::from("./vledger-data"),
         }
     }
 }
@@ -129,6 +139,8 @@ pub(crate) struct AppState {
     pub sse_tx: broadcast::Sender<String>,
     /// Bind address used to construct the absolute message URL for SSE clients.
     pub bind_addr: String,
+    /// Monthly Agent Run counter (shared across all SSE connections).
+    pub run_counter: Arc<Mutex<RunCounter>>,
 }
 
 // ── MCP tool registry ─────────────────────────────────────────────────────────
@@ -552,20 +564,19 @@ pub fn tool_list() -> Value {
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
 
 /// `GET /sse` — open an SSE stream and advertise the `/message` endpoint.
+///
+/// SSE connections are pure transport — they do NOT consume an Agent Query.
+/// Agent Queries are counted on `initialize` (one per conversation).
 async fn handle_sse(State(state): State<AppState>) -> impl IntoResponse {
     let mut rx = state.sse_tx.subscribe();
     let message_url = format!("http://{}/message", state.bind_addr);
 
     let stream = async_stream::stream! {
-        // Send the MCP endpoint event with the full absolute URL so that
-        // clients like Kiro V3 that require a full URL can resolve it.
         yield Ok::<Event, std::convert::Infallible>(
             Event::default()
                 .event("endpoint")
                 .data(message_url)
         );
-
-        // Forward any broadcast messages (server-initiated notifications).
         loop {
             match rx.recv().await {
                 Ok(msg) => yield Ok(Event::default().data(msg)),
@@ -575,7 +586,7 @@ async fn handle_sse(State(state): State<AppState>) -> impl IntoResponse {
         }
     };
 
-    Sse::new(stream)
+    Sse::new(stream).into_response()
 }
 
 /// `POST /message` — receive a JSON-RPC 2.0 request and return the response.
@@ -618,13 +629,27 @@ async fn handle_message(
 }
 
 /// `GET /health` — simple liveness check.
-async fn handle_health() -> impl IntoResponse {
-    Json(json!({
+async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
+    let counter = state.run_counter.lock().await;
+    let remaining = counter.remaining();
+    let mut resp = serde_json::json!({
         "ok": true,
         "service": "vledger-mcp",
         "version": env!("CARGO_PKG_VERSION"),
-        "tools": 15
-    }))
+        "tools": 15,
+        "agent_queries_used": counter.count(),
+        "agent_queries_limit": if counter.limit() == 0 {
+            serde_json::Value::String("unlimited".into())
+        } else {
+            serde_json::Value::Number(counter.limit().into())
+        },
+    });
+    if let Some(r) = remaining {
+        resp["agent_queries_remaining"] = serde_json::Value::Number(r.into());
+    } else {
+        resp["agent_queries_remaining"] = serde_json::Value::String("unlimited".into());
+    }
+    Json(resp)
 }
 
 // ── JSON-RPC dispatcher ───────────────────────────────────────────────────────
@@ -633,6 +658,29 @@ async fn dispatch(state: AppState, req: JsonRpcRequest) -> Result<Value> {
     match req.method.as_str() {
         // ── MCP lifecycle ─────────────────────────────────────────────────
         "initialize" => {
+            // ── Agent Query billing boundary ──────────────────────────────
+            // One `initialize` = one Agent Query. Every MCP client sends
+            // exactly one `initialize` per conversation regardless of how
+            // many tool calls the agent makes to answer the question.
+            // We count here (not at SSE connect or per tool call) so that:
+            //   - One human prompt = one billable query
+            //   - Complex workflows (5–10 tool calls) still = 1 query
+            //   - Failed queries that never reach initialize = 0 queries
+            {
+                let mut counter = state.run_counter.lock().await;
+                if let Err(e) = counter.consume() {
+                    // Return a JSON-RPC error — the agent will surface it
+                    // to the user with the upgrade message.
+                    return Err(anyhow::anyhow!(
+                        "Agent Query limit reached: {}",
+                        e
+                    ));
+                }
+                if let Some(remaining) = counter.remaining() {
+                    info!(remaining, "Agent Query started");
+                }
+            }
+
             Ok(json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
@@ -744,17 +792,33 @@ impl McpServer {
     pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
         let (sse_tx, _) = broadcast::channel::<String>(64);
 
+        // Open the monthly Agent Query counter.
+        let run_counter = Arc::new(Mutex::new(
+            counter::AgentQueryCounter::open(&self.config.data_dir, self.config.monthly_limit)
+                .map_err(|e| anyhow::anyhow!("Failed to open Agent Query counter: {e}"))?,
+        ));
+
+        {
+            let c = run_counter.lock().await;
+            let limit_str = if c.limit() == 0 { "unlimited".to_string() }
+                            else { c.limit().to_string() };
+            info!(
+                used = c.count(),
+                limit = %limit_str,
+                "Agent Run counter loaded"
+            );
+        }
+
         let state = if let Some(net) = self.network {
-            // Network mode — no local auth needed, connection already authenticated
             AppState {
                 ledger: None,
                 session: None,
                 network: Some(net),
                 sse_tx,
                 bind_addr: self.config.bind.clone(),
+                run_counter,
             }
         } else {
-            // Direct mode — authenticate against local user store
             let session = Arc::new(
                 self.user_store
                     .as_ref()
@@ -768,6 +832,7 @@ impl McpServer {
                 network: None,
                 sse_tx,
                 bind_addr: self.config.bind.clone(),
+                run_counter,
             }
         };
 
@@ -778,8 +843,7 @@ impl McpServer {
             // Kiro V3 may POST to the SSE path directly — handle both
             .route("/sse", post(handle_message))
             .fallback(handle_fallback)
-            .with_state(state)
-            .layer(
+            .with_state(state)            .layer(
                 tower_http::cors::CorsLayer::new()
                     .allow_origin(tower_http::cors::Any)
                     .allow_methods([
