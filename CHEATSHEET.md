@@ -1476,27 +1476,76 @@ plain English — no SQL required.
 
 ### On your EC2 instance (or local machine running VectorLedger)
 
-**Start the VectorLedger server:**
+**Step 1 — Start the VectorLedger server:**
 
 ```bash
 nohup vledger start --data-dir ~/vledger-data --with-proofs > nohup.out 2>&1 &
 until grep -q "Listening" nohup.out; do sleep 2; done && echo "Server ready."
 ```
 
-**Start the MCP server:**
+**Step 2 — Start the MCP server (choose ONE option):**
+
+---
+
+**Option A — Quick start (testing/dev)**
 
 ```bash
-nohup VLEDGER_CLI_PASSWORD=[YOUR-PASSWORD] vledger mcp \
-  --bind 127.0.0.1:3000 \
-  --username [YOUR-USERNAME] \
-  >> ~/mcp.log 2>&1 &
+export VLEDGER_CLI_PASSWORD=YOUR-PASSWORD
+nohup vledger mcp --bind 127.0.0.1:3000 --username admin >> ~/mcp.log 2>&1 &
 ```
 
-> See section 21 (Administration) for how to manage usernames and passwords.
-> Use a separate log file (`mcp.log`) — do not redirect to `nohup.out` or it
-> will overwrite the server startup log.
+Use a separate log file (`mcp.log`) — do not redirect to `nohup.out` or it
+will overwrite the server startup log.
 
-**Verify the MCP server is running:**
+---
+
+**Option B — Systemd service (production — survives reboots, no plain-text
+password on the command line, auto-restarts on crash)**
+
+Run these once to set it up:
+
+```bash
+# Create a protected credentials file
+sudo mkdir -p /etc/vledger
+sudo tee /etc/vledger/mcp.env << 'EOF'
+VLEDGER_CLI_PASSWORD=YOUR-PASSWORD
+VLEDGER_CLI_USER=admin
+EOF
+sudo chmod 600 /etc/vledger/mcp.env
+sudo chown root:root /etc/vledger/mcp.env
+
+# Create the systemd service
+sudo tee /etc/systemd/system/vledger-mcp.service << 'EOF'
+[Unit]
+Description=VectorLedger MCP Server
+After=network.target
+
+[Service]
+User=ubuntu
+EnvironmentFile=/etc/vledger/mcp.env
+ExecStart=/usr/local/bin/vledger mcp --bind 127.0.0.1:3000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable vledger-mcp
+sudo systemctl start vledger-mcp
+```
+
+After this, the MCP server starts automatically on every reboot. You never
+need to run `nohup` again for the MCP server.
+
+> **Option A and Option B are mutually exclusive — pick one.**
+> If you set up the systemd service (Option B), do not also run the `nohup`
+> command — they will both try to bind port 3000 and one will fail.
+
+---
+
+**Step 3 — Verify the MCP server is running:**
 
 ```bash
 curl -s http://127.0.0.1:3000/health | jq
@@ -1590,8 +1639,10 @@ Remove journal entry 16,794,375.
 |---|---|---|
 | `curl` returns nothing on EC2 | MCP server crashed | `cat ~/mcp.log` to see the error |
 | `curl` returns nothing locally | SSH tunnel not running | Re-run the tunnel command |
-| Wrong password error in `mcp.log` | Incorrect `VLEDGER_CLI_PASSWORD` | Check credentials with `vledger sql --server 127.0.0.1:5433 --username [USER] --query "SELECT 1"` |
-| Agent shows `✗ failed — 0 tools` | mcp.json not found or wrong path | Check `~/.kiro/settings/mcp.json` exists and has no extra `EOF` text |
+| Port 3000 already in use | Both Option A and B are running | `pkill -f "vledger mcp"` then restart one only |
+| Wrong password error in `mcp.log` | Incorrect password | Check with `vledger sql --server 127.0.0.1:5433 --username admin --query "SELECT 1"` |
+| `nohup: failed to run command 'VLEDGER_CLI_PASSWORD=...'` | Inline env var passed to nohup | Use `export` first or use `env` prefix: `nohup env VLEDGER_CLI_PASSWORD=... vledger mcp ...` |
+| Agent shows `✗ failed — 0 tools` | mcp.json not found or wrong format | Check `~/.kiro/settings/mcp.json` exists with no extra `EOF` text |
 | Agent shows `◌ loading` stuck | Kiro V3 handshake issue | Upgrade to v1.4.3 or later |
 | MCP server drops after a few minutes | Idle timeout (fixed in v1.4.6) | Upgrade to v1.4.6 or later |
 
