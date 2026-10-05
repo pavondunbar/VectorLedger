@@ -8,8 +8,9 @@
 //!
 //! This module owns the connection lifecycle: it authenticates once at
 //! startup and keeps the TLS stream open for the lifetime of the MCP server.
-//! Individual tool calls acquire a mutex, send one JSON frame, and read one
-//! response frame.
+//! If the server closes the socket (e.g. idle timeout at 5 min), the next
+//! call detects the broken pipe, reconnects automatically, and retries
+//! transparently — no MCP tool call fails due to an idle timeout.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -28,9 +29,15 @@ use std::sync::Arc;
 /// A persistent, authenticated connection to a running `vledger start` server.
 ///
 /// Thread-safe: each call acquires the inner mutex for its request/response
-/// round-trip, then releases it.  The connection is kept open between calls.
+/// round-trip, then releases it.  If the server closes the connection due to
+/// an idle timeout, `execute_sql` automatically reconnects and retries once.
 pub struct NetworkConnection {
     inner: Arc<Mutex<ConnectionInner>>,
+    /// Stored so we can reconnect transparently on idle timeout.
+    addr: String,
+    username: String,
+    password: String,
+    ca_cert_path: Option<String>,
 }
 
 struct ConnectionInner {
@@ -41,15 +48,30 @@ struct ConnectionInner {
 
 impl NetworkConnection {
     /// Connect to a running vledger server, authenticate, and return a handle.
-    ///
-    /// `ca_cert_path` — path to PEM CA certificate.  Pass `None` for loopback
-    /// connections (self-signed certificate accepted with a warning).
     pub async fn connect(
         addr: &str,
         username: &str,
         password: &str,
         ca_cert_path: Option<&str>,
     ) -> Result<Self> {
+        let inner = Self::open_connection(addr, username, password, ca_cert_path).await?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(inner)),
+            addr: addr.to_string(),
+            username: username.to_string(),
+            password: password.to_string(),
+            ca_cert_path: ca_cert_path.map(|s| s.to_string()),
+        })
+    }
+
+    /// Open a fresh TLS connection and authenticate.  Used both at startup
+    /// and on automatic reconnect after an idle timeout.
+    async fn open_connection(
+        addr: &str,
+        username: &str,
+        password: &str,
+        ca_cert_path: Option<&str>,
+    ) -> Result<ConnectionInner> {
         use tokio_rustls::rustls::pki_types::ServerName;
 
         let host_part = addr.split(':').next().unwrap_or("127.0.0.1");
@@ -136,18 +158,57 @@ impl NetworkConnection {
 
         tracing::info!(addr, "MCP server authenticated against vledger server");
 
-        Ok(Self {
-            inner: Arc::new(Mutex::new(ConnectionInner {
-                write_half,
-                lines,
-                token,
-            })),
-        })
+        Ok(ConnectionInner { write_half, lines, token })
     }
 
-    /// Execute a SQL statement against the remote server and return the
-    /// raw JSON response value.
+    /// Execute a SQL statement against the remote server.
+    ///
+    /// On a broken-pipe / idle-timeout error, automatically reconnects once
+    /// and retries before surfacing the error to the caller.
     pub async fn execute_sql(&self, sql: &str) -> Result<Value> {
+        // First attempt
+        match self.execute_sql_once(sql).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // Detect connection errors (broken pipe, server closed, EOF)
+                let err_str = e.to_string().to_lowercase();
+                let is_conn_err = err_str.contains("send sql frame")
+                    || err_str.contains("server closed")
+                    || err_str.contains("broken pipe")
+                    || err_str.contains("connection reset")
+                    || err_str.contains("eof");
+
+                if !is_conn_err {
+                    return Err(e);
+                }
+
+                // Connection dropped (likely idle timeout) — reconnect and retry once
+                tracing::warn!(
+                    "MCP→server connection lost (idle timeout?). Reconnecting…"
+                );
+                match Self::open_connection(
+                    &self.addr,
+                    &self.username,
+                    &self.password,
+                    self.ca_cert_path.as_deref(),
+                ).await {
+                    Ok(new_inner) => {
+                        *self.inner.lock().await = new_inner;
+                        tracing::info!("MCP→server reconnected successfully");
+                        self.execute_sql_once(sql).await
+                    }
+                    Err(reconnect_err) => {
+                        anyhow::bail!(
+                            "Lost connection to vledger server and could not reconnect: {reconnect_err}"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Single attempt to send a SQL frame and read the response.
+    async fn execute_sql_once(&self, sql: &str) -> Result<Value> {
         let mut guard = self.inner.lock().await;
         let ConnectionInner { write_half, lines, token } = &mut *guard;
 

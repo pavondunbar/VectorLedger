@@ -296,7 +296,9 @@ pub fn tool_list() -> Value {
                 "description": "Record a new double-entry journal entry. Both debit and credit sides \
                                 are written atomically and hash-chained. amount MUST be in minor units \
                                 (e.g. $100.00 USD = 10000). The ledger is append-only — corrections \
-                                require a separate reversal entry.",
+                                require a separate reversal entry. \
+                                WARNING: Do NOT call this to correct an existing entry amount. \
+                                Use propose_correction instead.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -489,13 +491,16 @@ pub fn tool_list() -> Value {
             },
             {
                 "name": "propose_correction",
-                "description": "Step 1 of the correction workflow. When a user wants to change the amount \
-                                of a posted entry, call this tool FIRST. It looks up the original entry, \
-                                constructs the full reversal + correction plan, and returns a structured \
-                                proposal showing exactly what will happen — BEFORE anything is written. \
+                "description": "CALL THIS FIRST when a user says an entry amount is wrong, incorrect, \
+                                or needs to be changed. Trigger words: 'change', 'fix', 'update', \
+                                'wrong amount', 'incorrect amount', 'should be', 'it is not'. \
+                                Step 1 of the correction workflow: look up the original entry and produce \
+                                a structured proposal showing exactly what will happen — the reversal and \
+                                correction entries — before anything is written. \
                                 The agent MUST show this proposal to the user and receive explicit \
                                 confirmation before calling execute_correction. \
-                                Never skip this step and go directly to execute_correction or post_entry.",
+                                NEVER call post_entry directly to correct an existing entry. \
+                                NEVER skip this step and go directly to execute_correction.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

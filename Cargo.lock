@@ -380,9 +380,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cc"
-version = "1.5.1"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f360145194ee8e21db5ee7f3fcd4fe52210864c75c985dae33218202c8bbe040"
+checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1327,9 +1327,9 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "mio"
-version = "1.2.3"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
  "wasi",
@@ -1494,9 +1494,9 @@ dependencies = [
 
 [[package]]
 name = "powerfmt"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "ppv-lite86"
@@ -2294,9 +2294,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
 dependencies = [
  "bytes",
  "libc",
@@ -2573,7 +2573,7 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "vledger"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-audit"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "blake3",
  "chrono",
@@ -2637,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-bench"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-compliance"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "chrono",
  "serde",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-crypto"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-foureyes"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "chrono",
  "hex",
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-hsm"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-index"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "bincode",
  "hex",
@@ -2737,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-kani"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "vledger-crypto",
  "vledger-ledger",
@@ -2747,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-ledger"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "bincode",
  "blake3",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-license"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-mcp"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-pages"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "bincode",
  "chrono",
@@ -2833,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-pgwire"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2856,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-replication"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-secrets"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-server"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2941,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-sql"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "chrono",
  "hex",
@@ -2959,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-transaction"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "bincode",
  "blake3",
@@ -2977,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-wal"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "aes-gcm",
  "bincode",
