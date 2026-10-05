@@ -1469,7 +1469,135 @@ print "────────────────────────�
 
 ---
 
-## 23. UPGRADE BINARY
+## 23. AGENTIC AI
+
+Wire VectorLedger to an AI agent so you can query and write to the ledger in
+plain English — no SQL required.
+
+### On your EC2 instance (or local machine running VectorLedger)
+
+**Start the VectorLedger server:**
+
+```bash
+nohup vledger start --data-dir ~/vledger-data --with-proofs > nohup.out 2>&1 &
+until grep -q "Listening" nohup.out; do sleep 2; done && echo "Server ready."
+```
+
+**Start the MCP server:**
+
+```bash
+nohup VLEDGER_CLI_PASSWORD=[YOUR-PASSWORD] vledger mcp \
+  --bind 127.0.0.1:3000 \
+  --username [YOUR-USERNAME] \
+  >> ~/mcp.log 2>&1 &
+```
+
+> See section 21 (Administration) for how to manage usernames and passwords.
+> Use a separate log file (`mcp.log`) — do not redirect to `nohup.out` or it
+> will overwrite the server startup log.
+
+**Verify the MCP server is running:**
+
+```bash
+curl -s http://127.0.0.1:3000/health | jq
+```
+
+Expected output:
+```json
+{
+  "ok": true,
+  "service": "vledger-mcp",
+  "tools": 15,
+  "version": "1.4.6"
+}
+```
+
+---
+
+### On your local machine
+
+**Open the SSH tunnel** (leave this terminal open for the entire session):
+
+```bash
+ssh -i './YourKey.pem' \
+  -L 3000:127.0.0.1:3000 \
+  -N ubuntu@YOUR-EC2-IP
+```
+
+**Verify the tunnel works:**
+
+```bash
+curl -s http://127.0.0.1:3000/health | jq
+```
+
+If this returns `{"ok":true}` on your local machine, the tunnel is working.
+
+**Wire your AI agent:**
+
+Create or update `~/.kiro/settings/mcp.json` (user-level, works from any directory):
+
+```json
+{
+  "mcpServers": {
+    "vledger": {
+      "url": "http://127.0.0.1:3000/sse",
+      "disabled": false
+    }
+  }
+}
+```
+
+For other clients see section 13 (MCP Server). The config snippet is the same
+for Kiro, Claude Desktop, Cursor, and Continue.dev.
+
+**Restart your AI agent**, then verify the tools are loaded:
+
+- **Kiro:** run `/mcp` — should show `vledger ● running 15 tools`
+- **Claude Desktop:** look for the hammer icon in the chat input
+
+---
+
+### Test prompts
+
+Try these in order to confirm everything is working:
+
+```
+Give me the information on journal entry 462,895
+```
+→ Agent calls `query_ledger` and `query_ledger_lines`, returns full entry details
+  with amounts, accounts, timestamps, metadata, and Merkle verification.
+
+```
+The amount for journal entry 8,965,371 is wrong. It should be $200.00. Change it.
+```
+→ Agent calls `propose_correction`, shows the full reversal+correction plan
+  (original amount, correct amount, net adjustment, what hashes are preserved),
+  asks "Shall I proceed?", then calls `execute_correction` after you confirm.
+  Requires v1.4.5 or later.
+
+```
+Remove journal entry 16,794,375.
+```
+→ Agent refuses — the ledger is append-only by design. No entry can ever be
+  deleted. The agent explains the constraint and may offer a reversal if the
+  entry needs to be corrected.
+
+---
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `curl` returns nothing on EC2 | MCP server crashed | `cat ~/mcp.log` to see the error |
+| `curl` returns nothing locally | SSH tunnel not running | Re-run the tunnel command |
+| Wrong password error in `mcp.log` | Incorrect `VLEDGER_CLI_PASSWORD` | Check credentials with `vledger sql --server 127.0.0.1:5433 --username [USER] --query "SELECT 1"` |
+| Agent shows `✗ failed — 0 tools` | mcp.json not found or wrong path | Check `~/.kiro/settings/mcp.json` exists and has no extra `EOF` text |
+| Agent shows `◌ loading` stuck | Kiro V3 handshake issue | Upgrade to v1.4.3 or later |
+| MCP server drops after a few minutes | Idle timeout (fixed in v1.4.6) | Upgrade to v1.4.6 or later |
+
+---
+
+## 24. UPGRADE BINARY
 
 ```bash
 pkill vledger
@@ -1481,7 +1609,7 @@ vledger --version
 
 ---
 
-## 24. DEMO VECTORLEDGER TO CLIENTS USING YOUR IMPORTED DATA
+## 25. DEMO VECTORLEDGER TO CLIENTS USING YOUR IMPORTED DATA
 
 Install Nginx:
 
@@ -1505,7 +1633,7 @@ psql "host=[PUBLIC IP] port=5432 user=admin sslmode=require"
 
 ---
 
-## 25. RUN DBEAVER FOR VECTORLEDGER
+## 26. RUN DBEAVER FOR VECTORLEDGER
 
 Make sure VectorLedger server is running with the `--pgwire` flag:
 
@@ -1586,7 +1714,7 @@ To start over with a fresh DBeaver connection: right-click the VectorLedger conn
 
 ---
 
-## 26. RUN TESTS ON VECTORLEDGER (OPERATORS ONLY)
+## 27. RUN TESTS ON VECTORLEDGER (OPERATORS ONLY)
 
 ### Regression tests (3 tests)
 
