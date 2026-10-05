@@ -657,6 +657,107 @@ curl -s -X POST $BASE/message -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"merkle_root","arguments":{"from_seq":1,"to_seq":10000}}}'
 ```
 
+---
+
+### Option J — OpenAI GPT Actions (ChatGPT Plus/Team/Enterprise)
+
+ChatGPT's consumer UI does not support MCP natively. GPT Actions let you define
+a custom HTTP action inside ChatGPT that calls VectorLedger's `/message` endpoint.
+
+**Requirements:** ChatGPT Plus/Team/Enterprise account + VectorLedger MCP server
+exposed over **HTTPS** with a public domain (not localhost).
+
+**Expose MCP over HTTPS on EC2 using Caddy:**
+
+```bash
+sudo apt install -y caddy
+sudo tee /etc/caddy/Caddyfile << 'CADDYEOF'
+mcp.yourdomain.com {
+    reverse_proxy 127.0.0.1:3000
+}
+CADDYEOF
+sudo systemctl reload caddy
+```
+
+**Create a GPT Action in ChatGPT:**
+
+1. Go to chatgpt.com → Explore GPTs → Create → Configure → Actions → Create new action
+2. Use this OpenAPI schema:
+
+```yaml
+openapi: "3.1.0"
+info:
+  title: VectorLedger
+  version: "1.4.6"
+servers:
+  - url: https://mcp.yourdomain.com
+paths:
+  /message:
+    post:
+      operationId: callTool
+      summary: Call a VectorLedger MCP tool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jsonrpc: { type: string }
+                id:      { type: integer }
+                method:  { type: string }
+                params:  { type: object }
+      responses:
+        "200":
+          description: Tool result
+```
+
+> **Note:** GPT Actions is a REST-style HTTP integration, not a native MCP
+> connection. It requires a public HTTPS endpoint — the SSH tunnel used by
+> other clients does not work. For read-only access, create a dedicated
+> `auditor` role user for ChatGPT.
+
+---
+
+### Option K — OpenAI Codex
+
+Codex runs in a sandboxed cloud container that cannot reach `127.0.0.1:3000`
+through an SSH tunnel. Two approaches:
+
+**Approach 1 — CLI via `--ask` (works today, no server exposure needed):**
+
+Give Codex a task that drives VectorLedger's CLI:
+
+```bash
+# Codex task: "Download vledger, query the ledger for last month's activity"
+wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.4.6/vledger-v1.4.6-linux-x86_64.tar.gz
+tar -xzf vledger-v1.4.6-linux-x86_64.tar.gz && chmod +x vledger
+
+export OPENAI_API_KEY=sk-...
+./vledger sql --ask "summarize last month's activity"
+```
+
+**Approach 2 — Python HTTP calls to a public HTTPS endpoint (Option J setup required):**
+
+```python
+import httpx
+
+def call_tool(name, arguments):
+    return httpx.post("https://mcp.yourdomain.com/message", json={
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    }).json()
+
+print(call_tool("get_balance", {"account": "CASH"}))
+```
+
+> **Best use case for Codex:** writing scripts and automation that interact with
+> VectorLedger, rather than direct ledger queries. For direct queries, Kiro,
+> Claude Desktop, or the Agents SDK are better suited.
+
+---
+
 ### Client selection guide
 
 | You want to… | Best option |
@@ -670,6 +771,8 @@ curl -s -X POST $BASE/message -H "Content-Type: application/json" \
 | Build a Python automation pipeline | LangChain (Option E) or OpenAI Agents SDK (Option F) |
 | Cron jobs, scripts, monitoring | Raw HTTP / curl (Option I) |
 | Build a RAG or document-query system | LlamaIndex (Option G) |
+| Use ChatGPT (consumer UI) | GPT Actions (Option J) — requires HTTPS public endpoint |
+| Use OpenAI Codex | Codex + `--ask` (Option K, Approach 1) — works today, no server exposure |
 | Fully local — no API key, no internet | Ollama + `--ask` (section 12) |
 | Maximum privacy | Ollama + `--ask`, or MCP server on localhost only |
 

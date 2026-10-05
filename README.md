@@ -2590,6 +2590,148 @@ Get a Grok API key at [console.x.ai](https://console.x.ai).
 
 ---
 
+##### Option J — OpenAI GPT Actions (ChatGPT Plus / Team / Enterprise)
+
+GPT Actions let you define a custom HTTP action inside ChatGPT that calls an
+external API. You can wire ChatGPT directly to VectorLedger's `/message` endpoint.
+
+**Requirements:**
+- ChatGPT Plus, Team, or Enterprise account
+- VectorLedger MCP server exposed over **HTTPS** with a public URL (not localhost)
+- A domain with TLS — [Caddy](https://caddyserver.com) on your EC2 instance handles
+  this automatically with Let's Encrypt
+
+**Step 1 — Expose the MCP server over HTTPS on EC2:**
+
+```bash
+# Install Caddy
+sudo apt install -y caddy
+
+# Edit /etc/caddy/Caddyfile
+sudo tee /etc/caddy/Caddyfile << 'EOF'
+mcp.yourdomain.com {
+    reverse_proxy 127.0.0.1:3000
+}
+EOF
+
+sudo systemctl reload caddy
+```
+
+**Step 2 — Create a GPT Action in ChatGPT:**
+
+1. Go to [chatgpt.com](https://chatgpt.com) → **Explore GPTs** → **Create**
+2. Click **Configure** → scroll to **Actions** → **Create new action**
+3. Set the schema to point at your public endpoint:
+
+```yaml
+openapi: "3.1.0"
+info:
+  title: VectorLedger
+  version: "1.4.6"
+servers:
+  - url: https://mcp.yourdomain.com
+paths:
+  /message:
+    post:
+      operationId: callTool
+      summary: Call a VectorLedger MCP tool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jsonrpc: { type: string, example: "2.0" }
+                id:      { type: integer, example: 1 }
+                method:  { type: string, example: "tools/call" }
+                params:  { type: object }
+      responses:
+        "200":
+          description: Tool result
+```
+
+4. Set **Authentication** to None (the MCP server authenticates at startup via
+   `VLEDGER_CLI_PASSWORD`)
+5. Add instructions to the GPT describing what tools are available
+
+**Caveats:**
+- ChatGPT's consumer UI (`chat.openai.com`) does **not** support MCP natively —
+  GPT Actions is a custom HTTP integration, not a true MCP connection
+- ChatGPT will call the OpenAPI schema, not the SSE stream; it's a REST-style
+  integration rather than a streaming tool protocol
+- Requires a publicly accessible HTTPS endpoint — the SSH tunnel approach used
+  by other clients does not work here
+- Best for read-only queries; write operations (post_entry, execute_correction)
+  should be restricted via a read-only role for ChatGPT access
+
+---
+
+##### Option K — OpenAI Codex
+
+[Codex](https://codex.openai.com) is an agentic coding environment that runs in
+a sandboxed cloud container. It can execute shell commands and call external APIs.
+
+**Two approaches:**
+
+**Approach 1 — CLI via `--ask` (no server exposure needed)**
+
+Codex can clone the VectorLedger repo, build or download the binary, and run
+`vledger sql --ask` directly in its sandbox:
+
+```bash
+# Inside Codex task instructions:
+# "Download the VectorLedger binary, set up the data directory,
+#  and query the ledger for last month's activity."
+
+wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.4.6/vledger-v1.4.6-linux-x86_64.tar.gz
+tar -xzf vledger-v1.4.6-linux-x86_64.tar.gz
+chmod +x vledger
+
+export OPENAI_API_KEY=sk-...
+./vledger sql --ask "summarize last month's activity"
+```
+
+This works today without any network configuration. Codex acts as a shell-script
+agent that drives VectorLedger's CLI.
+
+**Approach 2 — MCP via HTTPS (requires public endpoint)**
+
+If the MCP server is exposed over HTTPS (see Option J above), Codex can call it
+directly using Python:
+
+```python
+import httpx, json
+
+BASE = "https://mcp.yourdomain.com"
+
+def call_tool(name, arguments):
+    resp = httpx.post(f"{BASE}/message", json={
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    })
+    return resp.json()
+
+# Example: query the ledger
+result = call_tool("query_ledger", {"sql": "SELECT * FROM ledger LIMIT 10"})
+print(json.dumps(result, indent=2))
+
+# Example: get account balance
+balance = call_tool("get_balance", {"account": "CASH"})
+print(balance)
+```
+
+**Caveats:**
+- Codex's sandbox is network-isolated by default — it cannot reach `127.0.0.1:3000`
+  through an SSH tunnel
+- Codex is primarily a code-writing agent; for direct ledger queries the other
+  options (Kiro, Claude Desktop, Agents SDK) are better suited
+- Best use case for Codex: *"Write me a Python script that monitors the VectorLedger
+  MCP server and alerts on policy violations"* rather than direct ledger interaction
+
+---
+
 #### Client selection guide
 
 Not sure which option to pick? Use this:
@@ -2605,6 +2747,8 @@ Not sure which option to pick? Use this:
 | Build a Python automation or agent pipeline | **LangChain** (Option E) or **OpenAI Agents SDK** (Option F) |
 | Integrate from a script, cron job, or monitoring system | **Raw HTTP / curl** (Option H) |
 | Build a RAG or document-query system | **LlamaIndex** (Option G) |
+| Use ChatGPT (consumer UI) | **GPT Actions** (Option J) — requires HTTPS public endpoint |
+| Use OpenAI Codex | **Codex + `--ask`** (Option K, Approach 1) — works today with no server exposure |
 | Use a local model with no API key or internet | `--ask` with Ollama (Part 1) |
 | Maximum privacy — no data leaves your network | Ollama + `--ask`, or MCP server on localhost only |
 | Explain why an account balance changed | `explain_balance` tool via any MCP client |
