@@ -480,15 +480,14 @@ async fn execute_sql(
                         duration_ms: elapsed_ms,
                     });
                 }
-                Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message)
+                Response::ok(qr.columns, cap_rows(qr.rows, config.max_result_rows), qr.rows_affected, qr.proof, qr.message)
             }
             Err(e) => Response::err(e.to_string()),
         }
     } else {
         let result = run_with_timeout!(async {
             let guard = ledger.read().await;
-            if attach {
-                ReadExecutor::with_proofs(&guard).execute(plan)
+            if attach {                ReadExecutor::with_proofs(&guard).execute(plan)
             } else {
                 ReadExecutor::new(&guard).execute(plan)
             }
@@ -505,15 +504,32 @@ async fn execute_sql(
                         duration_ms: elapsed_ms,
                     });
                 }
-                Response::ok(qr.columns, qr.rows, qr.rows_affected, qr.proof, qr.message)
+                Response::ok(qr.columns, cap_rows(qr.rows, config.max_result_rows), qr.rows_affected, qr.proof, qr.message)
             }
             Err(e) => Response::err(e.to_string()),
         }
     }
 }
 
-// ── Bounded line reader (Fix #8) ──────────────────────────────────────────────
+// ── Row cap helper ────────────────────────────────────────────────────────────
 
+/// Truncate a row vector to `max` rows.
+///
+/// When `max` is 0 the cap is disabled and all rows are returned.
+/// Applied to every query result before serialization to prevent very large
+/// single-line JSON frames from deadlocking the TLS connection.
+#[inline]
+fn cap_rows(
+    mut rows: Vec<vledger_sql::result::Row>,
+    max: usize,
+) -> Vec<vledger_sql::result::Row> {
+    if max > 0 && rows.len() > max {
+        rows.truncate(max);
+    }
+    rows
+}
+
+// ── Bounded line reader (Fix #8) ──────────────────────────────────────────────
 /// Read a newline-terminated line from `reader`, rejecting any line that
 /// exceeds `max_bytes` before the newline is found.
 ///

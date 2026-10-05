@@ -265,11 +265,16 @@ fn tool_list_accounts(
     if let Some(currency) = args["currency"].as_str() {
         conditions.push(format!("currency = '{}'", currency.replace('\'', "''")));
     }
+    // Default to 500 rows — callers wanting more should filter by domain/currency
+    // or use query_ledger with an explicit LIMIT. Without a cap this query can
+    // return hundreds of thousands of rows and overflow the TLS frame buffer.
+    let limit = args["limit"].as_u64().unwrap_or(500);
+
     let sql = if conditions.is_empty() {
-        "SELECT id, code, name, account_type, currency, domain, balance FROM accounts".to_string()
+        format!("SELECT id, code, name, account_type, currency, domain, balance FROM accounts LIMIT {limit}")
     } else {
         format!(
-            "SELECT id, code, name, account_type, currency, domain, balance FROM accounts WHERE {}",
+            "SELECT id, code, name, account_type, currency, domain, balance FROM accounts WHERE {} LIMIT {limit}",
             conditions.join(" AND ")
         )
     };

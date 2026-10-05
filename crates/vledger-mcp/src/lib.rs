@@ -329,12 +329,16 @@ pub fn tool_list() -> Value {
             },
             {
                 "name": "list_accounts",
-                "description": "List all accounts with current balances. Optionally filter by domain or currency.",
+                "description": "List accounts with current balances. Optionally filter by domain or currency. \
+                                Returns up to 500 accounts by default — use the limit parameter for more, \
+                                or filter by domain/currency to narrow results. For very large account sets \
+                                use query_ledger with an explicit SQL query instead.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "domain":   { "type": "string", "description": "Filter by domain (optional)." },
-                        "currency": { "type": "string", "description": "Filter by currency code (optional)." }
+                        "domain":   { "type": "string",  "description": "Filter by domain (optional)." },
+                        "currency": { "type": "string",  "description": "Filter by currency code (optional)." },
+                        "limit":    { "type": "integer", "description": "Maximum accounts to return (default 500, max recommended 2000)." }
                     }
                 }
             },

@@ -14,15 +14,23 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::TlsConnector;
+use tokio_util::codec::{FramedRead, LinesCodec};
+use futures::StreamExt;
 use tracing::debug;
 
 use std::sync::Arc;
+
+// Maximum response frame size accepted from the vledger server.
+// Matches MAX_LINE_BYTES in vledger-server/src/handler.rs (inbound cap) but
+// applied here as the outbound cap on the MCP client side.
+// Responses larger than this return an error rather than deadlocking.
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 
 // ── Connection handle ─────────────────────────────────────────────────────────
 
@@ -42,7 +50,7 @@ pub struct NetworkConnection {
 
 struct ConnectionInner {
     write_half: tokio::io::WriteHalf<TlsStream<TcpStream>>,
-    lines: tokio::io::Lines<BufReader<tokio::io::ReadHalf<TlsStream<TcpStream>>>>,
+    reader: FramedRead<tokio::io::ReadHalf<TlsStream<TcpStream>>, LinesCodec>,
     token: String,
 }
 
@@ -125,7 +133,10 @@ impl NetworkConnection {
             .context("TLS handshake with vledger server failed")?;
 
         let (read_half, mut write_half) = tokio::io::split(tls);
-        let mut lines = BufReader::new(read_half).lines();
+        // Use a bounded LinesCodec so a response larger than MAX_RESPONSE_BYTES
+        // returns an error instead of deadlocking the TCP connection.
+        let codec = LinesCodec::new_with_max_length(MAX_RESPONSE_BYTES);
+        let mut reader = FramedRead::new(read_half, codec);
 
         // Authenticate
         let auth_req = serde_json::json!({
@@ -137,10 +148,11 @@ impl NetworkConnection {
             .context("Failed to send auth frame")?;
         write_half.flush().await?;
 
-        let auth_line = lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Server closed connection during auth"))?;
+        let auth_line: String = reader
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Server closed connection during auth"))?
+            .context("Failed to read auth response")?;
         let auth_resp: Value =
             serde_json::from_str(&auth_line).context("Invalid auth response from server")?;
 
@@ -158,7 +170,7 @@ impl NetworkConnection {
 
         tracing::info!(addr, "MCP server authenticated against vledger server");
 
-        Ok(ConnectionInner { write_half, lines, token })
+        Ok(ConnectionInner { write_half, reader, token })
     }
 
     /// Execute a SQL statement against the remote server.
@@ -210,7 +222,7 @@ impl NetworkConnection {
     /// Single attempt to send a SQL frame and read the response.
     async fn execute_sql_once(&self, sql: &str) -> Result<Value> {
         let mut guard = self.inner.lock().await;
-        let ConnectionInner { write_half, lines, token } = &mut *guard;
+        let ConnectionInner { write_half, reader, token } = &mut *guard;
 
         let req = serde_json::json!({ "sql": sql, "token": token });
         write_half
@@ -219,10 +231,11 @@ impl NetworkConnection {
             .context("Failed to send SQL frame to server")?;
         write_half.flush().await?;
 
-        let resp_line = lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Server closed connection during SQL execution"))?;
+        let resp_line: String = reader
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Server closed connection during SQL execution"))?
+            .context("Failed to read SQL response (response may exceed 16 MiB frame limit)")?;
 
         debug!(sql, "SQL response received");
 
@@ -433,10 +446,11 @@ pub async fn dispatch_tool_network(
             let mut conditions = Vec::new();
             if let Some(d) = args["domain"].as_str() { conditions.push(format!("domain = '{}'", escape(d))); }
             if let Some(c) = args["currency"].as_str() { conditions.push(format!("currency = '{}'", escape(c))); }
+            let limit = args["limit"].as_u64().unwrap_or(500);
             let sql = if conditions.is_empty() {
-                "SELECT id, code, name, account_type, currency, domain, balance FROM accounts".to_string()
+                format!("SELECT id, code, name, account_type, currency, domain, balance FROM accounts LIMIT {limit}")
             } else {
-                format!("SELECT id, code, name, account_type, currency, domain, balance FROM accounts WHERE {}", conditions.join(" AND "))
+                format!("SELECT id, code, name, account_type, currency, domain, balance FROM accounts WHERE {} LIMIT {limit}", conditions.join(" AND "))
             };
             match conn.execute_sql(&sql).await {
                 Ok(resp) => Ok(ok_text(response_to_text(&resp))),

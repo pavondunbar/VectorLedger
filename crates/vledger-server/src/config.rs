@@ -42,6 +42,19 @@ pub struct ServerConfig {
     /// Default: 30 000 ms (30 s).  Set to 0 to disable (not recommended for
     /// production deployments).
     pub query_timeout_ms: u64,
+    /// Maximum number of rows returned in a single SQL response frame.
+    ///
+    /// Prevents very large result sets (e.g. SELECT * FROM accounts on a
+    /// ledger with 750,000+ accounts) from producing a response frame that
+    /// exceeds the TCP receive buffer and deadlocks the connection.
+    ///
+    /// When a query returns more rows than this limit, the extra rows are
+    /// silently truncated and the response message notes that results were
+    /// capped. Use SQL LIMIT clauses or WHERE filters to retrieve specific
+    /// subsets of large tables.
+    ///
+    /// Default: 10 000 rows.  Set to 0 to disable (not recommended).
+    pub max_result_rows: usize,
 }
 
 impl Default for ServerConfig {
@@ -59,6 +72,7 @@ impl Default for ServerConfig {
             wal_sync_mode: WalSyncMode::GroupCommit,
             group_commit_delay_ms: 2,
             query_timeout_ms: 30_000,
+            max_result_rows: 10_000,
         }
     }
 }
