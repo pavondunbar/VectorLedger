@@ -50,3 +50,9 @@ VG-PITCH-DECK.md
 # Proptest regression files (generated)
 proptest-regressions/
 dist/
+
+# Release tarballs and checksums — belong in GitHub Releases, not the repo
+*.tar.gz
+*-checksums.txt
+*-checksums-sha256.txt
+CHEATSHEET.md
