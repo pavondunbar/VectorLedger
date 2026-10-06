@@ -6404,6 +6404,14 @@ async fn cmd_mcp(
         bind: bind.to_string(),
         username: resolved_username.clone(),
         password: resolved_password.clone(),
+        monthly_limit: match license.tier {
+            vledger_license::LicenseTier::Starter    => vledger_mcp::LIMIT_STARTER,
+            vledger_license::LicenseTier::Growth      => vledger_mcp::LIMIT_GROWTH,
+            vledger_license::LicenseTier::Enterprise  => vledger_mcp::LIMIT_UNLIMITED,
+            // Free is already blocked above; this arm is unreachable but must compile.
+            vledger_license::LicenseTier::Free        => vledger_mcp::LIMIT_STARTER,
+        },
+        data_dir: data_dir.clone(),
     };
 
     let shutdown = tokio_util::sync::CancellationToken::new();
@@ -6416,11 +6424,16 @@ async fn cmd_mcp(
 
     if let Some(addr) = server_addr {
         // ── Network mode ──────────────────────────────────────────────────────
+        let limit_str = match config.monthly_limit {
+            0 => "unlimited".to_string(),
+            n => format!("{n}/month"),
+        };
         println!("VectorLedger MCP server starting on http://{bind}");
         println!("  Mode         : network (proxying through vledger server at {addr})");
         println!("  SSE endpoint : http://{bind}/sse");
         println!("  Health check : http://{bind}/health");
-        println!("  Tools        : 12 (7 query/write + 5 financial reasoning)");
+        println!("  Tools        : 15 (7 query/write + 5 reasoning + 1 identity + 2 correction)");
+        println!("  Agent Queries: {limit_str}");
         println!();
         println!("Point your MCP client at: http://{bind}/sse");
         println!("Press Ctrl-C to stop.");
@@ -6454,7 +6467,8 @@ async fn cmd_mcp(
         println!("  Mode         : direct (opening data directory)");
         println!("  SSE endpoint : http://{bind}/sse");
         println!("  Health check : http://{bind}/health");
-        println!("  Tools        : 12 (7 query/write + 5 financial reasoning)");
+        println!("  Tools        : 15 (7 query/write + 5 reasoning + 1 identity + 2 correction)");
+        println!("  Agent Queries: {}", match config.monthly_limit { 0 => "unlimited".to_string(), n => format!("{n}/month") });
         println!();
         println!("Point your MCP client at: http://{bind}/sse");
         println!("Press Ctrl-C to stop.");

@@ -126,7 +126,27 @@ Security note: the tool searches account codes, names, and UUIDs but does NOT
 expose all accounts in one call — it requires a specific query term. All lookups
 are subject to the caller's RBAC session.
 
-**Correction workflow (v1.4.5)**
+**Agentic AI license gate and Agent Query metering (v1.4.8–v1.5.0)**
+
+The MCP server (`vledger mcp`) and `vledger sql --ask` are now gated behind
+`Feature::AgenticAi`, available on Starter, Growth, and Enterprise tiers only.
+Free tier users receive a clear error message with upgrade instructions.
+
+Monthly Agent Query limits are enforced per tier (Starter: 10, Growth: 100,
+Enterprise: unlimited). One Agent Query is counted per `initialize` JSON-RPC
+request — the MCP protocol boundary for one conversation, regardless of how
+many internal tool calls the agent makes.
+
+Security notes:
+- The counter file (`mcp_queries.json`) is written to the data directory with
+  the same permissions as other data files. It is not a security boundary —
+  a user with write access to the data directory could reset it. The counter
+  is a commercial metering mechanism, not a security control.
+- v1.5.0 fixed a bug where `require_feature()` only checked the explicit
+  features list in the license file, not the tier's default features. Licenses
+  issued before v1.4.8 were incorrectly blocked on paid tiers.
+
+
 
 `propose_correction` and `execute_correction` implement a two-step write protocol
 with mandatory human confirmation between proposal and execution. Neither tool can

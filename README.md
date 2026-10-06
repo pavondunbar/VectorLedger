@@ -1833,10 +1833,37 @@ Contact [pavon@vectorguardlabs.com](mailto:pavon@vectorguardlabs.com) for multi-
 | Backup & restore | ✓ | ✓ | ✓ | ✓ |
 | Audit log export (date range) | 30 days | 90 days | Unlimited | Unlimited |
 | PostgreSQL wire protocol (`--pgwire`) | ✗ | ✓ | ✓ | ✓ |
+| **Agentic AI** (`vledger mcp` + `--ask`) | ✗ | ✓ | ✓ | ✓ |
+| **Agent Queries / month** | — | **10** | **100** | **Unlimited** |
 | WAL replication (hot standby) | ✗ | ✗ | ✓ | ✓ |
 | Compliance reports (SOC 2 / PCI-DSS) | ✗ | ✗ | ✓ | ✓ |
 | Hardware HSM PKCS#11 integration | ✗ | ✗ | ✗ | ✓ |
 | Multi-node deployment | ✗ | ✗ | ✗ | ✓ |
+
+#### What is an Agent Query?
+
+One Agent Query = one natural-language request submitted to the VectorLedger
+Agent that causes it to perform one logical task. The agent may internally make
+5–10 tool calls to answer a single question — that still counts as 1 Agent Query.
+
+**Examples — each is 1 Agent Query:**
+- *"Give me the output of entry 4,627,985"*
+- *"Do a reversal of entry 367,929 — it posted for $90 but should be $100"*
+- *"Generate an audit report for Q3"*
+- *"Why is the SETTLEMENT account lower than expected? Reconcile it."*
+
+The monthly counter resets automatically on the first day of each UTC month.
+No restart required — the running MCP server detects the new month on the next
+query. Check remaining quota at any time:
+
+```bash
+curl -s http://127.0.0.1:3000/health | jq
+# {
+#   "agent_queries_used": 3,
+#   "agent_queries_limit": 10,
+#   "agent_queries_remaining": 7
+# }
+```
 
 ### Installing a license
 
@@ -1867,6 +1894,30 @@ vledger license --data-dir ./vledger-data
 ---
 
 ## Changelog
+
+### v1.5.0 — License feature gate fix
+
+- **Fix:** `require_feature()` now falls back to the tier's built-in default
+  features when a feature is not in the license file's explicit features list.
+  Licenses issued before v1.4.8 (before `AgenticAi` was added) were being
+  blocked even on Enterprise/Growth/Starter tiers. No license file changes needed.
+
+### v1.4.9 — Agent Query metering (initialize-based)
+
+- **Fix:** Agent Query billing now counts on `initialize`, not SSE connections.
+  One `initialize` request = one Agent Query, regardless of how many internal
+  tool calls the agent makes. SSE connections are pure transport and not counted.
+- Monthly counter persisted to `mcp_queries.json` in the data directory.
+- Monthly reset is automatic — no restart or cron job needed.
+- Health endpoint now shows `agent_queries_used`, `agent_queries_limit`,
+  `agent_queries_remaining`.
+
+### v1.4.8 — Agentic AI license gate
+
+- `vledger mcp` and `vledger sql --ask` now require a Starter, Growth, or
+  Enterprise license. Free tier users see a clear upgrade message.
+- New `Feature::AgenticAi` variant in the license crate.
+- Tier limits: Starter 10/mo, Growth 100/mo, Enterprise unlimited.
 
 ### v1.4.5 — Structured correction workflow
 

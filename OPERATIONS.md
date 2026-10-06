@@ -1011,13 +1011,57 @@ For Cursor or Kiro, add it to `.kiro/settings/mcp.json` in your workspace.
 
 ```bash
 curl -s http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.4.0","tools":12}
+# {"ok":true,"service":"vledger-mcp","version":"1.5.0","tools":15,"agent_queries_used":3,"agent_queries_limit":100,"agent_queries_remaining":97}
 ```
 
 Add this to your load-balancer health probe if running the MCP server behind a
 reverse proxy.
 
-### Tools — 15 total (v1.4.5)
+### Agent Query monitoring
+
+Each time an AI client opens a new conversation, one Agent Query is consumed
+from the monthly allowance. Check remaining quota at any time:
+
+```bash
+curl -s http://127.0.0.1:3000/health | jq '{used: .agent_queries_used, remaining: .agent_queries_remaining, limit: .agent_queries_limit}'
+```
+
+Monthly limits by tier:
+
+| Tier | Agent Queries / month |
+|---|---|
+| Free | Agentic AI disabled |
+| Starter | 10 |
+| Growth | 100 |
+| Enterprise | Unlimited |
+
+The counter resets automatically on the first day of each UTC month. No restart
+required — the running MCP server detects the new month on the next query.
+
+The counter is persisted to `<data_dir>/mcp_queries.json`. If you need to reset
+it manually (e.g. after a billing adjustment):
+
+```bash
+sudo systemctl stop vledger-mcp
+rm ~/vledger-data/mcp_queries.json
+sudo systemctl start vledger-mcp
+```
+
+When the monthly limit is reached, the agent receives this error and surfaces
+it to the user:
+
+```
+Monthly Agent Query limit reached: 10/10 queries used in 2026-10.
+
+Upgrade your VectorLedger license to continue:
+  Starter:     10 Agent Queries/month  — $499/mo
+  Growth:     100 Agent Queries/month  — $2,499/mo
+  Enterprise: Unlimited Agent Queries  — from $4,999/mo
+
+Contact: pavon@vectorguardlabs.com
+```
+
+### Tools — 15 total (v1.5.0)
 
 | Tool | Category | Description |
 |---|---|---|

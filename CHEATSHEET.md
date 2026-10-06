@@ -1347,12 +1347,22 @@ vledger license --data-dir ./vledger-data
 
 License tiers:
 
-| Tier | Includes |
-|---|---|
-| `free` | Core ledger only |
-| `starter` | Core + pgwire |
-| `growth` | Core + pgwire + replication + compliance reports + unlimited audit export |
-| `enterprise` | Everything + HSM + multi-node |
+| Tier | Includes | Agent Queries/month |
+|---|---|---|
+| `free` | Core ledger only — no Agentic AI | — |
+| `starter` | Core + pgwire + Agentic AI | 10 |
+| `growth` | Core + pgwire + replication + compliance reports + unlimited audit export + Agentic AI | 100 |
+| `enterprise` | Everything + HSM + multi-node + Agentic AI | Unlimited |
+
+One Agent Query = one natural-language request to the VectorLedger Agent,
+regardless of how many internal tool calls it makes. The monthly counter
+resets automatically on the first day of each UTC month.
+
+Check remaining quota:
+
+```bash
+curl -s http://127.0.0.1:3000/health | jq '.agent_queries_used, .agent_queries_remaining'
+```
 
 ---
 
@@ -1645,6 +1655,9 @@ Remove journal entry 16,794,375.
 | Agent shows `✗ failed — 0 tools` | mcp.json not found or wrong format | Check `~/.kiro/settings/mcp.json` exists with no extra `EOF` text |
 | Agent shows `◌ loading` stuck | Kiro V3 handshake issue | Upgrade to v1.4.3 or later |
 | MCP server drops after a few minutes | Idle timeout (fixed in v1.4.6) | Upgrade to v1.4.6 or later |
+| `Error: The Agentic AI feature requires a Starter, Growth, or Enterprise license` | No license file or Free tier | Copy `license.json` to `~/vledger-data/` and restart |
+| Enterprise license blocked by AgenticAi gate | License issued before v1.4.8 | Upgrade to v1.5.0 — the fix falls back to tier defaults automatically |
+| `agent_queries_remaining: 0` | Monthly limit reached | Wait for month rollover, or upgrade tier |
 
 ---
 
