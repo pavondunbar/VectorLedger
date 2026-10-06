@@ -227,7 +227,15 @@ impl LicenseStore {
     /// Check whether `feature` is enabled on this license.
     /// Returns `Ok(())` if entitled, or a descriptive error if not.
     pub fn require_feature(&self, feature: Feature) -> Result<(), LicenseError> {
+        // Check the explicit features list first, then fall back to the
+        // tier's default feature set. This ensures that licenses issued before
+        // a new feature was added still work correctly — a Growth license
+        // automatically gets all Growth default features even if its features
+        // list predates the new feature.
         if self.features.contains(&feature) {
+            return Ok(());
+        }
+        if self.tier.default_features().contains(&feature) {
             return Ok(());
         }
         Err(LicenseError::FeatureNotEntitled {
@@ -239,6 +247,7 @@ impl LicenseStore {
     /// Returns true if the feature is available (non-error version).
     pub fn has_feature(&self, feature: &Feature) -> bool {
         self.features.contains(feature)
+            || self.tier.default_features().contains(feature)
     }
 
     /// Days remaining until expiry.  Returns `None` for the free (no-expiry) tier.
