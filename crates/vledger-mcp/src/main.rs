@@ -121,8 +121,9 @@ async fn main() -> Result<()> {
         bind: cli.bind,
         username,
         password,
-        monthly_limit: vledger_mcp::LIMIT_UNLIMITED, // standalone binary defaults to unlimited
+        monthly_limit: vledger_mcp::LIMIT_UNLIMITED,
         data_dir: cli.data_dir.clone(),
+        session_timeout_secs: 30 * 60, // 30 minutes
     };
 
     let shutdown = CancellationToken::new();

@@ -61,11 +61,19 @@ pub struct McpConfig {
     pub username: String,
     /// Password for the above user.
     pub password: String,
-    /// Monthly Agent Run limit. 0 = unlimited (Enterprise).
+    /// Monthly Agent Query limit. 0 = unlimited (Enterprise).
     /// Starter = 10, Growth = 100.
     pub monthly_limit: u64,
-    /// Data directory used to persist the run counter.
+    /// Data directory used to persist the query counter.
     pub data_dir: std::path::PathBuf,
+    /// Session idle timeout in seconds. A new `initialize` after this many
+    /// seconds of inactivity since the last `initialize` counts as a new
+    /// Agent Query. Default: 1800 (30 minutes).
+    ///
+    /// This prevents a user leaving their client open all week from consuming
+    /// only 1 Agent Query across 5 days of use. After 30 minutes of inactivity
+    /// the session expires and the next question starts a new Agent Query.
+    pub session_timeout_secs: u64,
 }
 
 impl Default for McpConfig {
@@ -76,6 +84,7 @@ impl Default for McpConfig {
             password: String::new(),
             monthly_limit: LIMIT_UNLIMITED,
             data_dir: std::path::PathBuf::from("./vledger-data"),
+            session_timeout_secs: 30 * 60, // 30 minutes
         }
     }
 }
@@ -141,6 +150,12 @@ pub(crate) struct AppState {
     pub bind_addr: String,
     /// Monthly Agent Run counter (shared across all SSE connections).
     pub run_counter: Arc<Mutex<RunCounter>>,
+    /// Timestamp of the last `initialize` request.
+    /// Used to detect session expiry — if more than `session_timeout_secs`
+    /// have elapsed, the next initialize counts as a new Agent Query.
+    pub last_initialize: Arc<Mutex<Option<std::time::Instant>>>,
+    /// Session idle timeout in seconds.
+    pub session_timeout_secs: u64,
 }
 
 // ── MCP tool registry ─────────────────────────────────────────────────────────
@@ -632,6 +647,11 @@ async fn handle_message(
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     let counter = state.run_counter.lock().await;
     let remaining = counter.remaining();
+    let last_init = state.last_initialize.lock().await;
+    let session_active = last_init.map(|t| t.elapsed().as_secs() < state.session_timeout_secs).unwrap_or(false);
+    let session_age_secs = last_init.map(|t| t.elapsed().as_secs());
+    drop(last_init);
+
     let mut resp = serde_json::json!({
         "ok": true,
         "service": "vledger-mcp",
@@ -643,11 +663,16 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
         } else {
             serde_json::Value::Number(counter.limit().into())
         },
+        "session_active": session_active,
+        "session_timeout_secs": state.session_timeout_secs,
     });
     if let Some(r) = remaining {
         resp["agent_queries_remaining"] = serde_json::Value::Number(r.into());
     } else {
         resp["agent_queries_remaining"] = serde_json::Value::String("unlimited".into());
+    }
+    if let Some(age) = session_age_secs {
+        resp["session_idle_secs"] = serde_json::Value::Number(age.into());
     }
     Json(resp)
 }
@@ -658,27 +683,43 @@ async fn dispatch(state: AppState, req: JsonRpcRequest) -> Result<Value> {
     match req.method.as_str() {
         // ── MCP lifecycle ─────────────────────────────────────────────────
         "initialize" => {
-            // ── Agent Query billing boundary ──────────────────────────────
-            // One `initialize` = one Agent Query. Every MCP client sends
-            // exactly one `initialize` per conversation regardless of how
-            // many tool calls the agent makes to answer the question.
-            // We count here (not at SSE connect or per tool call) so that:
-            //   - One human prompt = one billable query
-            //   - Complex workflows (5–10 tool calls) still = 1 query
-            //   - Failed queries that never reach initialize = 0 queries
-            {
+            // ── Agent Query billing boundary with session expiry ──────────
+            // Count a new Agent Query when:
+            //   (a) This is the first initialize since the server started, OR
+            //   (b) More than session_timeout_secs have elapsed since the
+            //       last initialize (session expired).
+            //
+            // This means:
+            //   - Ask 10 questions in 20 minutes = 1 Agent Query (one session)
+            //   - Leave Kiro open overnight, ask again = 2 Agent Queries
+            //   - Leave it open all week = one query per 30-minute active period
+            let should_count = {
+                let last = state.last_initialize.lock().await;
+                match *last {
+                    None => true, // first initialize ever
+                    Some(t) => t.elapsed().as_secs() >= state.session_timeout_secs,
+                }
+            };
+
+            if should_count {
                 let mut counter = state.run_counter.lock().await;
                 if let Err(e) = counter.consume() {
-                    // Return a JSON-RPC error — the agent will surface it
-                    // to the user with the upgrade message.
                     return Err(anyhow::anyhow!(
                         "Agent Query limit reached: {}",
                         e
                     ));
                 }
                 if let Some(remaining) = counter.remaining() {
-                    info!(remaining, "Agent Query started");
+                    info!(remaining, "Agent Query started (new session)");
                 }
+            } else {
+                info!("Agent Query continued (session still active — within 30 min window)");
+            }
+
+            // Update last_initialize timestamp.
+            {
+                let mut last = state.last_initialize.lock().await;
+                *last = Some(std::time::Instant::now());
             }
 
             Ok(json!({
@@ -817,6 +858,8 @@ impl McpServer {
                 sse_tx,
                 bind_addr: self.config.bind.clone(),
                 run_counter,
+                last_initialize: Arc::new(Mutex::new(None)),
+                session_timeout_secs: self.config.session_timeout_secs,
             }
         } else {
             let session = Arc::new(
@@ -833,6 +876,8 @@ impl McpServer {
                 sse_tx,
                 bind_addr: self.config.bind.clone(),
                 run_counter,
+                last_initialize: Arc::new(Mutex::new(None)),
+                session_timeout_secs: self.config.session_timeout_secs,
             }
         };
 

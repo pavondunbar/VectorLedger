@@ -1035,13 +1035,12 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
-version = "1.11.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
+checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
 dependencies = [
  "atomic-waker",
  "bytes",
- "futures-channel",
  "futures-core",
  "http",
  "http-body",
@@ -2611,7 +2610,7 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "vledger"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2658,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-audit"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -2675,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-bench"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2689,7 +2688,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-compliance"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2703,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-crypto"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2724,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-foureyes"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "chrono",
  "hex",
@@ -2740,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-hsm"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2761,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-index"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "bincode",
  "hex",
@@ -2775,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-kani"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "vledger-crypto",
  "vledger-ledger",
@@ -2785,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-ledger"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "bincode",
  "blake3",
@@ -2810,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-license"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -2827,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-mcp"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2854,7 +2853,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-pages"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "bincode",
  "chrono",
@@ -2872,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-pgwire"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2895,7 +2894,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-replication"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2919,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-secrets"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2947,7 +2946,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-server"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2980,7 +2979,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-sql"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "chrono",
  "hex",
@@ -2998,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-transaction"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "bincode",
  "blake3",
@@ -3016,7 +3015,7 @@ dependencies = [
 
 [[package]]
 name = "vledger-wal"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "aes-gcm",
  "bincode",
@@ -3414,9 +3413,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.9.0"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
  "zeroize_derive",
 ]

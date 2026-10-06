@@ -6412,6 +6412,7 @@ async fn cmd_mcp(
             vledger_license::LicenseTier::Free        => vledger_mcp::LIMIT_STARTER,
         },
         data_dir: data_dir.clone(),
+        session_timeout_secs: 30 * 60, // 30 minutes
     };
 
     let shutdown = tokio_util::sync::CancellationToken::new();
