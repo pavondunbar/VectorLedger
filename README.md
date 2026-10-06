@@ -2,9 +2,28 @@
 
 **A cryptographically verifiable database engine built for institutions that can't afford to trust their own database.**
 
-VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof that the returned data has not been modified since it was written. Historical tampering is **cryptographically detectable** — any modification to a past record invalidates every hash in the chain from that point to the present, provided that verification checkpoints are independently protected (which the HSM architecture is specifically designed to enforce).
+VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof proving the returned data has not been modified since it was written. Historical tampering is **cryptographically detectable** — any modification to a past record invalidates every hash in the chain from that point forward.
 
-Built by [VectorGuard Labs](https://vectorguardlabs.com).
+Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.1** · License: BUSL-1.1
+
+---
+
+## Table of Contents
+
+1. [Why VectorLedger?](#why-vectorledger)
+2. [Key Features](#key-features)
+3. [Architecture Overview](#architecture-overview)
+4. [Quick Install](#quick-install)
+5. [Quick Start](#quick-start)
+6. [SQL Dialect](#sql-dialect)
+7. [Double-Entry Accounting Model](#double-entry-accounting-model)
+8. [Client Libraries](#client-libraries)
+9. [MCP Server](#mcp-server)
+10. [pgwire Support](#pgwire-support)
+11. [Licensing Tiers](#licensing-tiers)
+12. [Performance](#performance)
+13. [Changelog](#changelog)
+14. [Further Reading](#further-reading)
 
 ---
 
@@ -14,2827 +33,743 @@ Traditional relational databases treat audit trails as an afterthought: triggers
 
 VectorLedger makes tampering **cryptographically detectable**:
 
-- A row written five years ago cannot be changed without invalidating every hash in the chain from that point to the present.
+- A row written years ago cannot be changed without invalidating every hash in the chain from that point to the present.
 - Every SELECT response optionally carries a Merkle proof that any client can independently verify.
 - The audit log is WORM-append-only — each event is hashed into the next, forming a second independent tamper-evident chain.
-- The compliance engine generates machine-generated **technical evidence supporting SOC 2 Type II and PCI-DSS v4 control assessments** — not pre-written documentation. This evidence supports an auditor's work; it does not by itself make an organization compliant. Organizational compliance requires additional controls, policies, and independent auditor assessment beyond what any database engine can provide.
+- The compliance engine generates machine-generated **technical evidence supporting SOC 2 Type II and PCI-DSS v4 control assessments** — not pre-written documentation.
+
+> **Important scope note:** VectorLedger generates technical evidence *supporting* an audit. It does not by itself make an organization compliant. Organizational compliance requires additional controls, policies, and independent auditor assessment beyond what any database engine can provide.
 
 ---
 
-## Feature Overview
+## Key Features
 
 ### Core Ledger Engine
+
 - **Double-entry accounting** enforced at the type level — every journal entry must balance (debits == credits) before it is accepted
-- **Append-only storage** — entries are never modified or deleted; corrections are made through explicit reversal entries that are themselves chained entries
+- **Append-only storage** — entries are never modified or deleted; corrections are posted as explicit reversal entries that extend the hash chain
 - **BLAKE3 hash chain** — every journal entry contains `H(sequence || prev_hash || content_hash)`, forming an unbroken chain from first entry to last
-- **Idempotency keys** — duplicate submissions for the same financial event are detected and returned without double-posting
-- **Exposure limits** and **non-negative balance enforcement** configurable per account
-- **Multi-domain** support — each account and entry is tagged to a legal entity or business domain
-- **Hash-protected metadata** — every entry can carry an arbitrary JSON metadata blob (e.g. sender name, channel, status) that is included in `canonical_bytes()` and cannot be altered after posting without breaking the hash chain; indexed via SQLite FTS5 for instant full-text search
-- **Settlement lifecycle** — entries support `Pending → Settled | Failed` status transitions stored as append-only events; the original entry row is never modified
-- **Legal holds** — accounts can be placed under a legal hold, blocking all new entries, reversals, and settlement transitions until the hold is lifted
-- **Reconciliation** — on-demand balance reconciliation recomputes all account balances from journal entries and compares against the running cache
-
-### Financial Invariants Enforced at the Engine Level
-
-VectorLedger enforces 16 financial invariants in code — not by policy or documentation. Every invariant is verified by the automated test suite on every release.
-
-**Core double-entry rules:**
-- Debits must equal credits on every entry — `UnbalancedEntry` returned if they differ, checked before any WAL write
-- Every entry must have at least 2 lines (one debit, one credit) — `TooFewLines` if fewer
-- Every amount must be non-zero — `ZeroAmount` enforced at the `Amount` type level (no float path exists to compile)
-
-**Account validity:**
-- Every account referenced in an entry must exist — `AccountNotFound`
-- Closed accounts reject new entries — `AccountClosed`
-- Currency on each line must match the account's registered currency — `CurrencyMismatch`
-
-**Balance protection:**
-- Asset and Expense accounts enforce non-negative balance (configurable per account) — `InsufficientFunds`
-- Exposure limits: aggregate debit against a single account in one entry cannot exceed the account's configured limit — `ExposureLimitExceeded`
-
-**Legal and compliance controls:**
-- Accounts under legal hold block all new entries, reversals, and settlement transitions — `AccountUnderLegalHold`
-- Entries against accounts requiring four-eyes approval must carry a second approver — `FourEyesRequired`
-
-**Reversal rules:**
-- Only `Posted` entries can be reversed — `CannotReverse` for any other status
-- An entry can only be reversed once — `AlreadyReversed` on second attempt
-
-**Cryptographic and structural integrity:**
-- Sequence numbers are strictly monotonic with no gaps
-- BLAKE3 hash chain maintained on every entry — `VERIFY_CHAIN()` detects any tampering
-- WAL commits are Ed25519-signed — signature verification on replay detects substitution
-
-**Asset precision:**
-- Amounts for known currencies cannot exceed the maximum minor unit value for that currency's precision — `PrecisionViolation` (USD precision=2, BTC precision=8, ETH precision=18)
-
-**Idempotency:**
-- Duplicate entries with the same idempotency key are detected and skipped — `IdempotencyConflict`
-
-**Global ledger equation:**
-- `Σ(Assets + Expenses) == Σ(Liabilities + Equity + Income)` — verified by `check_financial_invariants()`
+- **16 financial invariants** enforced in code on every write — not by policy (see [Double-Entry Accounting Model](#double-entry-accounting-model))
+- **Idempotency keys** — duplicate submissions for the same financial event are detected and skipped without double-posting
+- **Multi-domain support** — each account and entry is tagged to a legal entity or business domain
+- **Hash-protected metadata** — arbitrary JSON metadata included in `canonical_bytes()` and indexed via SQLite FTS5 for full-text search
+- **Settlement lifecycle** — entries support `Pending → Settled | Failed` status transitions as append-only events
+- **Legal holds** — accounts can be placed under a legal hold, blocking all new entries, reversals, and settlement transitions
+- **Reconciliation** — on-demand balance reconciliation recomputes all account balances from journal lines
 
 ### Cryptographic Security
-- **AES-256-GCM** encryption at rest, with per-table keys derived via HKDF-SHA256 from a master key — compromising one table key does not expose others
-- **Ed25519** commit signing on every WAL commit record — any external auditor can verify the transaction log without trusting the server
+
+- **AES-256-GCM** encryption at rest with per-table keys derived via HKDF-SHA256 from a master key — compromising one table key does not expose others
+- **Ed25519** commit signing on every WAL commit record — external auditors can verify the transaction log without trusting the server
 - **Argon2id** password hashing (64 MiB / 3 iterations / 4 lanes — above OWASP minimum)
-- **Merkle proofs** on every SELECT response — clients can verify the exact set of rows returned matches the committed database state
-- All sensitive key material uses `ZeroizeOnDrop` — private keys are erased from memory when dropped
-- `WalSyncMode::NoSync` is a **compile-time feature gate**, not a runtime guard — the `NoSync` variant does not exist in the type system of a standard release build. It is only compiled in when `--features dev-no-sync` is explicitly passed, making it structurally impossible to ship or misconfigure a production binary that skips fsyncs
+- **Merkle proofs** on every SELECT response — clients can verify the returned rows match the committed database state
+- **ZeroizeOnDrop** on all sensitive key material — private keys are erased from memory when dropped
+- `WalSyncMode::NoSync` is a **compile-time feature gate**, not a runtime option — it does not exist in the release binary type system
 
-### Bug Fix (v1.0.39) — Merkle root display now shows full 64-character hash
+### HSM and Secrets Management
 
-The inline Merkle root displayed after `SELECT * FROM ledger`, `verify-audit-package`,
-and `verify-proof` was silently truncated to 32 hex characters (16 bytes). All three
-display sites now print the full 64-character BLAKE3 hash, matching the output of
-`SELECT MERKLE_ROOT(from_seq, to_seq)`.
+- **PyHSM integration** — Model 1 (local Unix socket) and Model 2 (remote mTLS) deployment
+- **AWS CloudHSM** and **Azure Dedicated HSM** (Thales Luna Network HSM 7) via bridge sidecars
+- **HashiCorp Vault KV v2** and **AWS KMS** as additional key backends
+- Raw key material never accessible from the VectorLedger host in Model 2
+
+### Compliance and Audit
+
+- **SOC 2 Type II** (8 controls) and **PCI-DSS v4** (9 controls) compliance evidence reports
+- **WORM audit log** with its own independent BLAKE3 hash chain
+- **Cryptographic audit packages** — Ed25519-signed Merkle commitments over any entry range
+- **Four-eyes (dual-control) approval** workflow for high-value transactions
+
+### Developer Experience
+
+- **PostgreSQL wire protocol** compatibility (port 5432) — connect with psql, DBeaver, any PG driver
+- **MCP server** — AI assistants (Claude Desktop, Cursor, Kiro) can query and write to the ledger directly
+- **Natural-language queries** via `vledger sql --ask` (requires `OPENAI_API_KEY`)
+- **Client SDKs** for Go, Python, and TypeScript
+- **15 MCP tools** including 5 financial reasoning tools
+
+---
+
+## Architecture Overview
 
 ```
-Before:  Merkle root  : 5a8b9ce38e7e95d66070c74d889fbe18
-After:   Merkle root  : 5a8b9ce38e7e95d66070c74d889fbe1811d9a19e459889839fc2384780a366f4
+┌──────────────────────────────────────────────────────────┐
+│  vledger process                                         │
+│                                                          │
+│  Port 5433 — Native TLS (JSON protocol)                  │
+│  Port 5432 — PostgreSQL wire protocol (--pgwire)         │
+│  Port 9090 — Prometheus metrics (--metrics-addr)         │
+│  Port 5434 — WAL replication (replication.json present)  │
+│  Port 3000 — MCP server HTTP+SSE (vledger mcp)           │
+└──────────────────┬───────────────────────────────────────┘
+                   │
+   ┌───────────────┴────────────────┐
+   │  vledger-data/                 │
+   │  ├── wal/          WAL segments│
+   │  ├── pages/        Page store  │
+   │  ├── indexes/      SQLite idx  │
+   │  ├── catalog/      Users, meta │
+   │  ├── audit/        WORM log    │
+   │  ├── keys/         Key config  │
+   │  ├── foureyes/     Approval Q  │
+   │  └── snapshots/    Backups     │
+   └────────────────────────────────┘
+                   │
+   ┌───────────────┴────────────────┐
+   │  PyHSM daemon (port 8443 mTLS) │
+   │  Master key sealed inside      │
+   └────────────────────────────────┘
 ```
 
-This was a display-only bug — no data integrity issue. The underlying hash was always
-computed and stored correctly; only the terminal output was truncated.
+### Crates Overview
 
-### New in v1.4.0 — Financial Semantic Layer and Agent Reasoning Tools
-
-VectorLedger's agentic AI layer received a major upgrade in v1.4.0. The system
-no longer just translates natural language to SQL — it understands financial
-operations, reasons across multiple tool calls, and produces structured evidence.
-
-#### Richer `--ask` schema context
-
-The LLM prompt behind `vledger sql --ask` now contains full financial domain
-knowledge, not just raw column names:
-
-- Double-entry accounting rules (every entry balances; debits == credits)
-- Minor-units semantics with dollar examples ($10,000 = 1000000)
-- Account type normal balance directions (Asset/Expense → Debit; Liability/Equity/Income → Credit)
-- Full entry status lifecycle (Posted, Pending, Settled, Failed, Reversal, PendingApproval)
-- Cryptographic field meanings (content_hash, chain_hash, merkle_root)
-- Common financial question → SQL query patterns
-
-This means `--ask` now gives correct answers to questions like:
-- *"show me all income accounts with a negative balance"* (knows that's normal for Income type)
-- *"total debits posted in September"* (knows to filter status='Posted' and use minor units)
-
-#### Five new MCP financial reasoning tools
-
-| Tool | What it does |
+| Crate | Responsibility |
 |---|---|
-| `explain_balance` | Why is an account at its current balance? Chains account metadata → recent debits → recent credits → narrative with account type interpretation |
-| `reconcile_account` | Does the stored balance match sum(debits) − sum(credits)? Returns BALANCED or flags the exact discrepancy with remediation steps |
-| `find_policy_violations` | Scan for large transactions, entries pending too long, missing external refs, failed entries — all thresholds configurable |
-| `summarize_period` | Natural-language period summary: counts by status, total volume, Merkle commitment, chain integrity |
-| `audit_report` | Full cryptographic audit evidence narrative: chain verify, Merkle root, sample entries with hashes, auditor verification instructions |
+| `vledger` | Main binary, CLI subcommands |
+| `vledger-ledger` | Core ledger engine, 16 financial invariants |
+| `vledger-crypto` | All cryptographic primitives (BLAKE3, AES-256-GCM, Ed25519, Argon2id) |
+| `vledger-wal` | Write-ahead log, durability, recovery |
+| `vledger-pages` | Encrypted page store |
+| `vledger-sql` | SQL parser, planner, executor |
+| `vledger-server` | TLS 1.3 server, RBAC, sessions, rate limiting |
+| `vledger-pgwire` | PostgreSQL wire protocol v3 compatibility |
+| `vledger-mcp` | Model Context Protocol server, 15 tools |
+| `vledger-hsm` | HSM integration (PyHSM, AWS CloudHSM, Azure HSM) |
+| `vledger-secrets` | Secrets manager backends (Vault, KMS, env, file) |
+| `vledger-audit` | WORM audit log with independent hash chain |
+| `vledger-compliance` | SOC 2 and PCI-DSS compliance evidence reports |
+| `vledger-foureyes` | Four-eyes dual-control approval workflow |
+| `vledger-replication` | Synchronous hot-standby WAL replication |
+| `vledger-license` | License tier enforcement, Ed25519 verification |
+| `vledger-kani` | 21 formal verification (Kani) proof harnesses |
 
-These tools let an agent autonomously answer questions like:
-- *"Why is our settlement account $82,400 lower than expected?"* → `explain_balance` + `reconcile_account`
-- *"Find transactions that violate our settlement policy"* → `find_policy_violations`
-- *"Summarize last quarter"* → `summarize_period`
-- *"Generate an audit report for September"* → `audit_report`
+### Key Invariants
 
-#### `AGENT_SYSTEM_PROMPT` — financially-aware agent instructions
-
-A public `AGENT_SYSTEM_PROMPT` constant is now exported from `vledger-mcp`. It
-contains financially-aware instructions covering amounts in minor units, double-entry
-rules, account type semantics, status meanings, tool routing guidance, and behavioral
-rules (never fabricate data, always verify chain, confirm before posting).
-
-It is returned automatically in the MCP `initialize` response so MCP clients that
-support the `instructions` field pick it up without any manual configuration. Use
-it as the `system` / `instructions` field when building Python agents:
-
-```python
-from vledger_mcp import AGENT_SYSTEM_PROMPT  # or copy from the crate docs
-
-agent = Agent(
-    name="VectorLedger Agent",
-    instructions=AGENT_SYSTEM_PROMPT,  # financially-aware, not just schema-aware
-    mcp_servers=[vledger],
-)
-```
+- Only one `vledger` process may open a data directory at a time (enforced by advisory lock).
+- PyHSM must be reachable before `vledger start` — startup fails closed if PyHSM is down.
+- The WORM audit log is append-only and fsync'd on every write.
+- TLS 1.3 is mandatory on all connections — plain-text is rejected.
 
 ---
 
-### New in v1.4.4 — `resolve_account`: identity enforcement before writes
+## Quick Install
 
-Fixes a semantic integrity problem where the agent could assign random accounts to
-named individuals without verification — producing entries that were cryptographically
-correct but semantically wrong.
+### Option 1 — Install script (recommended)
 
-**`resolve_account`** is now mandatory before any write involving named parties. It
-searches by code, name, and UUID and enforces a hard gate:
-
-| Result | Agent action |
-|---|---|
-| `✓ FOUND` (single match) | Show to user, get confirmation, then post |
-| `✗ NOT_FOUND` | ⛔ STOP — ask user for the correct account code/UUID |
-| `⚠ MULTIPLE_FOUND` | ⛔ STOP — ask user to disambiguate |
-
-If a name only appears in transaction metadata, the tool explains that metadata names
-are not account identities and halts the operation.
-
-This enforces the **identity → authorization → accounting** chain:
-the ledger guarantees cryptographic integrity; `resolve_account` guarantees semantic
-correctness — the right account belongs to the right person.
-
----
-
-### New in v1.4.5 — Structured correction workflow
-
-When a user asks to change an amount on a posted entry, the agent now shows a full
-plan and waits for explicit confirmation before writing anything.
-
-**Step 1 — `propose_correction`** (writes nothing):
-
-```
-Correction Proposal
-────────────────────────────────────────────
-Original entry: #12467895   Description: Payment to Martha Mughrabi
-Original amount: $301.92    Correct amount: $401.92   Net adjustment: +$100.00
-
-Proposed actions:
-1. Reverse entry #12467895 (flip debit/credit) — $301.92
-2. Post correction — $401.92
-
-What will be preserved:
-  Historical entry    ✓ PRESERVED — entry #12467895 is never modified
-  Original hash       ✓ PRESERVED — 5a8b9ce38e7e...
-  New entries         WILL BE APPENDED as new sequences
-
-⚠ Awaiting confirmation — "Shall I proceed?"
-```
-
-**Step 2 — `execute_correction`** (only after user confirms):
-
-```
-✓ Reversal posted     (sequence 25000006)
-✓ Correction posted   (sequence 25000007)
-✓ Double-entry balanced
-✓ Original entry #12467895 PRESERVED
-✓ Hash chain extended and verified
-Net adjustment: +$100.00
-```
-
-> *"Ask your ledger. Don't edit it."* The agent understands what you want.
-> VectorLedger's accounting rules determine how that request gets executed.
-
----
-
-### v1.4.1–v1.4.3 — MCP server network mode and Kiro V3 compatibility
-
-- **v1.4.1** — `vledger mcp` auto-detects a running `vledger start` on port 5433
-  and switches to network mode, eliminating the data directory lock conflict
-- **v1.4.2** — SSE `endpoint` event now sends the full absolute URL
-  (`http://host:port/message`) required by Kiro CLI V3
-- **v1.4.3** — JSON-RPC notifications (no `id` field) now return HTTP 204
-  instead of `{"result":null}`, fixing Kiro V3 stuck on `◌ loading`
-
-
-
-Ask the ledger questions in plain English. An LLM translates the question to SQL,
-prints the generated query, and executes it — no SQL knowledge required.
-
-```bash
-export OPENAI_API_KEY=sk-...
-vledger sql --ask "show me all payments over $10,000 last week"
-# → SQL: SELECT * FROM ledger WHERE ...
-# (executes and prints results normally)
-```
-
-```bash
-vledger sql --ask "what is the current balance of the CASH account"
-vledger sql --ask "list the last 5 failed transactions"
-vledger sql --ask "compute the Merkle root over entries 100000 to 200000"
-```
-
-Configuration via environment variables:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `OPENAI_API_KEY` | — | **Required.** Your API key. |
-| `OPENAI_MODEL` | `gpt-4o` | Model to use for translation. |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Override for Ollama, Groq, etc. |
-
-The generated SQL is printed to stderr as `→ SQL: ...` before execution so you
-always see exactly what will run. Works in both network mode (server running) and
-direct mode.
-
-### New in v1.0.39 — `vledger mcp` (Model Context Protocol server)
-
-Start an MCP server so AI assistants (Claude Desktop, Cursor, Kiro, and any other
-MCP-capable client) can query and write to the ledger directly — no SQL required.
-
-```bash
-# Embedded — uses the current data directory
-vledger mcp --bind 127.0.0.1:3000
-
-# Or run the standalone binary
-vledger-mcp --data-dir ./vledger-data --bind 127.0.0.1:3000
-```
-
-Then add it to your MCP client's config:
-```json
-{
-  "mcpServers": {
-    "vledger": { "url": "http://127.0.0.1:3000/sse" }
-  }
-}
-```
-
-**Tools exposed:**
-
-| Tool | Description |
-|---|---|
-| `query_ledger` | Run any read-only SELECT (SELECT, BALANCE, VERIFY_CHAIN, MERKLE_ROOT, …) |
-| `post_entry` | Record a new double-entry journal entry |
-| `get_balance` | Return the current balance of an account |
-| `list_accounts` | List all accounts with balances (optional domain/currency filter) |
-| `query_ledger_lines` | Query individual debit/credit lines |
-| `verify_chain` | Verify cryptographic chain integrity |
-| `merkle_root` | Compute BLAKE3 Merkle root over a sequence range |
-| `explain_balance` | Why is an account at its current balance? (v1.4.0) |
-| `reconcile_account` | Verify stored balance matches sum of posted lines (v1.4.0) |
-| `find_policy_violations` | Scan for large txns, pending-too-long, missing refs, failures (v1.4.0) |
-| `summarize_period` | Natural-language period summary with Merkle commitment (v1.4.0) |
-| `audit_report` | Full cryptographic audit evidence report for a period (v1.4.0) |
-| `resolve_account` | Resolve a name/code/UUID to an authoritative account ID before any write (v1.4.4) |
-| `propose_correction` | Show a structured reversal+correction plan before writing anything (v1.4.5) |
-| `execute_correction` | Execute a confirmed correction: post reversal + correction entries (v1.4.5) |
-
-The MCP server uses HTTP + SSE transport as defined by the MCP spec. The
-`GET /health` endpoint returns `{"ok":true,"tools":15}` for load-balancer health checks.
-
-
-
-`SELECT sequence, content_hash FROM ledger WHERE sequence = 14395673` now
-returns only the requested columns instead of all 12. Works for `ledger`,
-`ledger_lines`, and `accounts`, and for all column types — timestamps,
-metadata JSON, hashes, UUIDs, amounts, lines.
-
-```sql
--- Returns only sequence and content_hash
-SELECT sequence, content_hash FROM ledger WHERE sequence = 14395673;
-
--- Returns only date, account_id, amount, currency
-SELECT date, account_id, amount, currency FROM ledger_lines WHERE sequence = 14395673;
-
--- Returns only code and balance
-SELECT code, balance FROM accounts WHERE domain = 'main';
-```
-
-`SELECT *` continues to return all columns as before. Column order in the
-output follows the order specified in the SELECT list.
-
-### Bug Fix (v1.0.37) — `MERKLE_ROOT()` now accepts a single argument
-
-`to_seq` is now optional. When omitted it defaults to `from_seq`, so a
-single sequence number gives the Merkle root for that one entry:
-
-```sql
--- Single-entry Merkle root (new — one argument)
-SELECT MERKLE_ROOT(14395673);
-
--- Range Merkle root (unchanged)
-SELECT MERKLE_ROOT(786000, 786500);
-```
-
-Both forms are fully equivalent — `MERKLE_ROOT(n)` is identical to
-`MERKLE_ROOT(n, n)`. Previously passing a single argument returned an
-error requiring two arguments.
-
-### Bug Fix (v1.0.36) — `MERKLE_ROOT(from_seq, to_seq)` SQL function
-
-VectorLedger now exposes the Merkle root directly as a queryable SQL function,
-available from any SQL client — `psql`, DBeaver, or the native client.
-
-```sql
--- Merkle root over a specific sequence range
-SELECT MERKLE_ROOT(786000, 786500);
-
--- Merkle root for a single entry
-SELECT MERKLE_ROOT(786295, 786295);
-```
-
-Returns a single row:
-
-| `from_seq` | `to_seq` | `entry_count` | `merkle_root` |
-|---|---|---|---|
-| `786000` | `786500` | `501` | `a3f1c2e4…` (64 hex chars) |
-
-The root is a BLAKE3 Merkle tree built over the `content_hash` of every entry
-in the range — the same leaf inputs used by the `--with-proofs` query engine
-and the `vledger audit-package` CLI command. An empty range returns
-`0000…0000` (32 zero bytes — `ZERO_HASH`).
-
-> **Note:** `MERKLE_ROOT()` does not require the server to be started with
-> `--with-proofs`. It is a standard SQL function available at all times to
-> any client with the `admin`, `operator`, or `auditor` role. The
-> `--with-proofs` flag is only needed if you want every `SELECT` to
-> automatically append a Merkle proof `NOTICE` — a separate, optional feature.
-
-**Privilege:** requires the `admin`, `operator`, or `auditor` role
-(`can_verify`). The `readonly` role cannot call `MERKLE_ROOT`.
-
-**Files changed:**
-- `crates/vledger-sql/src/planner.rs` — `MerkleRoot` variant added to
-  `LogicalPlan`; `"MERKLE_ROOT"` arm added to `plan_query` using the
-  existing `extract_optional_u64_range` helper
-- `crates/vledger-sql/src/executor.rs` — `MerkleRoot` arm in
-  `ReadExecutor::execute`; `exec_merkle_root` implementation
-- `crates/vledger-sql/src/optimizer.rs` — `MerkleRoot` arm in `explain()`
-- `crates/vledger-ledger/src/store.rs` — `entries_in_range(from, to)`
-  public method using the SQLite index scan `WHERE sequence >= ? AND <= ?`
-- `crates/vledger-server/src/auth.rs` — `MerkleRoot` privilege arm
-- `crates/vledger-pgwire/src/server.rs` — `MerkleRoot` privilege arm
-
-### Bug Fix (v1.0.35)
-
-**pgwire `--with-proofs` flag was silently ignored — Merkle root never sent to SQL clients**
-
-When the server was started with `--with-proofs --pgwire`, the Merkle root was computed
-correctly by the SQL executor but was never surfaced to clients connecting via the
-PostgreSQL wire protocol (psql, DBeaver, etc.). The root was silently discarded at the
-pgwire boundary.
-
-Root cause: `execute_query` in `crates/vledger-pgwire/src/server.rs` declared its
-`attach_proofs` parameter as `_attach_proofs` (prefixed with an underscore, suppressing
-the compiler's unused-variable warning) and always called `Executor::new()` regardless
-of the flag value. As a result, the read executor was never built with proofs enabled,
-and `qr.proof` was always `None`.
-
-Three fixes applied to `crates/vledger-pgwire/src/server.rs`:
-
-1. **Parameter used**: renamed `_attach_proofs` → `attach_proofs` so the value is
-   consumed.
-
-2. **Correct executor selected**: replaced the always-write-lock `Executor::new()` call
-   with a branch:
-   - `PostEntry` / `CreateAccount` plans → write lock + `Executor::new()` (unchanged)
-   - All read plans → read lock + `ReadExecutor::new()` or `ReadExecutor::with_proofs()`
-     depending on the flag. This also fixes a secondary issue where read queries were
-     unnecessarily acquiring the write lock, which blocked concurrent reads.
-
-3. **Merkle root surfaced as `NoticeResponse`**: after the `DataRow` messages are sent,
-   if `qr.proof` is `Some`, a pgwire `NoticeResponse` (type `N`) is emitted carrying
-   the hex-encoded Merkle root, leaf count, and signing status. Notices are displayed
-   by psql automatically and are readable by every standard PostgreSQL client library.
-
-After this fix, a query run against a server started with `--with-proofs --pgwire`
-displays the Merkle root directly in psql output:
-
-```
--[ RECORD 1 ]+-----------------------------------------------------------------
-sequence     | 786295
-id           | e99c3ea8-7761-419b-9a5a-79b570220a13
-...
-NOTICE:  Merkle root: b34281d3a443635aa8e6915842ff199d37b53ec8458f9a056e6284838221a776 (1 leaf, verified: true)
-```
-
-No changes to the on-disk format, wire protocol version, or any other behaviour.
-Existing databases and backups are fully compatible.
-
-### Security & Reliability Hardening (v1.0.34)
-
-Three industry-standard verification methods added alongside the existing test suite.
-No on-disk format changes; existing databases and backups are fully compatible.
-
-**Static Analysis — `cargo clippy` with custom deny rules**
-
-`scripts/static-analysis.sh` runs two-pass clippy across the workspace:
-
-- **Pass 1** (financial and crypto packages): denies `unwrap_used`, `expect_used`, `panic`, `cast_possible_truncation`, `cast_sign_loss`, `indexing_slicing`, `ptr_arg`, `todo`, `unimplemented`. Every existing violation was either fixed or annotated with a `#[allow]` plus a `// SAFETY:` comment explaining why the pattern is provably safe.
-- **Pass 2** (all packages): denies `correctness`, `suspicious`, `await_holding_lock`, `let_underscore_lock` across all code including tests.
-
-Source fixes made as part of this work: `Amount` arithmetic operators (`Neg`, `Add`, `Sub`) now use `checked_neg` / `checked_add` / `checked_sub` — a silent overflow in financial math is now a compile-time error. `cast_sign_loss` in the license watcher replaced with `u64::try_from().unwrap_or(1)`.
-
-**Mutation Testing — `cargo-mutants`**
-
-`scripts/mutation-test.sh` runs cargo-mutants v27 scoped to 7 financial/crypto packages. Mutation testing injects plausible-but-wrong code changes and verifies the test suite catches each one.
-
-Initial results on `vledger-crypto`: **57 mutants caught, 20 survived** (74% mutation score). Surviving mutants are documented test gaps — the most significant are `compute_chain_hash` returning a default hash, and `DerivedKey::into_signing_seed` returning zeros.
-
-```bash
-./scripts/mutation-test.sh --package vledger-crypto
-./scripts/mutation-test.sh  # all 7 configured packages
-```
-
-**Formal Verification — Kani proof harnesses**
-
-`crates/vledger-kani/` contains 21 Kani proof harnesses that exhaustively verify properties for all possible inputs within bounded types — not just a sample.
-
-| Module | Harnesses | Properties proved |
-|---|---|---|
-| `wal` | 5 | `MAX_RECORD_PAYLOAD` cap rejects u32::MAX, usize::MAX, and all values ≥ 64 MiB; accepts all values < 64 MiB |
-| `amount` | 7 | `Amount::new(0)` always returns None; checked arithmetic never panics for any i64; checked_add result equals x+y when no overflow |
-| `hash_chain` | 5 | `ZERO_HASH` is exactly 32 zero bytes; `Hash` type is 32 bytes; `merkle_root(&[])` returns `ZERO_HASH` |
-| `hmac` | 4 | `mac_eq` is reflexive, symmetric, returns false when inputs differ, and implies byte-for-byte equality |
-
-```bash
-cargo install kani-verifier && cargo kani setup
-cargo kani --package vledger-kani                              # all 21 harnesses
-cargo kani --package vledger-kani --harness wal_boundary_exact # single harness
-./scripts/formal-verify.sh                                     # via script
-```
-
-### Security & Reliability Hardening (v1.0.33)
-
-498 tests passing across 11 packages. Added comprehensive coverage for every
-previously untested subsystem. No on-disk format changes; existing databases
-and backups are fully compatible.
-
-**New unit/integration tests (245 new tests across 9 packages):**
-
-| Package | New tests | What they cover |
-|---|---|---|
-| `vledger-replication` | 21 | HMAC challenge-response, secret management, divergence detection, protocol encoding, config loading |
-| `vledger-compliance` | 45 | SOC 2 / PCI-DSS report generation, all control evaluations, JSON/Markdown serialisation |
-| `vledger-foureyes` | 30 | Submit, approve, reject, list_pending, get, persistence across reopen, idempotency guard, audit event emission |
-| `vledger-hsm` | 19 | HsmTransport construction, key ID helpers, KeyPolicy, RemotePyHsmConfig, HsmError display, is_available without socket |
-| `vledger-license` | 21 | Free tier, invalid JSON fallback, tampered signature, feature gating, LicenseTier/Feature parse round-trips, canonical payload |
-| `vledger-crypto` | 34 | MasterKey determinism, all named derivation contexts pairwise distinct, row key isolation, DerivedKey conversions, edge cases |
-| `vledger-wal` | 29 | WAL encryption migration path — plaintext, encrypted, mixed segments; derive_segment_key, encrypt/decrypt round-trip, segment-index AAD |
-| `vledger-ledger` | +24 | Settlement lifecycle (Posted→Pending→Settled/Failed), original entry immutability, legal hold placement/lifting, WAL replay |
-
-**New proptest properties (4 added to `proptest_invariants.rs`):**
-
-- `p_inv8_reversal_correction_nets_to_correction_amount` — reversal + correction always yields the correction amount, not the original
-- `p_inv9_hash_chain_valid_for_random_count_and_amounts` — chain valid and every entry passes `verify_hashes()` for up to 500 random transactions
-- `p_inv10_settlement_events_do_not_mutate_original_entry` — `content_hash` never changes after any sequence of settlement events
-- `p_inv11_balance_equals_sum_of_lines` — `balance()` always equals `Σdebits - Σcredits` across all entry lines for an account
-
-**New fuzz targets (6 added — 12 total):**
-
-| Target | What it fuzzes |
-|---|---|
-| `fuzz_replication` | Protocol message parsing, HMAC computation, secret file parsing, divergence checkpoint verification |
-| `fuzz_backup_keysidecar` | `.key` sidecar JSON parsing, AES-256-GCM wrapped key decryption, single-byte tamper detection |
-| `fuzz_audit_log` | WORM audit log with arbitrary content, `AuditEvent::verify()`, chain verifier on corrupt logs |
-| `fuzz_compliance_report` | Compliance engine on adversarially crafted data directories |
-| `fuzz_csv_import` | CSV parser iteration, column mapping resolution, amount field parsing |
-| `fuzz_wal_recovery_multisegment` | Recovery across 2–3 segment files in 5 structured scenarios |
-
-Run all 12 fuzz targets:
-```bash
-cargo install cargo-fuzz
-cargo +nightly fuzz run fuzz_replication -- -max_total_time=60
-cargo +nightly fuzz run fuzz_backup_keysidecar -- -max_total_time=60
-cargo +nightly fuzz run fuzz_audit_log -- -max_total_time=60
-cargo +nightly fuzz run fuzz_compliance_report -- -max_total_time=60
-cargo +nightly fuzz run fuzz_csv_import -- -max_total_time=60
-cargo +nightly fuzz run fuzz_wal_recovery_multisegment -- -max_total_time=60
-```
-
-### Security & Reliability Hardening (v1.0.32)
-
-Three bugs were found and fixed by the fuzz suite during a full fuzzing run of all six
-targets. No on-disk data formats were changed; existing databases and backups are fully
-compatible.
-
-**WAL reader unbounded allocation — OOM on crafted `payload_len` / `ct_len`**
-
-The WAL segment reader in `crates/vledger-wal/src/reader.rs` allocated a buffer of
-`payload_len` bytes before attempting any read. A WAL record header with
-`payload_len = 0xFFFFFFFF` (4 GiB) triggered a 4 GiB allocation attempt and killed
-the process. The same issue existed for `ct_len` in the encrypted record path.
-
-Fix: `MAX_RECORD_PAYLOAD = 64 MiB` (matching `DEFAULT_SEGMENT_SIZE`) is checked against
-both fields before any allocation. Records claiming a larger payload are treated as torn
-writes and stop the recovery scan cleanly. This was found by `fuzz_wal_recovery` with
-input `RLWE\xff\xff...\xff`.
-
-Severity: any process that opens a WAL directory containing a crafted or accidentally
-corrupted segment fails to start. An attacker with write access to the WAL directory
-could use this to prevent the server from starting.
-
-**SQL planner panic — out-of-bounds index on column/value count mismatch**
-
-The SQL query planner in `crates/vledger-sql/src/planner.rs` indexed directly into the
-`VALUES` list (`vals[idx]`) without checking that the number of values matched the number
-of columns. An `INSERT` statement with fewer values than columns — for either
-`INSERT INTO ledger` or `INSERT INTO accounts` — caused an index-out-of-bounds panic.
-
-Fix: replaced `vals[idx]` with `vals.get(idx)` returning `SqlError::MissingField` with
-a descriptive message. Found by `fuzz_sql_parser` with:
-```sql
-INSERT INTO accounts (code,name,account_type,currency,domain) VALUES ('\B','\007sset','\\USD','\011est')
-```
-
-Severity: any authenticated client could crash the query planner with a single malformed
-`INSERT` statement.
-
-**Fuzz harness bincode allocation cap**
-
-`fuzz_transaction` fed raw arbitrary bytes directly to
-`bincode::serde::decode_from_slice` without an allocation limit. A crafted 64-bit length
-prefix caused bincode to attempt a ~1.8 exabyte allocation. The production code path is
-safe (payloads are already reader-validated before reaching bincode), but the fuzz harness
-needed `.with_limit::<{1 MiB}>()` added to the decode config.
-
-**All six fuzz targets ran clean after fixes:**
-
-| Target | Runs | Result |
-|---|---|---|
-| `fuzz_wal_recovery` | 1,039,845 | ✅ Clean |
-| `fuzz_sql_parser` | 3,049,549 | ✅ Clean |
-| `fuzz_pgwire_codec` | 9,291,762 | ✅ Clean |
-| `fuzz_backup_restore` | 1,191,487 | ✅ Clean |
-| `fuzz_auth` | 382 | ✅ Clean |
-| `fuzz_transaction` | 30,062 | ✅ Clean |
-
-### Security & Reliability Hardening (v1.0.31)
-
-The following hardening changes were made after a full security review of the codebase.
-No on-disk data formats were changed; existing databases and backups are fully compatible.
-
-**`SignedCommit::verify()` removed**
-
-The self-consistency verification method (`SignedCommit::verify()`, deprecated in v1.0.26) has
-been deleted from `vledger-crypto`. It verified a WAL commit's Ed25519 signature against the
-public key embedded *inside the commit itself*, which proves self-consistency but not
-authenticity — an attacker who can write to the WAL segment can substitute their own
-content and key. All callers already used the safe `verify_against(trusted_key)` form;
-the unsafe method is now a compile error. The WAL recovery path (`verify_commit_signature`)
-carries an explicit doc comment explaining the embedded-key limitation and the two
-defence-in-depth layers (tx_hash recomputation + Merkle checkpoint signing) that
-together close the gap.
-
-**`WalSyncMode::NoSync` is a compile-time feature gate, not a runtime guard**
-
-`NoSync` mode never calls `fsync` — a crash loses committed transactions permanently.
-Previously it was accepted by the release binary and guarded only by a runtime warning.
-It is now gated behind `#[cfg(feature = "dev-no-sync")]`; the variant does not exist in
-the type system of a standard build, so it cannot be enabled by misconfiguration.
-The `--wal-sync-mode=no_sync` CLI flag now returns a hard error from `FromStr` in
-release builds. Development and CI builds can opt in with `--features dev-no-sync`.
-The bulk-import fast path retains access to `no_sync` behind the same feature gate.
-Verified: zero `NoSync` symbols in the release `.rlib` without the feature.
-
-**Deterministic crash/recovery test suite (8 new tests)**
-
-`crates/vledger-ledger/src/deterministic_recovery_tests.rs` adds eight tests that each
-target a specific failure scenario not covered by the existing suite:
-
-| Test | Failure scenario |
-|---|---|
-| `power_loss_mid_commit_torn_record_is_discarded` | Corrupt the last 8 bytes of the active WAL segment — torn Commit is discarded, prior entries intact |
-| `segment_boundary_crash_all_committed_entries_survive` | 30 transactions across multiple 4 KiB segments; all recovered, sequences strictly monotonic |
-| `checkpoint_deleted_falls_back_to_full_wal_replay` | Delete `wal-checkpoint.json`; full WAL replay recovers all data |
-| `checkpoint_corrupted_falls_back_to_full_wal_replay` | Overwrite checkpoint with invalid JSON; `WalCheckpoint::read` returns `None`, open succeeds |
-| `checkpoint_with_future_sequence_triggers_full_replay` | Bogus checkpoint pointing to segment 999; store finds real data via full replay |
-| `concurrent_open_second_attempt_is_refused` | `DataDirLock` refuses a second acquire immediately |
-| `concurrent_open_via_ledger_store_second_open_errors` | Second `LedgerStore::open()` on the same dir returns a lock error |
-| `multi_entry_batch_spanning_segment_roll_fully_recovered` | 60 data records in a single WAL transaction spanning multiple 4 KiB segments; all payloads present after `recover_verified()` |
-
-**Fuzz suite expanded (3 new targets)**
-
-`fuzz/fuzz_targets/` now contains six targets. The three additions:
-
-| Target | What it fuzzes |
-|---|---|
-| `fuzz_backup_restore` | tar entry parsing, AES-256-GCM tamper detection (asserts every single-byte ciphertext mutation returns `Err`), `BackupManifest` JSON deserialization, BLAKE3 manifest hash, path-traversal guard |
-| `fuzz_auth` | `Role::from_str`, `UserStore::authenticate` (arbitrary credentials, lockout counter path), `validate_token` (arbitrary token strings), cross-user token forgery invariant |
-| `fuzz_transaction` | Bincode deserialization of all four WAL payload types (`DataPayload`, `CommitPayload`, `BeginPayload`, `CheckpointPayload`), `decode_data_payload_from_bytes`, `decode_table_id_only`, full `recover()` / `recover_verified()` / `recover_streaming()` pipelines, 8 structured transaction boundary scenarios |
-
-Run any target with:
-```bash
-cargo install cargo-fuzz
-cargo +nightly fuzz run fuzz_transaction -- -max_total_time=60
-```
-
-### Write-Ahead Log (WAL)
-- **Per-record mode** fsyncs every WAL record before returning `Ok` — zero data loss on crash
-- **Group-commit mode** (default) flushes the WAL on a configurable background interval (default 2 ms); up to one flush window of writes may be lost on a hard crash
-- **CRC-32** integrity check on every WAL record plus a **BLAKE3** hash on every row payload — two independent integrity layers
-- **Crash recovery** replays committed transactions and discards uncommitted ones deterministically
-- **Torn write detection** — recovery stops at the point of corruption rather than applying partial records
-
-### Network Servers
-- **Native TLS 1.3 server** (port 5433, JSON protocol) — every connection is authenticated before any SQL executes
-- **PostgreSQL wire-protocol server** (port 5432) — compatible with `psql`, pgAdmin, DBeaver, Metabase, and any PostgreSQL client library
-- Both listeners share the same `UserStore`, session state, and role enforcement
-- **Mutual TLS (mTLS)** support on both listeners and the replication channel
-- **Self-signed certificates** generated at startup and persisted across restarts; replaceable with CA-signed certificates
-
-### Authentication and Authorization
-- Four built-in roles: `admin`, `operator`, `auditor`, `readonly`
-
-| Role | SELECT | INSERT ledger | INSERT accounts | VERIFY | Admin ops |
-|---|---|---|---|---|---|
-| `admin` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `operator` | ✓ | ✓ | ✓ | ✓ | ✗ |
-| `auditor` | ✓ | ✗ | ✗ | ✓ | ✗ |
-| `readonly` | ✓ | ✗ | ✗ | ✗ | ✗ |
-
-- Privilege enforcement is applied to the **resolved query plan**, not raw SQL text — immune to comment/whitespace bypass attacks
-- **Per-user domain filter** — user accounts can be restricted to a specific domain; the restriction is enforced at query execution time
-- **Brute-force protection**: 5-attempt lockout with 5-minute cooldown and exponential back-off delay (200 ms–3 s per attempt)
-- Session tokens use `BLAKE3(server_secret || username || role || 32-byte OsRng nonce)` — no sequential or timestamp-based tokens
-- Session store bounded at 4,096 entries with two-phase eviction; background purge every 60 seconds
-- Auth bypass (`require_auth = false`) is **compile-gated** behind `--features dev-no-auth` — impossible to ship an unauthenticated production binary
-
-### Connection Resource Controls
-
-| Control | Native (5433) | PgWire (5432) |
-|---|---|---|
-| `max_connections` semaphore | 128 | 64 |
-| Per-IP token bucket (burst=10, refill=2/s) | Yes | Yes |
-| Auth timeout | 30 s | 30 s |
-| Idle timeout | 5 min | 5 min |
-| Request frame size limit | 4 MiB | 16 MiB |
-| Graceful shutdown drain | Yes | Yes |
-
-### Four-Eyes (Dual-Control) Workflow
-- Accounts can be flagged `require_four_eyes = true`
-- Entries to those accounts go into a durable approval queue instead of posting immediately
-- A second, **different** principal must approve — self-approval is explicitly rejected at the server layer
-- All approvals, rejections, and the original submission are recorded in the audit log
-
-### WORM Audit Log
-- Every security-relevant event is written as a signed JSON line to `audit/audit.log`
-- Each event is BLAKE3-hashed into the next, forming a tamper-evident chain independent of the ledger chain
-- Events recorded: `server_started`, `auth_event` (every login success/failure), `query_executed` (every SQL statement), `entry_posted` (every committed transaction), `four_eyes_submitted/approved/rejected`, `backup_created`, `key_rotated`
-- Export to JSON or CSV with optional date-range filtering via `vledger audit-export`
-- **Tiered export limits** enforced by license: Free (30 days), Starter (90 days), Growth/Enterprise (unlimited)
-
-### Cryptographic Audit Package
-
-VectorLedger can generate a portable, self-contained cryptographic audit evidence package that any third party can verify independently — no database access, no server, no credentials required.
-
-Three-tier design:
-
-**Tier 1 — Commitment package** (default, fast at any scale)
-```bash
-vledger audit-package \
-  --data-dir ./vledger-data \
-  --tenant "Acme Financial" \
-  --description "Q3 2026 regulatory audit" \
-  --period-start 2026-07-01 \
-  --period-end 2026-09-30 \
-  --output audit-q3-2026.json
-```
-Computes the Merkle root over all entries in a single O(n) pass, signs it with the database Ed25519 key, and writes a compact JSON commitment. Completes in seconds regardless of ledger size.
-
-**Tier 2 — On-demand entry proof** (prove one specific entry)
-```bash
-vledger audit-proof --data-dir ./vledger-data \
-  --commitment audit.json \
-  --sequence 406340 \
-  --output entry-proof.json
-```
-Generates a single Merkle inclusion proof proving that entry 406340 belongs to the committed root. The auditor receives a self-contained file they can verify without database access.
-
-**Tier 3 — Full export** (small ledgers only)
-```bash
-vledger audit-package --data-dir ./vledger-data --include-entries
-```
-Embeds all entries and per-entry proofs. Only practical for ledgers with fewer than ~10,000 entries.
-
-**Verification** (no database access required):
-```bash
-vledger verify-audit-package --file audit.json
-vledger verify-audit-package --file entry-proof.json
-```
-
-Output:
-```
-  [1/3] Content hash     ✓
-  [2/3] Chain hash       ✓
-  [3/3] Merkle proof     ✓
-
-✓ VERIFIED — 1 entries, all checks passed.
-  Merkle root : 804efb54ea31539a...
-```
-
-### HSM Integration
-- Pluggable `Pkcs11Provider` trait with three backends:
-  - **SoftHSM** — PyHSM Unix socket daemon (development and CI)
-  - **AWS CloudHSM** — via bridge sidecar
-  - **Azure Dedicated HSM** — via bridge sidecar (Thales Luna Network HSM 7)
-- Raw key material never leaves the HSM — all cryptographic operations run inside the device
-- Key rotation via `vledger rotate-keys` — old key version is archived for decryption of existing data; new version used for all new writes
-- **Two deployment models supported:**
-  - **Model 1 — Local PyHSM** (same server): Unix domain socket transport, zero network overhead, ideal for development and single-server production
-  - **Model 2 — Remote PyHSM** (same-region, separate server): TLS 1.3 + mutual TLS (mTLS) transport over a private subnet; the HSM runs on a dedicated server, PyHSM's private key material is never accessible from the VectorLedger host
-
-### Secrets Management
-- Master key can be sourced from:
-  - Environment variable (`VectorLedger_MASTER_KEY`)
-  - File on disk (development only)
-  - **HashiCorp Vault KV v2** (`VAULT_TOKEN` read at runtime; TTL checked and logged at startup)
-  - **AWS KMS** `GenerateDataKey` (ciphertext blob cached with HMAC-SHA256 integrity check)
-  - **PyHSM — local** (Model 1): Unix socket, master key sealed inside local PyHSM daemon
-  - **PyHSM — remote** (Model 2): mTLS, master key sealed inside remote PyHSM daemon on a separate server
-- Configuration file (`key_source.json`) contains only metadata — the key itself never appears in config
-
-### Replication
-
-> **License requirement:** WAL replication requires a **Growth or Enterprise** license.
-
-Synchronous hot-standby WAL replication with three independent security layers:
-
-1. **TLS 1.3** on the replication channel
-2. **Optional mTLS** — the primary can require a client certificate from each replica
-3. **BLAKE3-keyed HMAC challenge-response** inside TLS before any WAL data is exchanged
-
-Additional integrity guarantees:
-- Replica verifies BLAKE3 hash of every received WAL record before applying it
-- Exponential reconnect backoff (500 ms → 30 s) with faster escalation on auth failures
-- **Divergence detection** via periodic `DivergenceCheckpoint` messages carrying a rolling BLAKE3 WAL chain hash
-
-### Compliance Reporting
-
-> **Important scope note:** VectorLedger generates machine-generated technical evidence supporting SOC 2 and PCI-DSS control assessments. This evidence is a technical input to an audit — it does not by itself make an organization compliant.
-
-- **SOC 2 Type II** controls: CC6.1, CC6.2, CC6.3, CC6.6, CC6.7, CC7.2, CC8.1, A1.1
-- **PCI-DSS v4** controls: Req 2.2, 3.4, 3.5, 4.2, 7.1, 10.2, 10.3, 10.5, 11.5
-- Reports are generated by running checks against real filesystem state — not pre-written text
-- Output as Markdown or JSON; piped to a file with `--output`
-
-### Backup and Restore
-- Point-in-time backup creates an **AES-256-GCM encrypted** `.tar` archive with a BLAKE3 manifest
-- Each file in the archive is encrypted with a unique per-backup key derived from the master key via HKDF-SHA256
-- Private key material is **excluded** from backups — only the public signing key is archived
-- Restore decrypts every file using the `.key` sidecar, then verifies each file's BLAKE3 hash against the manifest before completing
-
-### Client SDKs
-Native client libraries are included for three languages, all in `clients/`:
-
-- Python — `clients/python/`
-- TypeScript / Node.js — `clients/typescript/`
-- Go — `clients/go/`
-
----
-
-## Performance
-
-### Memory allocator
-
-VectorLedger uses **jemalloc** as its global allocator on Linux and macOS (via `tikv-jemallocator`). jemalloc aggressively returns freed memory to the OS after large working-set operations — in particular WAL recovery, where processing 25 M+ records with the default ptmalloc allocator causes ~7 GB of RSS to accumulate and never be returned.
-
----
-
-Benchmarked on Apple Silicon (MacBook, macOS) running in `group_commit` WAL mode with a mixed read/write workload (10 concurrent clients, 1,000 transactions each, 70% INSERT / 30% SELECT):
-
-- Throughput: **430 TPS**
-- Min latency: **311 µs**
-- p50 latency: 23 ms
-- p95 latency: 36 ms
-- p99 latency: **42 ms**
-- Errors: 0 / 10,000
-
-> **Do not use the 430 TPS figure for production capacity planning.** It was measured on a single MacBook with 10 concurrent clients.
-
-### WAL sync modes
-
-| Mode | Durability | Typical use |
-|---|---|---|
-| `group_commit` | Up to one flush window of data loss on hard crash | **Default — recommended for most deployments** |
-| `per_record` | Zero data loss — every write fsynced immediately | Strict regulatory environments |
-| `no_sync` | None | Development and CI only |
-
----
-
-## Architecture at a Glance
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        vledger binary                        │
-│                                                              │
-│  ┌──────────────┐    ┌──────────────────────────────────┐   │
-│  │  TLS Server  │    │   PostgreSQL Wire Protocol       │   │
-│  │  port 5433   │    │   port 5432                      │   │
-│  │  JSON proto  │    │   psql / pgAdmin compatible      │   │
-│  └──────┬───────┘    └──────────────┬───────────────────┘   │
-│         └──────────────┬────────────┘                        │
-│                        │                                      │
-│  ┌──────────────────┐  │                                     │
-│  │  MCP Server      │  │  HTTP + SSE (port 3000)            │
-│  │  vledger mcp     │  │  AI tool calls, no SQL needed      │
-│  └──────────┬───────┘  │                                     │
-│             └──────────┤                                      │
-│                        │                                      │
-│              ┌─────────▼──────────┐                         │
-│              │  UserStore (auth)  │  Argon2id · RBAC        │
-│              │  4-role RBAC       │  Brute-force protection  │
-│              └─────────┬──────────┘                         │
-│                        │                                      │
-│              ┌─────────▼──────────┐                         │
-│              │  SQL Engine        │  SELECT · INSERT        │
-│              │  Parser · Planner  │  BALANCE · VERIFY_CHAIN │
-│              │  Executor          │  Joins · Aggregates      │
-│              └─────────┬──────────┘                         │
-│                        │                                      │
-│              ┌─────────▼──────────┐                         │
-│              │  LedgerStore       │  Hash chain             │
-│              │  Double-entry      │  Idempotency            │
-│              │  accounting core   │  Four-eyes enforcement  │
-│              └──────┬──────┬──────┘                         │
-│                     │      │                                  │
-│          ┌──────────▼──┐ ┌─▼────────────┐                  │
-│          │  WAL Writer  │ │  Page Store  │                  │
-│          │  group_commit│ │  AES-256-GCM │                  │
-│          │  (default)   │ │  per-table   │                  │
-│          └─────────────┘ └──────────────┘                  │
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │  Audit Log   │  │  HSM Client  │  │  Replication     │  │
-│  │  WORM BLAKE3 │  │  Model 1 or  │  │  WAL streaming   │  │
-│  │  chain       │  │  Model 2     │  │  TLS + HMAC      │  │
-│  └──────────────┘  └──────────────┘  └──────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Prerequisites
-
-- Rust toolchain 1.80+ — install via [rustup.rs](https://rustup.rs)
-- macOS or Linux (Windows supported on x86_64 and ARM64)
-- Git (any recent version)
-
-No other runtime dependencies are required. All cryptographic libraries are statically linked via Cargo.
-
----
-
-## Installation
-
-### Option 1 — Install via curl (recommended)
-
+**macOS / Linux:**
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf \
   https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.sh | bash
 ```
 
-After installation:
-
-```bash
-vledger --version
-vledger self-test
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 | iex
 ```
 
-### Option 2 — Build from source
+### Option 2 — Download a release binary
+
+Pre-built binaries for v1.5.1 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.1):
+
+| Platform | Download |
+|---|---|
+| Linux x86_64 | `vledger-v1.5.1-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.1-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.1-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `vledger-v1.5.1-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `vledger-v1.5.1-x86_64-pc-windows-msvc.zip` |
+
+Each release is accompanied by a `SHA256SUMS` file and a CycloneDX SBOM. Verify before installing:
+
+```bash
+# Verify SHA-256 checksum
+sha256sum -c vledger-v1.5.1-checksums.txt
+
+# Verify cosign signature (keyless OIDC)
+cosign verify-blob \
+  --certificate vledger-v1.5.1-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.1-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.1" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  vledger-v1.5.1-checksums.txt
+```
+
+### Option 3 — Build from source
+
+Prerequisites: Rust toolchain 1.80+
 
 ```bash
 git clone https://github.com/pavondunbar/VectorLedger.git
 cd VectorLedger
 cargo build --release
-cargo install --path crates/vledger
+# Binary at: target/release/vledger
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Initialize the database
+### 1. Initialize a new database
 
 ```bash
-vledger init --data-dir ./vledger-data --key-source pyhsm
-```
-
-For testing without PyHSM:
-```bash
+# Development (file-based key — not for production)
 vledger init --data-dir ./vledger-data --key-source file
-```
 
-### 2. Lock down the data directory
+# Production (local PyHSM)
+vledger init --data-dir /var/lib/vledger/data --key-source pyhsm
 
-```bash
-chmod 700 vledger-data/ vledger-data/keys/ vledger-data/catalog/ \
-          vledger-data/audit/ vledger-data/wal/ vledger-data/pages/
-```
-
-### 3. Start the server
-
-```bash
-# Native server only (port 5433)
-nohup vledger start --data-dir ./vledger-data --with-proofs > nohup.out 2>&1 &
-
-# With PostgreSQL wire protocol (port 5432) — requires paid license
-nohup vledger start --data-dir ./vledger-data --with-proofs --pgwire > nohup.out 2>&1 &
-```
-
-Wait for the server to be ready:
-```bash
-until grep -q "Listening" nohup.out 2>/dev/null; do sleep 2; done && echo "Server ready"
-```
-
-### 4. Read and change the admin password
-
-```bash
-cat vledger-data/catalog/.admin_initial_credentials
-vledger user set-password --username admin --data-dir ./vledger-data
-rm vledger-data/catalog/.admin_initial_credentials
-```
-
-### 5. Connect and run queries
-
-Via the native REPL:
-```bash
-vledger sql --data-dir ./vledger-data --username admin
-```
-
-Ask a natural-language question (requires `OPENAI_API_KEY`):
-```bash
-vledger sql --ask "show me all payments over $10,000 last week"
-```
-
-Via psql (requires `--pgwire` and paid license):
-```bash
-psql "host=127.0.0.1 port=5432 user=admin sslmode=require"
-```
-
----
-
-## Importing Existing Data
-
-### CSV column mapping
-
-Every CSV has different column names. Use `--map YOUR_COLUMN=VLEDGER_FIELD` to tell VectorLedger which column is which.
-
-**Step 1 — Check your CSV headers:**
-```bash
-head -1 your-data.csv
-```
-
-**Step 2 — Dry run first (validates mapping, no data written):**
-```bash
-vledger import --file your-data.csv \
-  --dry-run \
-  --create-accounts \
-  --id-column your_unique_id_column \
-  --map sender_account=debit_account \
-  --map receiver_account=credit_account \
-  --map amount=amount \
-  --map memo=description \
-  --map txn_date=effective_date \
-  --default-currency USD \
-  --metadata-columns sender_name,receiver_name,channel,status
-```
-
-**Step 3 — Execute the import:**
-```bash
-vledger import --file your-data.csv \
-  --create-accounts \
-  --id-column your_unique_id_column \
-  --map sender_account=debit_account \
-  --map receiver_account=credit_account \
-  --map amount=amount \
-  --map memo=description \
-  --map txn_date=effective_date \
-  --default-currency USD \
-  --metadata-columns sender_name,receiver_name,channel,status \
-  --on-error skip \
-  --progress 100000
-```
-
-**Column mapping reference:**
-
-- `debit_account` — sending/source account. Required.
-- `credit_account` — receiving/destination account. Required.
-- `amount` — transaction amount in minor units (cents). Required.
-- `description` — human-readable description. Required.
-- `currency` — ISO 4217 currency code. Required if not using `--default-currency`.
-- `domain` — logical partition for multi-tenant setups. Optional.
-- `effective_date` — when the transaction occurred. Optional.
-- `external_ref` — external system reference ID. Optional.
-- `idempotency_key` — duplicate detection key. Optional.
-
-**`--id-column` — always specify this.** Points to your CSV's unique transaction ID column. This is what VectorLedger uses to detect duplicates on re-imports. Without it, re-running the import will duplicate all rows.
-
-**`--create-accounts` — always include this.** Automatically creates any account referenced in the file that doesn't exist yet. Auto-created accounts use Suspense type.
-
-**If the import is interrupted:**
-```bash
-vledger import --file your-data.csv --resume [same flags as original run]
-```
-
-> **IMPORTANT:** The server must NOT be running during import. Run `pkill vledger` first.
-
-### After a large import — populate the SQLite index
-
-```bash
-vledger migrate-to-sqlite --data-dir ./vledger-data
-```
-
-This is a one-time operation. It reads the WAL and populates SQLite in three passes:
-- Pass 1: Index all entries and persist all account records to SQLite (~45,000 entries/sec)
-- Pass 2: Build secondary indexes
-- Pass 3: Build account cross-reference index (2 lines per entry — 25M entries = 50M lines)
-
-It is crash-safe — if interrupted, re-run and it resumes from where it left off.
-
-**Scale reference:**
-- 25 million records → ~75 minutes total
-- 1 billion records → ~7-9 hours (one-time, run overnight)
-
-After migration completes, start the server. Account records are now persisted in SQLite so they load instantly on startup regardless of how many WAL segments are skipped.
-
----
-
-## SQL Reference
-
-VectorLedger supports a financial-ledger SQL dialect over both the native TLS connection (port 5433) and the PostgreSQL wire protocol (port 5432). It is **PostgreSQL-compatible** — not PostgreSQL — so standard PostgreSQL system catalog queries (`\l`, `\dt`, `pg_catalog.*`) are not supported.
-
-### Database and schema
-
-VectorLedger has one database (`vledger`) and three fixed tables:
-
-- `ledger` — one row per journal entry
-- `ledger_lines` — one row per debit/credit line (two rows per entry)
-- `accounts` — chart of accounts
-
-The schema is fixed. `CREATE TABLE`, `DROP TABLE`, `UPDATE`, and `DELETE` are not supported — the ledger is append-only by design.
-
-### Scan safety — default row cap
-
-Unbounded full-table scans are automatically capped at **10,000 entries**. Use `LIMIT` or point-lookup filters to retrieve more.
-
-### Tables
-
-#### `ledger`
-```sql
--- Point lookups (no cap)
-SELECT * FROM ledger WHERE sequence = 19678432;
-SELECT * FROM ledger WHERE external_ref = 'TXN-001';
-
--- Multiple point lookups with IN (no cap)
-SELECT sequence, content_hash, chain_hash FROM ledger WHERE sequence IN (1, 2, 3);
-SELECT * FROM ledger WHERE sequence IN (19678432, 25000001, 25000002, 25000003);
-
--- Filtered queries
-SELECT * FROM ledger WHERE domain = 'main' LIMIT 100;
-SELECT * FROM ledger WHERE status = 'Posted' LIMIT 50;
-```
-
-Columns: `sequence`, `id`, `status`, `description`, `domain`, `effective_at`, `posted_at`, `external_ref`, `content_hash`, `chain_hash`, `lines`, `metadata`
-
-Entry status values: `Posted`, `Reversed`, `Reversal`, `PendingApproval`, `Rejected`, `Pending`, `Settled`, `Failed`
-
-#### `ledger_lines`
-```sql
-SELECT * FROM ledger_lines WHERE sequence = 19678432;
-
--- Multiple sequences with IN
-SELECT * FROM ledger_lines WHERE sequence IN (19678432, 25000001, 25000002);
-
-SELECT * FROM ledger_lines WHERE dr_cr = 'Debit' LIMIT 50;
-SELECT * FROM ledger_lines WHERE dr_cr = 'Credit' LIMIT 50;
-```
-
-Columns: `date`, `sequence`, `entry_id`, `description`, `domain`, `account_id`, `dr_cr`, `amount`, `currency`, `status`, `metadata`
-
-#### `accounts`
-```sql
-SELECT * FROM accounts;
-SELECT * FROM accounts WHERE code = '0601095315';
-SELECT * FROM accounts WHERE id = 'c0a89fbd-8eea-45a9-9e5c-0893c1cafe08';
-SELECT * FROM accounts WHERE name = 'Christine Hyacinth';
-SELECT * FROM accounts WHERE domain = 'main';
-
--- Multiple lookups with IN
-SELECT * FROM accounts WHERE code IN ('0601095315', '0036011743', '1275341255');
-SELECT * FROM accounts WHERE id IN ('c0a89fbd-...', 'cd1f97bd-...', 'ae262006-...');
-```
-
-Columns: `id`, `code`, `name`, `account_type`, `currency`, `status`, `domain`, `balance`
-
-### Write commands
-
-#### Post a journal entry
-```sql
-INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain)
-VALUES ('Wire transfer', 'CASH', 'REVENUE', 100000, 'USD', 'main');
-```
-
-- `amount` is in **minor units** (cents for USD — 100000 = $1,000.00)
-- `debit_account` and `credit_account` accept either account `code` or UUID
-- Optional fields: `external_ref`, `idempotency_key`, `metadata`
-
-#### Create an account
-```sql
-INSERT INTO accounts (code, name, account_type, currency, domain)
-VALUES ('CASH', 'Cash - USD', 'Asset', 'USD', 'main');
-```
-
-Account types: `Asset`, `Liability`, `Equity`, `Income`, `Expense`, `Suspense`
-
-### Reversal and correction workflow
-
-Corrections are made by posting new entries — the original is never modified or deleted.
-
-```sql
--- Step 1: Find the entry to reverse
-SELECT * FROM ledger WHERE sequence = 19678432;
-SELECT * FROM ledger_lines WHERE sequence = 19678432;
-
--- Step 2: Look up account codes from the UUIDs in ledger_lines
-SELECT id, code, name, balance FROM accounts WHERE id = 'c0a89fbd-8eea-45a9-9e5c-0893c1cafe08';
-SELECT id, code, name, balance FROM accounts WHERE id = 'cd1f97bd-f93e-4596-866a-0f2f4a0de6ad';
-
--- Step 3: Post the reversal (flip debit and credit)
-INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain, external_ref, metadata)
-VALUES (
-  'Reversal of sequence 19678432 - Transfer to Tekiau Cecilia',
-  '6f1c6012-b5df-461f-9259-bc790a063643',
-  'f93081c2-d1f0-4dd4-9b48-4f68f6d0023e',
-  44602, 'USD', 'main',
-  'reversal-of-f0da247e-8b29-4556-aaa4-cf424626adcc',
-  '{"reverses":"f0da247e-8b29-4556-aaa4-cf424626adcc","reason":"correction"}'
-);
-
--- Step 4: Post the correction (with correct details)
-INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain, external_ref, metadata)
-VALUES (
-  'Corrected Transfer to Tekiau Cecilia',
-  'f93081c2-d1f0-4dd4-9b48-4f68f6d0023e',
-  '6f1c6012-b5df-461f-9259-bc790a063643',
-  44700, 'USD', 'main',
-  'correction-of-f0da247e-8b29-4556-aaa4-cf424626adcc',
-  '{"corrects":"f0da247e-8b29-4556-aaa4-cf424626adcc"}'
-);
-
--- Step 5: Verify chain integrity
-SELECT VERIFY_CHAIN();
-```
-
-The original entry is never modified or deleted. All three entries (original, reversal, correction) remain permanently in the ledger. A reversal without a correction is also valid — post only the reversal if the transaction should simply not exist.
-
-### Financial functions
-
-```sql
--- Account balance (returns minor units)
-SELECT BALANCE('CASH');
-SELECT BALANCE('account-uuid-here');
-
--- Verify the entire BLAKE3 hash chain
-SELECT VERIFY_CHAIN();
-
--- Verify a range of entries
-SELECT VERIFY_CHAIN(1, 100000);
-
--- Verify a single entry's hashes
-SELECT VERIFY_ENTRY(19678432);
-
--- Merkle root over a sequence range (no --with-proofs flag required)
-SELECT MERKLE_ROOT(1, 100000);
-
--- Merkle root for a single entry — one argument, to_seq defaults to from_seq
-SELECT MERKLE_ROOT(19678432);
-```
-
-### Aggregates and joins
-
-```sql
-SELECT COUNT(sequence) FROM ledger;
-SELECT SUM(amount) FROM ledger GROUP BY domain;
-SELECT AVG(amount) FROM ledger;
-SELECT MIN(sequence), MAX(sequence) FROM ledger;
-SELECT SUM(amount) FROM ledger_lines WHERE dr_cr = 'Debit';
-SELECT SUM(amount) FROM ledger_lines WHERE dr_cr = 'Credit';
-SELECT * FROM ledger JOIN accounts ON ledger.domain = accounts.domain LIMIT 10;
-```
-
-### Metadata search
-
-Every entry carries a `metadata` field — an arbitrary JSON blob (e.g. `{"sender_name":"Alice","receiver_name":"Bob","channel":"mobile"}`). From v1.0.30, metadata is indexed using a **SQLite FTS5 full-text index**, making search instant regardless of ledger size.
-
-```sql
--- Find all entries involving a person by name (LIKE — uses FTS5 index)
-SELECT * FROM ledger WHERE metadata LIKE '%Elizabeth Cadet%';
-SELECT * FROM ledger_lines WHERE metadata LIKE '%Elizabeth Cadet%';
-
--- Case-insensitive search (ILIKE)
-SELECT * FROM ledger WHERE metadata ILIKE '%elizabeth cadet%';
-
--- Search for a specific role
-SELECT * FROM ledger WHERE metadata LIKE '%"receiver_name":"Elizabeth Cadet"%';
-SELECT * FROM ledger WHERE metadata LIKE '%"sender_name":"Elizabeth Cadet"%';
-
--- Exact full metadata match
-SELECT * FROM ledger WHERE metadata = '{"channel":"mobile","receiver_name":"Elizabeth Cadet","sender_name":"Basma Ammar","status":"completed","transaction_type":"fee"}';
-```
-
-**Supported on both `ledger` and `ledger_lines`.** Results are ordered by sequence.
-
-**FTS index is automatic** — no configuration needed. On first startup after upgrading to v1.0.30 on an existing database, VectorLedger detects the empty FTS index and rebuilds it automatically. Progress is logged to `nohup.out`. Subsequent startups skip this step. All new entries are indexed at insert time.
-
-**Works with any metadata field name.** Because the entire JSON blob is indexed as text, future CSV imports with different column names (e.g. `beneficiary`, `payee`, `customer_ref`) are automatically searchable without any schema changes.
-
----
-
-### What is NOT supported
-
-- `UPDATE` — append-only; entries are permanent
-- `DELETE` — append-only; entries are permanent
-- `DROP TABLE` / `DROP DATABASE` — schema is fixed
-- `NOT IN` — use separate queries instead
-- `pg_catalog.*` system tables — not PostgreSQL internally
-- Multiple databases or schemas — single-database engine
-
----
-
-## CLI Reference
-
-### `vledger user`
-
-Manage user accounts. The server does not need to be running — commands connect to it automatically if available, otherwise write directly to disk.
-
-```bash
-# Create a new user
-vledger user create --username alice --role operator
-# Roles: admin, operator, auditor, readonly (default: readonly)
-
-# List all users
-vledger user list
-
-# Change a user's role (revokes all active sessions immediately)
-vledger user set-role --username alice --role auditor
-
-# Change a user's password (revokes all active sessions immediately)
-vledger user set-password --username alice
-
-# Enable or disable a user
-vledger user set-enabled --username alice --enabled false
-vledger user set-enabled --username alice --enabled true
-
-# Delete a user
-vledger user delete --username alice
-```
-
-**Note on `set-role`:** When a user's role is changed, all their active sessions are immediately revoked. They must log in again to receive the new permissions. No account deletion and recreation is needed.
-
-### `vledger import`
-
-```bash
-vledger import [OPTIONS]
-  -f, --file <PATH>                  Import file path (required)
-  --dry-run                          Validate only — no data written
-  --map <SRC=TARGET>                 Column mapping (repeatable)
-  --id-column <COL>                  Source column used as idempotency key for
-                                     duplicate detection on re-imports. Always
-                                     specify this — without it, re-running the
-                                     import will duplicate all rows.
-  --create-accounts                  Auto-create referenced accounts not yet in
-                                     ledger. Always include this flag.
-  --default-currency <CODE>          Default currency (default: USD)
-  --on-error <abort|skip|collect>    Behaviour on row error (default: abort)
-  --progress <N>                     Print progress every N rows (default: 10,000)
-  --metadata-columns <LIST>          Comma-separated source columns to pack into
-                                     the metadata JSON field on every entry
-  --resume                           Resume an interrupted import from last checkpoint
-  --wal-sync-mode <MODE>             group_commit (default) | no_sync | per_record
-```
-
-### `vledger migrate-to-sqlite`
-
-One-time migration that populates the SQLite entry index from the WAL. Run after a large `vledger import`. The server must NOT be running.
-
-```bash
-vledger migrate-to-sqlite --data-dir ./vledger-data
-```
-
-From v1.0.21 onward, this also persists all account records to SQLite so that server startup after migration loads accounts instantly without replaying the full WAL history.
-
-### FTS index rebuild (automatic on startup)
-
-From v1.0.30, VectorLedger maintains a **SQLite FTS5 full-text index** over all entry metadata. This index is built automatically:
-
-- **New entries** — indexed at insert time with no manual action required.
-- **Existing databases** (pre-v1.0.30) — on the first startup after upgrading, VectorLedger detects the empty FTS index and rebuilds it automatically in a background pass before accepting connections. Progress is logged to `nohup.out`:
-
-```
-INFO FTS index empty — rebuilding from existing entries total=17652378
-INFO FTS rebuild progress processed=1000000
-INFO FTS rebuild progress processed=2000000
-...
-INFO FTS index rebuilt entries_indexed=17652378
-```
-
-No manual steps are required. Subsequent startups skip the rebuild entirely.
-
-### `vledger start`
-
-```bash
-vledger start [OPTIONS]
-  --data-dir <PATH>              Data directory (default: ./vledger-data)
-  --pgwire                       Also start the PostgreSQL wire-protocol listener on port 5432
-  --with-proofs                  Attach Merkle proofs to every SELECT response
-  --wal-sync-mode <MODE>         per_record | group_commit | no_sync (default: group_commit)
-  --group-commit-delay-ms <MS>   Group-commit flush interval in ms (default: 2)
-  --max-connections <N>          Max concurrent connections (default: 128)
-```
-
-### `vledger mcp`
-
-Start an embedded Model Context Protocol server backed by the local data directory.
-Any MCP-capable AI client can connect and use the ledger as a set of callable tools
-without writing SQL.
-
-```bash
-vledger mcp [OPTIONS]
-  --bind <ADDR>      Address to listen on (default: 127.0.0.1:3000)
-  --username <USER>  Auth username (falls back to VLEDGER_CLI_USER)
-  --password <PASS>  Auth password (falls back to VLEDGER_CLI_PASSWORD)
-```
-
-The server exposes three HTTP endpoints:
-- `GET  /sse`     — SSE stream; MCP clients connect here
-- `POST /message` — JSON-RPC 2.0 request handler
-- `GET  /health`  — Liveness check (`{"ok":true}`)
-
-See the *New in v1.0.39* section above for the full tool list and MCP client
-configuration snippet.
-
-A standalone `vledger-mcp` binary is also included for deployments where the MCP
-server needs to run as a separate process:
-
-```bash
-vledger-mcp --data-dir ./vledger-data --bind 127.0.0.1:3000 --log-level info
-```
-
-Two background tasks run automatically after startup:
-- **Hourly integrity check** — calls `VERIFY_CHAIN()` every 60 minutes
-- **15-minute invariant monitor** — checks the global ledger equation every 15 minutes
-
-### `vledger verify`
-
-```bash
-vledger verify --data-dir ./vledger-data
-```
-
-### `vledger hsm` — HSM Setup and Key Source Configuration
-
-> **Enterprise license required** for PyHSM key sources.
-
-VectorLedger does not link a PKCS#11 `.so` directly. Instead it communicates with a separate **PyHSM daemon** (a TypeScript/Node.js process) over either a Unix socket (Model 1, same server) or mTLS over TCP (Model 2, separate server). Raw key material never leaves PyHSM — the master key is AES-wrapped inside it and VectorLedger only ever holds the ciphertext blob on disk at `vledger-data/keys/pyhsm_master_key.enc`.
-
-#### Model 1 — Local PyHSM (same server)
-
-**Step 1 — Ensure your Enterprise license is in place:**
-```bash
-cp your-license.json ./vledger-data/license.json
-vledger license --data-dir ./vledger-data
-```
-
-**Step 2 — Start the PyHSM daemon** so it is listening on `/tmp/pyhsm.sock` before initializing VectorLedger.
-
-**Step 3 — Initialize with PyHSM as the key source:**
-```bash
-vledger init --data-dir ./vledger-data --key-source pyhsm
-# Optional overrides:
-vledger init --data-dir ./vledger-data --key-source pyhsm \
-  --pyhsm-socket /tmp/pyhsm.sock \
-  --pyhsm-caller-id vledger
-```
-
-This writes `vledger-data/keys/key_source.json`:
-```json
-{
-  "backend": "py_hsm",
-  "socket_path": "/tmp/pyhsm.sock",
-  "caller_id": "vledger",
-  "key_id": "vledger.master-key"
-}
-```
-
-**Step 4 — Start the server normally:**
-```bash
-vledger start --data-dir ./vledger-data --with-proofs --pgwire
-```
-On every boot VectorLedger sends the cached blob to PyHSM to unwrap it. If PyHSM is not running, startup fails immediately.
-
-#### Model 2 — Remote PyHSM over mTLS (separate server)
-
-```bash
-vledger init --data-dir ./vledger-data \
+# Production (remote PyHSM with mTLS)
+vledger init \
+  --data-dir /var/lib/vledger/data \
   --key-source remote-pyhsm \
   --pyhsm-endpoint https://pyhsm.internal.example.com:8443 \
-  --pyhsm-ca-cert /etc/vledger/pyhsm/ca.pem \
-  --pyhsm-client-cert /etc/vledger/pyhsm/client.pem \
-  --pyhsm-client-key /etc/vledger/pyhsm/client-key.pem \
-  --pyhsm-timeout-ms 5000 \
-  --pyhsm-max-retries 3
+  --pyhsm-ca-cert /etc/vledger/pyhsm-ca.pem \
+  --pyhsm-client-cert /etc/vledger/client.crt \
+  --pyhsm-client-key /etc/vledger/client.key
 ```
 
-This writes `vledger-data/keys/key_source.json`:
-```json
-{
-  "backend": "remote_py_hsm",
-  "endpoint": "https://pyhsm.internal.example.com:8443",
-  "ca_cert": "/etc/vledger/pyhsm/ca.pem",
-  "client_cert": "/etc/vledger/pyhsm/client.pem",
-  "client_key": "/etc/vledger/pyhsm/client-key.pem",
-  "timeout_ms": 5000,
-  "max_retries": 3,
-  "caller_id": "vledger",
-  "key_id": "vledger.master-key"
-}
-```
-
-#### Hardware HSM backends (AWS CloudHSM / Azure Dedicated HSM)
-
-For physical hardware, bridge sidecars (`vledger-hsm-aws-bridge`, `vledger-hsm-azure-bridge`) translate the JSON IPC to hardware PKCS#11 calls. Configure `vledger-data/keys/hsm_config.json`:
-
-**AWS CloudHSM:**
-```json
-{
-  "backend": "aws_cloud_hsm",
-  "bridge_socket": "~/.vledger-hsm-aws/bridge.sock",
-  "cluster_id": "cluster-xxxxxxxxx",
-  "crypto_user": "vgdb-cu",
-  "verify_bridge_tls": true
-}
-```
-
-**Azure Dedicated HSM (Thales Luna Network HSM 7):**
-```json
-{
-  "backend": "azure_dedicated_hsm",
-  "bridge_socket": "~/.vledger-hsm-azure/bridge.sock",
-  "resource_group": "my-resource-group",
-  "device_host": "hsm.internal.example.com",
-  "partition": "vledger"
-}
-```
-
-#### Other key source backends
-
-For non-HSM deployments, `key_source.json` supports:
-
-```json
-{ "backend": "env", "var": "VectorLedger_MASTER_KEY" }
-```
-```json
-{ "backend": "file", "path": "/path/to/master_key.hex" }
-```
-```json
-{
-  "backend": "vault",
-  "addr": "http://127.0.0.1:8200",
-  "mount": "secret",
-  "secret_path": "vledger/master_key",
-  "field": "value"
-}
-```
-```json
-{
-  "backend": "aws_kms",
-  "key_id": "arn:aws:kms:us-east-1:123456789012:key/...",
-  "region": "us-east-1"
-}
-```
-
-#### Key rotation
+### 2. Start the server
 
 ```bash
-# Model 1
-vledger rotate-keys --data-dir ./vledger-data \
-  --hsm-socket /tmp/pyhsm.sock
-
-# Model 2
-vledger rotate-keys --data-dir ./vledger-data \
-  --pyhsm-endpoint https://pyhsm.internal.example.com:8443 \
-  --pyhsm-ca-cert /etc/vledger/pyhsm/ca.pem \
-  --pyhsm-client-cert /etc/vledger/pyhsm/client.pem \
-  --pyhsm-client-key /etc/vledger/pyhsm/client-key.pem
+vledger start \
+  --data-dir ./vledger-data \
+  --bind 127.0.0.1:5433 \
+  --pgwire \
+  --wal-sync-mode group_commit
 ```
-The old key version is archived for decryption of existing data; all new writes use the new version.
 
-### `vledger self-test` / `vledger self-test-phase3`
-
-Run the built-in self-test suites against an isolated temporary database. Your production data is never touched.
+### 3. Run SQL queries
 
 ```bash
-vledger self-test
-vledger self-test-phase3
+# Interactive REPL
+vledger sql --username admin --server 127.0.0.1:5433
+
+# Single query
+vledger sql --username admin \
+  --query "SELECT BALANCE('CASH')"
+
+# Natural-language query (requires OPENAI_API_KEY, AgenticAI license)
+export OPENAI_API_KEY=sk-...
+vledger sql --ask "show me all payments over \$10,000 last week"
 ```
 
-Expected output:
+### 4. Post a journal entry
 
+```sql
+INSERT INTO accounts (code, name, account_type, currency, domain)
+  VALUES ('CASH', 'Cash Account', 'Asset', 'USD', 'main');
+
+INSERT INTO accounts (code, name, account_type, currency, domain)
+  VALUES ('REV', 'Revenue', 'Income', 'USD', 'main');
+
+INSERT INTO ledger (debit_account, credit_account, amount, description, currency, domain)
+  VALUES ('CASH', 'REV', 100000, 'Cash sale', 'USD', 'main');
+-- amount is in minor units: 100000 = $1,000.00
 ```
-── VectorLedger Phase 2 Self-Test ───────────────
-  [1/7] Hash chain             ... ✓
-  [2/7] AES-256-GCM encryption ... ✓
-  [3/7] Merkle proofs          ... ✓
-  [4/7] WAL-backed ledger      ... ✓
-  [5/7] Page encryption        ... ✓
-  [6/7] SQL engine             ... ✓
-  [7/7] Verifiable query proof  ... ✓
 
-✓ All Phase 2 self-tests passed.
-```
-
-### `vledger reconcile`
+### 5. Verify chain integrity
 
 ```bash
-vledger reconcile --data-dir ./vledger-data
-vledger reconcile --data-dir ./vledger-data --format json --output reconcile.json
+vledger sql --username admin \
+  --query "SELECT VERIFY_CHAIN()"
 ```
 
-### `vledger backup` / `vledger restore`
+### 6. Start the MCP server (AgenticAI license required)
 
 ```bash
-vledger backup --data-dir ./vledger-data --output ~/vledger-backup-$(date +%Y%m%d).tar
-vledger restore --from backup.tar --target ./vledger-data-restored --force
-vledger backup-verify --from backup.tar
+vledger mcp --bind 127.0.0.1:3000
+
+# Add to your MCP client config:
+# { "mcpServers": { "vledger": { "url": "http://127.0.0.1:3000/sse" } } }
 ```
-
-### `vledger audit-export`
-
-```bash
-vledger audit-export --data-dir ./vledger-data --format json --output audit.json
-```
-
-### `vledger compliance-report`
-
-```bash
-vledger compliance-report --data-dir ./vledger-data --standard pci-dss --format markdown --output pci-report.md
-vledger compliance-report --data-dir ./vledger-data --standard soc2 --format markdown --output soc2-report.md
-```
-
-### `vledger settle`
-
-```bash
-vledger settle --data-dir ./vledger-data --entry-id <UUID> --status settled --notes "settled via ACH"
-```
-
-### `vledger hold`
-
-```bash
-vledger hold place --data-dir ./vledger-data --account <CODE_OR_UUID>
-vledger hold lift  --data-dir ./vledger-data --account <CODE_OR_UUID>
-vledger hold list  --data-dir ./vledger-data
-```
-
-### `vledger retention`
-
-```bash
-vledger retention show  --data-dir ./vledger-data
-vledger retention set   --data-dir ./vledger-data --days 2555   # 7 years
-vledger retention clear --data-dir ./vledger-data
-```
-
-### `vledger rules`
-
-```bash
-vledger rules show    --data-dir ./vledger-data
-vledger rules set     --data-dir ./vledger-data --version "2026-Q3" \
-                      --description "Updated FX rules per IFRS 9" \
-                      --effective-date 2026-07-01
-vledger rules history --data-dir ./vledger-data
-```
-
-### `vledger seed`
-
-Populate the database with randomly generated journal entries for testing and benchmarking. Does not require a running server — opens the data directory directly.
-
-```bash
-# Generate 10 million entries with 50 accounts
-vledger seed --data-dir ./vledger-data --entries 10000000 --accounts 50 --progress 500000
-
-# Reproducible dataset — same data every time
-vledger seed --data-dir ./vledger-data --entries 10000000 --seed 12345
-```
-
-### `vledger status`
-
-Show database version, WAL segment count, and active segment.
-
-```bash
-vledger status --data-dir ./vledger-data
-```
-
-### `vledger license`
-
-Show the active license tier, features, and expiry.
-
-```bash
-vledger license --data-dir ./vledger-data
-```
-
-### `vledger start-primary` / `vledger start-replica` — Multi-Node WAL Replication
-
-> **Growth or Enterprise license required.**
-
-WAL replication runs a hot-standby replica that streams every committed WAL record from the primary in real time. The channel is secured with TLS 1.3, optional mTLS, and a BLAKE3 HMAC challenge-response handshake. The replica verifies the BLAKE3 hash of every received WAL record before writing it locally.
-
-#### Step 1 — Configure the primary
-
-Create `<data_dir>/replication.json` on the primary node:
-
-```json
-{
-  "role": "primary",
-  "replication_addr": "0.0.0.0:5434",
-  "ack_timeout_ms": 5000,
-  "heartbeat_interval_ms": 1000,
-  "send_buffer_bytes": 67108864,
-  "tls": {
-    "enabled": true,
-    "server_hostname": "vledger-primary",
-    "server_cert": "/etc/vledger/replication/server.pem",
-    "server_key": "/etc/vledger/replication/server-key.pem",
-    "ca_cert": "/etc/vledger/replication/ca.pem"
-  }
-}
-```
-
-> If you omit `server_cert` and `server_key`, a self-signed certificate is auto-generated at startup — suitable for development.
-
-#### Step 2 — Start the primary
-
-```bash
-vledger start-primary --data-dir /opt/vledger-primary
-# Override the bind address at CLI:
-vledger start-primary --data-dir /opt/vledger-primary --bind 0.0.0.0:5434
-```
-
-On first run, `replication_secret.hex` (a 32-byte BLAKE3 HMAC shared secret, mode 0600) is auto-generated in the data directory.
-
-#### Step 3 — Copy the secret to the replica
-
-```bash
-scp /opt/vledger-primary/replication_secret.hex \
-    replica-host:/opt/vledger-replica/replication_secret.hex
-```
-
-The replica does **not** auto-generate this file — startup fails with a clear error if it is missing.
-
-#### Step 4 — Configure the replica
-
-Create `<data_dir>/replication.json` on the replica node:
-
-```json
-{
-  "role": "replica",
-  "replication_addr": "primary-host:5434",
-  "ack_timeout_ms": 5000,
-  "tls": {
-    "enabled": true,
-    "server_hostname": "vledger-primary",
-    "ca_cert": "/etc/vledger/replication/ca.pem"
-  }
-}
-```
-
-For mTLS (primary requires client certificate from replica), add:
-```json
-"client_cert": "/etc/vledger/replication/replica-client.pem",
-"client_key": "/etc/vledger/replication/replica-client-key.pem"
-```
-
-#### Step 5 — Start the replica
-
-```bash
-vledger start-replica --data-dir /opt/vledger-replica
-# Override the primary address at CLI:
-vledger start-replica --data-dir /opt/vledger-replica --primary primary-host:5434
-```
-
-The replica connects, performs the BLAKE3 HMAC challenge-response inside TLS, then streams WAL records. On disconnection it reconnects automatically with exponential back-off (500 ms → 30 s).
-
-#### TLS mode reference
-
-| `tls.enabled` | `tls.ca_cert` | `tls.client_cert` | Effective mode |
-|---|---|---|---|
-| `false` | — | — | Plain TCP (dev only) |
-| `true` | `null` | `null` | TLS, self-signed, no mTLS |
-| `true` | path | `null` | TLS, CA-verified, no mTLS |
-| `true` | path | path + key | Mutual TLS (mTLS) |
-
-#### License enforcement
-
-If `replication.json` exists in the data directory when `vledger start` is run, the `Replication` feature license is checked immediately — the server will not start without a valid Growth+ license.
-
-VectorLedger has **245 automated tests** across 6 test files and 4 crates, all passing on every release.
-
-```bash
-# Run the full test suite
-cargo test --package vledger-ledger --package vledger-sql --package vledger-server --package vledger-audit
-
-# Run only the regression tests (reversal/correction workflow guarantees)
-cargo test --package vledger-ledger regression
-
-# Run only the SQL layer tests
-cargo test --package vledger-sql sql_tests
-
-# Run only the auth/user management tests
-cargo test --package vledger-server auth_tests
-
-# Run the built-in self-tests (end-to-end engine verification)
-vledger self-test
-vledger self-test-phase3
-```
-
-### Test coverage by area
-
-**`vledger-ledger` — 100 tests**
-- Financial invariants (INV-1 through INV-14): double-entry balance, balance cache correctness, idempotency, monotonic sequences, hash chain validity, reversal nets to zero, overflow boundaries, currency mismatch rejection, exposure limits, four-eyes, legal holds, global ledger equation, WAL replay reconstruction
-- Property-based tests (random inputs, hundreds of iterations each)
-- Stress tests: up to 5,000 concurrent clients, concurrent reversal races, idempotency races
-- Crash / fault injection: WAL replay after crash, torn write recovery
-- EntryDb account persistence: upsert, load, roundtrip, accounts survive store reopen (v1.0.21 regression)
-- Regression: `test_reversal_correction_preserves_chain_integrity`, `test_reversal_only_preserves_chain_integrity`, `test_double_reversal_rejected`
-
-**`vledger-sql` — 95 tests**
-- Adversarial: malformed SQL, oversized queries, injection-style input, Unicode, binary garbage
-- SQL pipeline: CREATE ACCOUNT, INSERT INTO ledger, SELECT with all filter variants (=, IN), BALANCE, VERIFY_CHAIN, tamper detection, compatibility constants
-- Rejection: UPDATE, DELETE, DROP TABLE, DROP DATABASE, NOT IN, read/write split enforcement
-- Aggregates (COUNT, SUM), JOINs, idempotency via SQL
-
-**`vledger-server` — 33 tests**
-- UserStore bootstrap, create/list/delete users
-- `set-role`: changes role, unknown user fails, persists after reopen
-- `set-enabled`: disable/re-enable
-- `set-password`: success, unknown user fails
-- `authenticate`: correct password, wrong password, unknown user, disabled user, correct role
-- `validate_token`: valid token, unknown token
-- Role capability matrix for all four roles
-- Role string parsing
-
-**`vledger-audit` — 17 tests**
-- Open, append, sequence incrementing, hash chain linkage
-- First event `prev_hash` = ZERO_HASH, self-verify
-- `verify_chain`: empty, single, 20 events, all event kinds
-- Chain tip tracking, persistence across reopen
-- Hash uniqueness across events
 
 ---
 
-## Licensing
+## SQL Dialect
 
-VectorLedger uses a tiered license model. The binary enforces feature availability at startup by verifying a signed `license.json` file in your data directory.
+VectorLedger implements a **financial-ledger SQL dialect** parsed by the `sqlparser` crate. It is PostgreSQL wire-protocol compatible but is not a full PostgreSQL implementation.
 
-### Pricing
+### Supported Tables
 
-| Tier | Price | Best for |
+| Table | Description | Key Columns |
 |---|---|---|
-| **Free** | $0 / month | Development, evaluation, internal tools |
-| **Starter** | $499 / month | Early-stage teams that need PostgreSQL client compatibility |
-| **Growth** | $2,499 / month | Production fintechs and SaaS companies under SOC 2 or PCI-DSS |
-| **Enterprise** | Contact Sales | Banks, payment processors, PCI-DSS Level 1, hardware HSM requirements |
+| `ledger` | Journal entries | `sequence`, `id`, `status`, `description`, `domain`, `effective_at`, `posted_at`, `external_ref`, `content_hash`, `chain_hash`, `lines`, `metadata` |
+| `ledger_lines` | Debit/credit lines | `date`, `sequence`, `entry_id`, `description`, `domain`, `account_id`, `dr_cr`, `amount`, `currency`, `status`, `metadata` |
+| `accounts` | Chart of accounts | `id`, `code`, `name`, `account_type`, `currency`, `status`, `domain`, `balance` |
 
-Annual billing available on all paid tiers — pay for 10 months, get 12.
-Contact [pavon@vectorguardlabs.com](mailto:pavon@vectorguardlabs.com) for multi-instance or custom pricing.
+### Supported Operations
 
-### Feature tiers
+```sql
+-- Query entries
+SELECT * FROM ledger WHERE sequence = 786295;
+SELECT sequence, status, description FROM ledger WHERE domain = 'main' LIMIT 100;
+SELECT * FROM ledger WHERE sequence IN (1, 2, 3);
 
-| Feature | Free | Starter | Growth | Enterprise |
-|---|---|---|---|---|
-| Core ledger + SQL REPL | ✓ | ✓ | ✓ | ✓ |
-| AES-256-GCM encryption at rest | ✓ | ✓ | ✓ | ✓ |
-| BLAKE3 hash chain + Merkle proofs | ✓ | ✓ | ✓ | ✓ |
-| Four-eyes dual-control workflow | ✓ | ✓ | ✓ | ✓ |
-| WORM audit log + chain verification | ✓ | ✓ | ✓ | ✓ |
-| Backup & restore | ✓ | ✓ | ✓ | ✓ |
-| Audit log export (date range) | 30 days | 90 days | Unlimited | Unlimited |
-| PostgreSQL wire protocol (`--pgwire`) | ✗ | ✓ | ✓ | ✓ |
-| **Agentic AI** (`vledger mcp` + `--ask`) | ✗ | ✓ | ✓ | ✓ |
-| **Agent Queries / month** | — | **10** | **100** | **Unlimited** |
-| WAL replication (hot standby) | ✗ | ✗ | ✓ | ✓ |
-| Compliance reports (SOC 2 / PCI-DSS) | ✗ | ✗ | ✓ | ✓ |
-| Hardware HSM PKCS#11 integration | ✗ | ✗ | ✗ | ✓ |
-| Multi-node deployment | ✗ | ✗ | ✗ | ✓ |
+-- Query lines
+SELECT * FROM ledger_lines WHERE entry_id = 'e99c3ea8-...';
 
-#### What is an Agent Query?
+-- Account balance
+SELECT BALANCE('CASH');
+SELECT BALANCE('e99c3ea8-7761-419b-9a5a-79b570220a13');
 
-One Agent Query = one natural-language request submitted to the VectorLedger
-Agent that causes it to perform one logical task. The agent may internally make
-5–10 tool calls to answer a single question — that still counts as 1 Agent Query.
+-- Hash chain integrity
+SELECT VERIFY_CHAIN();
+SELECT VERIFY_CHAIN(1, 100000);  -- range
+SELECT VERIFY_ENTRY(786295);      -- single entry
 
-**Examples — each is 1 Agent Query:**
-- *"Give me the output of entry 4,627,985"*
-- *"Do a reversal of entry 367,929 — it posted for $90 but should be $100"*
-- *"Generate an audit report for Q3"*
-- *"Why is the SETTLEMENT account lower than expected? Reconcile it."*
+-- Merkle root
+SELECT MERKLE_ROOT(786295);             -- single entry
+SELECT MERKLE_ROOT(786000, 786500);     -- range
 
-The monthly counter resets automatically on the first day of each UTC month.
-No restart required — the running MCP server detects the new month on the next
-query. Check remaining quota at any time:
+-- Post an entry
+INSERT INTO ledger (debit_account, credit_account, amount, description, currency, domain)
+  VALUES ('CASH', 'REV', 100000, 'Cash sale', 'USD', 'main');
 
-```bash
-curl -s http://127.0.0.1:3000/health | jq
-# {
-#   "agent_queries_used": 3,
-#   "agent_queries_limit": 10,
-#   "agent_queries_remaining": 7
-# }
+-- Create an account
+INSERT INTO accounts (code, name, account_type, currency, domain)
+  VALUES ('CASH', 'Cash Account', 'Asset', 'USD', 'main');
 ```
 
-### Installing a license
+### Not Supported
 
-```bash
-cp your-license.json ./vledger-data/license.json
-vledger license --data-dir ./vledger-data
+`UPDATE`, `DELETE`, `CREATE TABLE`, `DROP TABLE`, `CREATE INDEX`, `ALTER TABLE`, `pg_catalog.*`, `information_schema.*`
+
+### Important Notes
+
+- **Amounts are always in minor units** — $10.00 USD = `1000` (integer cents). Never use decimals.
+- **String literals use single quotes** — `'value'`. Double-quoted string literals are non-standard and may be removed in a future release.
+- **Default scan cap**: 10,000 rows on unbounded full-table scans. Point lookups (`WHERE sequence = N`) bypass this cap.
+- **RBAC on plans**: privilege is checked on the resolved query plan, not raw SQL text — immune to comment/whitespace bypass.
+- **`MERKLE_ROOT()`** does not require `--with-proofs`. It is always available to `admin`, `operator`, and `auditor` roles.
+
+### DBeaver Connection Note
+
+DBeaver shows `SQL Error [02000]` on the **Test Connection** button because it runs catalog introspection queries that VectorLedger doesn't implement. This is cosmetic — the connection itself is open and authenticated. Dismiss the error and open a SQL editor; queries work normally. To suppress: set `assumeMinServerVersion=9.0` in DBeaver driver properties.
+
+---
+
+## Double-Entry Accounting Model
+
+VectorLedger enforces **16 financial invariants at the engine layer** — not by policy or documentation. Every invariant is verified by the automated test suite on every release.
+
+### The 16 Financial Invariants
+
+**Core double-entry rules:**
+1. **Debits == Credits** on every entry — `UnbalancedEntry` returned before any WAL write
+2. **At least 2 lines** per entry — `TooFewLines` if fewer
+3. **Non-zero amounts** — `ZeroAmount` enforced at the `Amount` type level (no float path exists to compile)
+
+**Account validity:**
+4. **Account existence** — every referenced account must exist — `AccountNotFound`
+5. **Account status** — closed accounts reject new entries — `AccountClosed`
+6. **Currency match** — each line must match the account's registered currency — `CurrencyMismatch`
+
+**Balance protection:**
+7. **Non-negative balance** — Asset and Expense accounts (configurable per account) — `InsufficientFunds`
+8. **Exposure limits** — aggregate debit in one entry cannot exceed the account's configured limit — `ExposureLimitExceeded`
+
+**Legal and compliance controls:**
+9. **Legal holds** — held accounts block all new entries, reversals, and settlement transitions — `AccountUnderLegalHold`
+10. **Four-eyes requirement** — entries to accounts with `require_four_eyes = true` must go through approval — `FourEyesRequired`
+
+**Reversal rules:**
+11. **Reversal of posted only** — only `Posted` entries can be reversed — `CannotReverse`
+12. **One reversal per entry** — `AlreadyReversed` on second attempt
+
+**Cryptographic and structural integrity:**
+13. **Sequence monotonicity** — strictly monotonic with no gaps
+14. **Hash chain** — BLAKE3 chain maintained on every entry; `VERIFY_CHAIN()` detects any tampering
+15. **Currency precision** — amounts cannot exceed max minor unit value for currency precision — `PrecisionViolation` (USD: 2, BTC: 8, ETH: 18)
+
+**Idempotency:**
+16. **Duplicate detection** — entries with the same idempotency key are detected and skipped — `IdempotencyConflict`
+
+### Account Types
+
+`Asset`, `Liability`, `Equity`, `Income`, `Expense`, `Suspense`
+
+Normal balance directions:
+- **Asset / Expense** → increased by Debits (positive balance = Debit)
+- **Liability / Equity / Income** → increased by Credits (positive balance may appear as Credit/negative)
+
+### Entry Status Lifecycle
+
+```
+Posted → Pending → Settled
+                 → Failed
+Posted → Reversed
+       → Reversal
+       → PendingApproval → Posted (after four-eyes approval)
+                         → Rejected
+```
+
+### Corrections
+
+Corrections follow the append-only model: post a **reversal entry** (flip debit/credit at the original amount) then a **correction entry** at the correct amount. The original entry is never modified. The MCP tools `propose_correction` and `execute_correction` implement a structured two-step workflow with mandatory human confirmation.
+
+### Global Ledger Equation
+
+`Σ(Assets + Expenses) == Σ(Liabilities + Equity + Income)` — verified by `check_financial_invariants()`
+
+---
+
+## Client Libraries
+
+All three SDKs speak the **native newline-delimited JSON wire protocol** over TLS 1.3 on port 5433.
+
+**Wire protocol:**
+```
+Request:  {"sql": "SELECT ...", "with_proof": false}\n
+Response: {"ok": true, "columns": [...], "rows": [[...]], "rows_affected": N,
+           "proof": {"root_hex": "...", "leaf_count": N, "verified": true}}\n
+```
+
+All three clients validate account identifiers via the same character allowlist (`^[A-Za-z0-9_\-\.:]{1,128}$`) before SQL interpolation to prevent injection.
+
+### Python
+
+```python
+from vledger_client import VledgerClient
+
+with VledgerClient.connect("127.0.0.1", 5433) as client:
+    result = client.query("SELECT * FROM ledger LIMIT 10")
+    for row in result.rows:
+        print(row.get("description"), row.get("amount"))
+
+    balance = client.balance("CASH")  # returns int (minor units)
+    ok = client.verify_chain()        # returns bool
+
+# With Merkle proofs
+with VledgerClient.connect("127.0.0.1", 5433, with_proofs=True) as client:
+    result = client.query("SELECT * FROM ledger WHERE sequence = 1")
+    if result.proof:
+        print(f"Merkle root: {result.proof.root_hex}")
+        print(f"Verified: {result.proof.verified}")
+```
+
+Install: `pip install vledger-client` (or from `clients/python/`)
+
+### TypeScript
+
+```typescript
+import { VledgerClient } from './src/client';
+
+const client = await VledgerClient.connect({
+  host: '127.0.0.1',
+  port: 5433,
+  tls: true,
+});
+
+const result = await client.query('SELECT * FROM ledger LIMIT 10');
+for (const row of result.rows) {
+  console.log(row.get('description'), row.get('amount'));
+}
+
+const balance = await client.balance('CASH'); // returns number (minor units)
+const ok = await client.verifyChain();
+
+// With Merkle proofs
+const proofResult = await client.query(
+  'SELECT * FROM ledger WHERE sequence = 1',
+  { withProof: true }
+);
+console.log(proofResult.proof?.rootHex);
+
+client.close();
+```
+
+Install: `npm install` in `clients/typescript/`
+
+### Go
+
+```go
+import "github.com/pavondunbar/VectorLedger/clients/go/vledger"
+
+client, err := vledger.Connect(vledger.Options{
+    Host:   "127.0.0.1",
+    Port:   5433,
+    UseTLS: true,
+})
+if err != nil { log.Fatal(err) }
+defer client.Close()
+
+result, err := client.Query("SELECT * FROM ledger LIMIT 10")
+for _, row := range result.Rows {
+    desc, _ := row.GetString("description")
+    fmt.Println(desc)
+}
+
+balance, err := client.Balance("CASH") // returns int64 (minor units)
+ok, err := client.VerifyChain()
+
+// With Merkle proofs
+result, err = client.Query(
+    "SELECT * FROM ledger WHERE sequence = 1",
+    vledger.WithProof(),
+)
+fmt.Println(result.Proof.RootHex)
 ```
 
 ---
 
-## Production Deployment Checklist
+## MCP Server
 
-- [ ] PyHSM daemon running with a persistent, backed-up keystore
-- [ ] `vledger init` completed with `--key-source pyhsm` (Model 1) or `--key-source remote-pyhsm` (Model 2)
-- [ ] `key_source.json` shows `"backend": "py_hsm"` or `"backend": "remote_py_hsm"` — not `"env"` or `"file"`
-- [ ] Admin credential file read, password changed, and `catalog/.admin_initial_credentials` deleted
-- [ ] Data directory permissions locked (`chmod 700` on all subdirectories)
-- [ ] Volume encryption enabled on the disk hosting `vledger-data/`
-- [ ] Replace self-signed TLS certificate with a CA-signed one
-- [ ] Valid `license.json` installed for your paid tier
-- [ ] Test a full backup and restore drill: `vledger backup` → `vledger restore` → `vledger verify`
-- [ ] Schedule regular `vledger backup` runs
-- [ ] Schedule regular `vledger verify` runs (recommended: after each backup)
-- [ ] Run `cargo test --package vledger-ledger --package vledger-sql --package vledger-server --package vledger-audit` and confirm 245 tests pass
-- [ ] Run compliance reports and confirm zero FAIL items: `vledger compliance-report --standard pci-dss`
-- [ ] Ship `audit/audit.log` to an append-only off-host destination in real time
+VectorLedger ships a [Model Context Protocol](https://modelcontextprotocol.io) server that lets AI assistants (Claude Desktop, Cursor, Kiro, and any other MCP-capable client) query and write to the ledger directly — no SQL required.
+
+Requires **AgenticAI** license feature (Starter, Growth, or Enterprise tier).
+
+### Starting the MCP Server
+
+```bash
+# Embedded — shares the data directory with a running vledger start
+# (auto-detects port 5433 and switches to network mode)
+vledger mcp --bind 127.0.0.1:3000
+
+# Or run the standalone binary with an explicit server target
+vledger-mcp \
+  --data-dir ./vledger-data \
+  --bind 127.0.0.1:3000 \
+  --server 127.0.0.1:5433
+```
+
+### MCP Client Configuration
+
+```json
+{
+  "mcpServers": {
+    "vledger": {
+      "url": "http://127.0.0.1:3000/sse"
+    }
+  }
+}
+```
+
+### Health Endpoint
+
+```bash
+curl http://127.0.0.1:3000/health
+# {"ok":true,"service":"vledger-mcp","version":"1.5.1","tools":15,
+#  "agent_queries_used":3,"agent_queries_limit":100,"agent_queries_remaining":97}
+```
+
+### All 15 MCP Tools
+
+| Tool | Category | Description |
+|---|---|---|
+| `query_ledger` | Query | Run any SELECT, BALANCE(), VERIFY_CHAIN(), MERKLE_ROOT() |
+| `post_entry` | Write | Record a new double-entry journal entry |
+| `get_balance` | Query | Current balance of any account |
+| `list_accounts` | Query | All accounts with balances (optional domain/currency filter, default limit 500) |
+| `query_ledger_lines` | Query | Individual debit/credit lines |
+| `verify_chain` | Integrity | Verify the BLAKE3 hash chain |
+| `merkle_root` | Integrity | BLAKE3 Merkle commitment over a sequence range |
+| `explain_balance` | Reasoning | Why is an account at its current balance? Chains metadata → debits → credits → narrative |
+| `reconcile_account` | Reasoning | Does stored balance match sum(posted lines)? Returns BALANCED or exact discrepancy |
+| `find_policy_violations` | Reasoning | Large transactions, pending-too-long, missing external refs, failed entries |
+| `summarize_period` | Reasoning | Natural-language summary: counts by status, volume, Merkle commitment, chain integrity |
+| `audit_report` | Reasoning | Full cryptographic audit evidence report for a period |
+| `resolve_account` | Identity | Resolve name/code/UUID → authoritative account ID (mandatory before writes) |
+| `propose_correction` | Correction | Show reversal+correction plan (writes nothing) |
+| `execute_correction` | Correction | Execute reversal + correction after user confirms |
+
+### Agent Query Billing
+
+One **Agent Query** is counted per `initialize` JSON-RPC request (one conversation), regardless of how many internal tool calls the agent makes within that session.
+
+**Session idle timeout:** 30 minutes. After 30 minutes of inactivity, the next question starts a new Agent Query.
+
+| Tier | Agent Queries / Month |
+|---|---|
+| Free | Disabled |
+| Starter | 10 |
+| Growth | 100 |
+| Enterprise | Unlimited |
+
+The counter file (`mcp_queries.json`) resets automatically on the first day of each UTC month. It is a commercial metering mechanism — not a security control.
+
+### Natural-Language Queries (`--ask`)
+
+```bash
+export OPENAI_API_KEY=sk-...
+vledger sql --ask "show me all payments over \$10,000 last week"
+vledger sql --ask "what is the balance of the CASH account"
+vledger sql --ask "compute the Merkle root over entries 100000 to 200000"
+```
+
+| Environment Variable | Default | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | — | **Required.** Your API key. |
+| `OPENAI_MODEL` | `gpt-4o` | Model to use for translation. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Override for Ollama, Groq, etc. |
+
+The generated SQL is printed to stderr as `→ SQL: ...` before execution. No ledger data, credentials, or key material is transmitted to the LLM provider.
+
+### `AGENT_SYSTEM_PROMPT`
+
+A public `AGENT_SYSTEM_PROMPT` constant is exported from `vledger-mcp` and returned in the MCP `initialize` response's `instructions` field. It contains financially-aware instructions covering minor-units semantics, double-entry rules, account type normal balances, entry status lifecycle, tool routing guidance, and behavioral rules.
+
+```python
+from vledger_mcp import AGENT_SYSTEM_PROMPT
+
+agent = Agent(
+    name="VectorLedger Agent",
+    instructions=AGENT_SYSTEM_PROMPT,
+    mcp_servers=[vledger],
+)
+```
+
+---
+
+## pgwire Support
+
+VectorLedger implements the PostgreSQL wire protocol v3 on port 5432. Requires **Starter or higher** license.
+
+Enable at startup:
+```bash
+vledger start --data-dir ./vledger-data --pgwire
+```
+
+Connect with psql:
+```bash
+psql "host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require"
+```
+
+TLS 1.3 is mandatory — plain-text connections are rejected. Authentication is cleartext password inside TLS, verified against Argon2id hashes.
+
+**Merkle proofs via pgwire:** start with `--with-proofs --pgwire` and every SELECT result includes a `NoticeResponse` with the BLAKE3 Merkle root:
+
+```
+NOTICE:  Merkle root: 5a8b9ce38e7e95d66070c74d889fbe1811d9a19e459889839fc2384780a366f4 (1 leaf, verified: true)
+```
+
+> Note: `MERKLE_ROOT()` SQL function is available at all times without `--with-proofs`. The flag only adds automatic per-query proof notices.
+
+**Known incompatibilities:** `pg_catalog.*`, `information_schema.*`, `\dt` psql meta-commands, `CREATE/DROP TABLE`, `UPDATE`, `DELETE`. See [SQL Dialect](#sql-dialect) for the full list.
+
+---
+
+## Licensing Tiers
+
+License files (`license.json`) are Ed25519-signed by VectorGuard Labs and verified against the public key baked into the binary. The server checks the license at startup and at UTC midnight daily.
+
+| Tier | Features | Price |
+|---|---|---|
+| **Free** | Core ledger, single node, 30-day audit export | Free |
+| **Starter** | + PgWire, AgenticAI, 90-day audit export | $499/mo |
+| **Growth** | + Replication, ComplianceReport, AuditExportUnlimited, AgenticAI | $2,499/mo |
+| **Enterprise** | All features + HSM, MultiNode, AgenticAI | From $4,999/mo |
+
+Contact `pavon@vectorguardlabs.com` to purchase or renew a license.
+
+Check your current license:
+```bash
+vledger license --data-dir ./vledger-data
+```
+
+License file format:
+```json
+{
+  "licensee": "acme-corp",
+  "email": "ops@acme.com",
+  "tier": "growth",
+  "issued_at": "2026-08-06",
+  "expires_at": "2027-08-06",
+  "features": ["pgwire", "replication", "compliance_report", "audit_export_unlimited", "agentic_ai"],
+  "signature": "<hex Ed25519 signature>"
+}
+```
+
+---
+
+## Performance
+
+Benchmark results (Apple Silicon, group_commit, 10 clients × 1,000 transactions, 70% INSERT / 30% SELECT):
+
+| Metric | Result |
+|---|---|
+| Throughput | 430 TPS |
+| Min latency | 311 µs |
+| p50 latency | 23 ms |
+| p95 latency | 36 ms |
+| p99 latency | 42 ms |
+
+Run your own benchmarks with the included tool:
+```bash
+vledger-bench \
+  --server 127.0.0.1:5433 \
+  --clients 10 \
+  --transactions 1000 \
+  --workload mixed \
+  --report bench-report.json
+```
 
 ---
 
 ## Changelog
 
-### v1.5.0 — License feature gate fix
+### v1.5.1
+- Workspace-wide version bump; all crates at 1.5.1
 
-- **Fix:** `require_feature()` now falls back to the tier's built-in default
-  features when a feature is not in the license file's explicit features list.
-  Licenses issued before v1.4.8 (before `AgenticAi` was added) were being
-  blocked even on Enterprise/Growth/Starter tiers. No license file changes needed.
+### v1.5.0
+- **Bug fix:** `require_feature()` was only checking the explicit `features` list, not the tier's default features. Licenses on paid tiers were incorrectly blocked from tier-default features.
+- MCP server and `vledger sql --ask` gated behind `Feature::AgenticAi` (Starter, Growth, Enterprise)
+- Monthly Agent Query limits enforced: Starter 10, Growth 100, Enterprise unlimited
 
-### v1.4.9 — Agent Query metering (initialize-based)
+### v1.4.5
+- `propose_correction` and `execute_correction` MCP tools — structured two-step correction workflow with mandatory human confirmation
 
-- **Fix:** Agent Query billing now counts on `initialize`, not SSE connections.
-  One `initialize` request = one Agent Query, regardless of how many internal
-  tool calls the agent makes. SSE connections are pure transport and not counted.
-- Monthly counter persisted to `mcp_queries.json` in the data directory.
-- Monthly reset is automatic — no restart or cron job needed.
-- Health endpoint now shows `agent_queries_used`, `agent_queries_limit`,
-  `agent_queries_remaining`.
+### v1.4.4
+- `resolve_account` MCP tool — mandatory identity gate before any write involving named parties
 
-### v1.4.8 — Agentic AI license gate
+### v1.4.3
+- JSON-RPC notifications (no `id` field) return HTTP 204 — fixes Kiro V3 stuck on loading
 
-- `vledger mcp` and `vledger sql --ask` now require a Starter, Growth, or
-  Enterprise license. Free tier users see a clear upgrade message.
-- New `Feature::AgenticAi` variant in the license crate.
-- Tier limits: Starter 10/mo, Growth 100/mo, Enterprise unlimited.
+### v1.4.2
+- SSE `endpoint` event sends full absolute URL — fixes Kiro CLI V3
 
-### v1.4.5 — Structured correction workflow
+### v1.4.1
+- `vledger mcp` auto-detects running `vledger start` on port 5433 and switches to network mode
 
-- **`propose_correction`** — Step 1: look up original entry, show full reversal+correction
-  plan (amounts, accounts, net adjustment, what is preserved) and wait for confirmation.
-  Nothing is written.
-- **`execute_correction`** — Step 2: after user confirms, post the reversal and correction
-  entries, verify chain, return full summary.
-- **`AGENT_SYSTEM_PROMPT`** updated with mandatory correction protocol.
-- *"Ask your ledger. Don't edit it."*
+### v1.4.0
+- Financial semantic layer: 5 new reasoning tools (`explain_balance`, `reconcile_account`, `find_policy_violations`, `summarize_period`, `audit_report`)
+- `AGENT_SYSTEM_PROMPT` constant in `vledger-mcp`
+- Richer `--ask` schema context with full financial domain knowledge
 
-### v1.4.4 — `resolve_account` identity enforcement
+### v1.0.39
+- **Bug fix:** Merkle root display was truncated to 32 hex characters at 3 display sites; now shows full 64-character hash
 
-- **`resolve_account`** — mandatory before any write involving named parties. Returns
-  FOUND/NOT_FOUND/MULTIPLE_FOUND. Explicit ⛔ STOP on ambiguous identity. Explains
-  why metadata names ≠ account identities.
-- Enforces identity → authorization → accounting chain.
+### v1.0.38
+- **Bug fix:** Column projection (`SELECT specific, columns FROM ledger`) now works correctly for all 3 tables
 
-### v1.4.1–v1.4.3 — MCP network mode and Kiro V3 fixes
+### v1.0.37
+- `MERKLE_ROOT()` now accepts a single argument (`to_seq` defaults to `from_seq`)
 
-- **v1.4.1** — `vledger mcp` auto-detects running server, uses network mode (no data
-  directory lock conflict)
-- **v1.4.2** — SSE endpoint event sends full absolute URL (Kiro V3 compatibility)
-- **v1.4.3** — HTTP 204 for JSON-RPC notifications; Kiro V3 `◌ loading` fixed
+### v1.0.36
+- `MERKLE_ROOT(from_seq, to_seq)` SQL function added
 
-### v1.4.0 — Financial semantic layer, 5 new reasoning tools, agent system prompt
+### v1.0.35
+- **Bug fix:** pgwire `--with-proofs` flag was silently ignored; Merkle root now correctly delivered to pgwire clients
 
-- **Financial semantic layer for `--ask`** — `VLEDGER_SCHEMA_CONTEXT` rewritten
-  with full financial domain knowledge: double-entry rules, minor-unit semantics,
-  account type normal balance directions, entry status lifecycle, cryptographic
-  field meanings, and common query patterns. `--ask` now understands finance,
-  not just schema.
-- **5 new MCP financial reasoning tools** — `explain_balance`, `reconcile_account`,
-  `find_policy_violations`, `summarize_period`, `audit_report`. Each chains multiple
-  internal queries and returns structured financial narrative, not just raw rows.
-- **`AGENT_SYSTEM_PROMPT`** — public constant in `vledger-mcp` with financially-aware
-  agent instructions. Returned in MCP `initialize` response automatically; usable as
-  the `instructions` field for any Python or GUI agent.
-- **12 MCP tools total** (7 low-level + 5 high-order). `/health` now returns tool
-  count and version.
+### v1.0.34
+- Static analysis (`cargo clippy` with deny rules), mutation testing (`cargo-mutants`), 21 formal verification harnesses (Kani)
+- `Amount` arithmetic operators now use checked arithmetic — silent overflow is a compile-time error
 
-### v1.0.39 — NL-to-SQL, MCP server, Merkle root display fix
+### v1.0.33
+- 498 tests across 11 packages; 4 proptest properties; 12 fuzz targets total (6 added)
 
-- **`vledger sql --ask`** — natural-language-to-SQL via any OpenAI-compatible
-  LLM. Set `OPENAI_API_KEY`; optionally override `OPENAI_MODEL` (default `gpt-4o`)
-  and `OPENAI_BASE_URL` (for Ollama, Groq, etc.). The generated SQL is always
-  printed to stderr before execution.
-- **`vledger mcp`** — embedded MCP (Model Context Protocol) server. Exposes 7
-  tools over HTTP + SSE so AI assistants can query and write the ledger without SQL.
-  Also ships as a standalone `vledger-mcp` binary.
-- **fix** — Merkle root display truncated at 32 hex chars in three places; now
-  always shows the full 64-character BLAKE3 hash.
+### v1.0.32
+- **Security:** Fixed 3 fuzz-discovered bugs: WAL OOM on crafted `payload_len`, SQL planner panic on column/value mismatch, harness allocation cap
+- `WalSyncMode::NoSync` compile-gated behind `--features dev-no-sync`
 
-### v1.0.30 — FTS5 metadata index
-- Added SQLite FTS5 full-text index over all entry metadata (`entries_fts` virtual table, `unicode61` tokenizer)
-- `WHERE metadata LIKE '%value%'` and `WHERE metadata ILIKE '%value%'` now use the FTS index — queries that previously took minutes on 17M+ entry ledgers now return in milliseconds
-- FTS index is populated at insert time for all new entries
-- On first startup after upgrade, existing databases are automatically backfilled (progress logged to `nohup.out`); subsequent startups skip the step
-- Index works with any metadata field name — future CSV imports with different column layouts are automatically searchable
-
-### v1.0.29 — Metadata scan OOM fix
-- Fixed server crash (OOM) introduced in v1.0.28: replaced `entries_scan(entry_count())` with `stream_entries()`, which iterates SQLite rows one at a time in constant RAM
-
-### v1.0.28 — Metadata scan cap fix
-- Fixed `WHERE metadata LIKE` returning 0 rows on ledgers larger than 10,000 entries: scan was incorrectly capped at `DEFAULT_SCAN_LIMIT` regardless of total ledger size
-
-### v1.0.27 — Metadata WHERE filtering
-- Added `WHERE metadata = 'value'` and `WHERE metadata LIKE '%value%'` / `ILIKE` support on both `ledger` and `ledger_lines`
-- Previously metadata was readable in SELECT output but not filterable in WHERE clauses
+### v1.0.31
+- Removed unsafe `SignedCommit::verify()` (self-consistency check); only `verify_against(trusted_key)` remains
 
 ---
 
-## Connecting AI Clients to VectorLedger
-
-VectorLedger exposes two agentic surfaces:
-
-| Surface | How it works | Best for |
-|---|---|---|
-| `vledger sql --ask` | Single LLM call: question → SQL → result | Quick one-off queries from the terminal |
-| `vledger mcp` | MCP server: AI agent calls tools in a loop | Full agentic workflows, multi-step reasoning, any MCP client |
-
-The sections below cover every supported client for both surfaces, for both **local
-installations** (VectorLedger running on your laptop) and **cloud instances**
-(VectorLedger running on EC2, GCP, Azure, etc.).
-
----
-
-### Part 1 — `vledger sql --ask` (natural-language CLI queries)
-
-No server setup required. Works anywhere you can run the `vledger` binary.
-
-#### Prerequisites
-
-Set at least `OPENAI_API_KEY`. The other two variables are optional:
-
-```bash
-export OPENAI_API_KEY=sk-...          # required
-export OPENAI_MODEL=gpt-4o            # optional — default: gpt-4o
-export OPENAI_BASE_URL=https://api.openai.com/v1  # optional — see provider table below
-```
-
-#### Usage
-
-```bash
-# Local installation
-vledger sql --ask "show me all failed payments in the last 30 days"
-vledger sql --ask "what is the current balance of the CASH account"
-vledger sql --ask "list the 10 largest transactions this month"
-vledger sql --ask "compute the Merkle root over the last 1000 entries"
-vledger sql --ask "how many entries were posted today"
-```
-
-For a cloud instance, add `--server` to route through the running server instead
-of opening the data directory directly:
-
-```bash
-# Cloud / remote server
-vledger sql --server 127.0.0.1:5433 --ask "show me all failed payments last week"
-```
-
-The generated SQL is always printed to stderr before execution so you can see
-exactly what ran:
-
-```
-→ SQL: SELECT * FROM ledger WHERE status = 'Failed'
-       AND effective_at >= '2026-09-01T00:00:00Z' LIMIT 100
-(results follow)
-```
-
-#### Supported LLM providers
-
-Any OpenAI-compatible chat completions endpoint works. Set `OPENAI_BASE_URL` and
-`OPENAI_MODEL` to switch providers — no code changes required.
-
-| Provider | `OPENAI_BASE_URL` | `OPENAI_MODEL` examples | Notes |
-|---|---|---|---|
-| **OpenAI** (default) | `https://api.openai.com/v1` | `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo` | Default — no env var needed |
-| **xAI Grok** | `https://api.x.ai/v1` | `grok-3`, `grok-3-mini`, `grok-2` | xAI's Grok models; API key from console.x.ai |
-| **Anthropic** | `https://api.anthropic.com/v1` | `claude-opus-4-5`, `claude-sonnet-4-5` | Requires Anthropic API key |
-| **Groq** | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile`, `mixtral-8x7b-32768` | Fast inference, free tier available |
-| **Together AI** | `https://api.together.xyz/v1` | `meta-llama/Llama-3-70b-chat-hf` | Good for open models |
-| **Mistral** | `https://api.mistral.ai/v1` | `mistral-large-latest`, `mistral-medium` | European data residency |
-| **Ollama** (local) | `http://127.0.0.1:11434/v1` | `llama3.2`, `mistral`, `codellama` | Fully local, no API key needed |
-| **LM Studio** (local) | `http://127.0.0.1:1234/v1` | (model loaded in LM Studio) | GUI-based local model runner |
-| **vLLM** (self-hosted) | `http://your-host:8000/v1` | any HuggingFace model | Self-hosted on GPU server |
-| **llama.cpp server** | `http://127.0.0.1:8080/v1` | any GGUF model | Ultra-lightweight local inference |
-
-**Example — using Ollama locally (no API key, no internet):**
-
-```bash
-# Install Ollama: https://ollama.com
-ollama pull llama3.2
-
-export OPENAI_API_KEY=ollama    # any non-empty string
-export OPENAI_BASE_URL=http://127.0.0.1:11434/v1
-export OPENAI_MODEL=llama3.2
-
-vledger sql --ask "show me the last 5 transactions"
-```
-
-**Example — using xAI Grok:**
-
-```bash
-export OPENAI_API_KEY=xai-...   # Grok API key from console.x.ai
-export OPENAI_BASE_URL=https://api.x.ai/v1
-export OPENAI_MODEL=grok-3
-
-vledger sql --ask "show me all payments over $10,000 last week"
-vledger sql --ask "what is the balance of the CASH account"
-```
-
-**Example — using Kiro with Grok:**
-
-Kiro itself uses whatever model is configured in your Kiro session, but `--ask`
-is a separate CLI call that goes directly to the LLM you configure. To use Grok
-as the translation engine while working inside Kiro:
-
-```bash
-export OPENAI_API_KEY=xai-...
-export OPENAI_BASE_URL=https://api.x.ai/v1
-export OPENAI_MODEL=grok-3
-
-# Run this from a terminal inside or alongside your Kiro session
-vledger sql --ask "list all accounts with a balance over $50,000"
-```
-
-Kiro itself orchestrates the workflow; Grok handles the SQL translation.
-
-**Example — using Groq (fast, free tier):**
-
-```bash
-export OPENAI_API_KEY=gsk_...   # Groq API key from console.groq.com
-export OPENAI_BASE_URL=https://api.groq.com/openai/v1
-export OPENAI_MODEL=llama-3.3-70b-versatile
-
-vledger sql --ask "what accounts have a balance over $100,000"
-```
-
----
-
-### Part 2 — `vledger mcp` (full agentic MCP server)
-
-The MCP server exposes VectorLedger as a set of callable tools that any AI agent
-can use autonomously — reading data, posting entries, verifying integrity — in a
-reasoning loop without any human typing SQL.
-
-#### Step 1 — Start the MCP server
-
-**Local installation:**
-
-```bash
-# Embedded mode (uses existing data dir, shares the process)
-vledger mcp --bind 127.0.0.1:3000 --username admin
-
-# Standalone binary (separate process)
-vledger-mcp --data-dir ./vledger-data --bind 127.0.0.1:3000 --username admin
-```
-
-**Cloud instance (EC2 / GCP / Azure):**
-
-SSH into your instance and start the MCP server:
-
-```bash
-ssh -i './YourKey.pem' ubuntu@YOUR-INSTANCE-IP
-
-# On the instance:
-vledger mcp --bind 127.0.0.1:3000 --username admin
-# Or as a background process:
-nohup vledger-mcp --data-dir /var/lib/vledger/data \
-  --bind 127.0.0.1:3000 \
-  >> /var/log/vledger/mcp.log 2>&1 &
-```
-
-> **Security:** Always bind to `127.0.0.1`, not `0.0.0.0`. The MCP server has no
-> TLS. Access it from outside the instance using an SSH tunnel (see below) or a
-> TLS-terminating reverse proxy.
-
-**Verify it is running:**
-
-```bash
-curl -s http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.4.5","tools":15}
-```
-
----
-
-#### Step 2 — Connect your AI client
-
-Choose the client that fits your workflow:
-
----
-
-##### Option A — Kiro CLI
-
-**Local VectorLedger (MCP server on same machine):**
-
-Create `.kiro/settings/mcp.json` in your workspace:
-
-```bash
-mkdir -p .kiro/settings
-cat > .kiro/settings/mcp.json << 'EOF'
-{
-  "mcpServers": {
-    "vledger": {
-      "url": "http://127.0.0.1:3000/sse",
-      "disabled": false
-    }
-  }
-}
-EOF
-```
-
-**Cloud VectorLedger (EC2 / GCP / Azure):**
-
-First, open an SSH tunnel in a separate terminal and leave it running:
-
-```bash
-# Replace with your key file and instance IP
-ssh -i './YourKey.pem' -L 3000:127.0.0.1:3000 -N ubuntu@YOUR-INSTANCE-IP
-```
-
-Then create the same `.kiro/settings/mcp.json` — Kiro connects through the tunnel
-transparently:
-
-```bash
-mkdir -p .kiro/settings
-cat > .kiro/settings/mcp.json << 'EOF'
-{
-  "mcpServers": {
-    "vledger": {
-      "url": "http://127.0.0.1:3000/sse",
-      "disabled": false
-    }
-  }
-}
-EOF
-```
-
-Restart Kiro CLI. Then ask it naturally:
-
-```
-"Query the vledger and show me the last 10 posted entries"
-"What is the balance of the CASH account?"
-"Post a payment of $500 from CASH to REVENUE with description 'Monthly fee'"
-"Verify the chain integrity and show me the result"
-"Compute the Merkle root over entries 1 to 10000"
-```
-
-Kiro will call the appropriate MCP tools against your live ledger and show the results.
-
----
-
-##### Option B — Claude Desktop
-
-**Local VectorLedger:**
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (create it if
-it doesn't exist):
-
-```json
-{
-  "mcpServers": {
-    "vledger": {
-      "url": "http://127.0.0.1:3000/sse"
-    }
-  }
-}
-```
-
-Restart Claude Desktop. A hammer icon appears in the chat input when tools are loaded.
-
-**Cloud VectorLedger:**
-
-Open the SSH tunnel first (leave running in a separate terminal):
-
-```bash
-ssh -i './YourKey.pem' -L 3000:127.0.0.1:3000 -N ubuntu@YOUR-INSTANCE-IP
-```
-
-Use the exact same `claude_desktop_config.json` as above — the tunnel makes
-`127.0.0.1:3000` point to your cloud instance transparently. Restart Claude Desktop.
-
----
-
-##### Option C — Cursor
-
-Edit `.cursor/mcp.json` in your project root (or `~/.cursor/mcp.json` globally):
-
-```json
-{
-  "mcpServers": {
-    "vledger": {
-      "url": "http://127.0.0.1:3000/sse"
-    }
-  }
-}
-```
-
-For cloud: open the SSH tunnel first (same as above), then use the same config.
-Restart Cursor or reload the MCP servers from Settings → Features → MCP.
-
----
-
-##### Option D — Continue.dev (VS Code / JetBrains)
-
-Edit `~/.continue/config.json`:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "vledger",
-      "transport": {
-        "type": "sse",
-        "url": "http://127.0.0.1:3000/sse"
-      }
-    }
-  ]
-}
-```
-
-For cloud: open the SSH tunnel first, then use the same config.
-
----
-
-##### Option E — LangChain (Python)
-
-Install the adapter:
-
-```bash
-pip install langchain-mcp-adapters langchain-openai langgraph
-```
-
-```python
-import asyncio
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain_mcp_adapters.tools import load_mcp_tools
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
-
-async def main():
-    # For cloud: keep your SSH tunnel running, then use 127.0.0.1:3000
-    async with sse_client("http://127.0.0.1:3000/sse") as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await load_mcp_tools(session)
-
-            llm = ChatOpenAI(model="gpt-4o")
-            agent = create_react_agent(llm, tools)
-
-            result = await agent.ainvoke({
-                "messages": [{
-                    "role": "user",
-                    "content": (
-                        "Show me all failed transactions from the last 7 days, "
-                        "then verify the chain integrity, and summarise the findings."
-                    )
-                }]
-            })
-            print(result["messages"][-1].content)
-
-asyncio.run(main())
-```
-
-The agent will autonomously call `query_ledger`, then `verify_chain`, chain the
-results, and give you a natural-language summary — no SQL written anywhere.
-
----
-
-##### Option F — OpenAI Agents SDK (Python)
-
-```bash
-pip install openai-agents mcp
-```
-
-```python
-import asyncio
-from agents import Agent, Runner
-from agents.mcp import MCPServerSse
-
-async def main():
-    # For cloud: SSH tunnel must be running first
-    async with MCPServerSse("http://127.0.0.1:3000/sse") as vledger:
-        agent = Agent(
-            name="VectorLedger Agent",
-            instructions=(
-                # Use the built-in AGENT_SYSTEM_PROMPT from vledger-mcp for
-                # financially-aware instructions (returned automatically in the
-                # MCP initialize response), or paste it inline here.
-                "You are a financial ledger assistant with direct access to VectorLedger. "
-                "Amounts are always in integer minor units (cents) — $100.00 = 10000. "
-                "Every entry has exactly one Debit and one Credit line that must balance. "
-                "The ledger is append-only — corrections require reversal entries. "
-                "Always verify the chain after posting entries. Never fabricate data — "
-                "always call a tool to get real numbers."
-            ),
-            mcp_servers=[vledger],
-        )
-        result = await Runner.run(
-            agent,
-            "Why is the SETTLEMENT account $82,400 lower than expected? "
-            "Investigate and produce a reconciliation report."
-        )
-        print(result.final_output)
-
-asyncio.run(main())
-```
-
----
-
-##### Option G — LlamaIndex (Python)
-
-```bash
-pip install llama-index-tools-mcp llama-index-llms-openai
-```
-
-```python
-import asyncio
-from llama_index.tools.mcp import McpToolSpec
-from llama_index.llms.openai import OpenAI
-from llama_index.core.agent import ReActAgent
-
-async def main():
-    # For cloud: SSH tunnel must be running first
-    mcp_tool_spec = McpToolSpec(url="http://127.0.0.1:3000/sse")
-    tools = await mcp_tool_spec.to_tool_list_async()
-
-    llm = OpenAI(model="gpt-4o")
-    agent = ReActAgent.from_tools(tools, llm=llm, verbose=True)
-
-    response = agent.chat(
-        "What are the top 5 accounts by balance? Show me the numbers."
-    )
-    print(response)
-
-asyncio.run(main())
-```
-
----
-
-##### Option H — Raw HTTP / curl (no AI client needed)
-
-The MCP server accepts plain JSON-RPC 2.0 POST requests. Any script, cron job,
-or monitoring system can call it directly — no AI framework required.
-
-```bash
-BASE="http://127.0.0.1:3000"  # or tunnel URL for cloud
-
-# List all available tools
-curl -s -X POST $BASE/message \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-
-# Query the ledger
-curl -s -X POST $BASE/message \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "id": 2,
-    "method": "tools/call",
-    "params": {
-      "name": "query_ledger",
-      "arguments": { "sql": "SELECT * FROM ledger LIMIT 10" }
-    }
-  }'
-
-# Get account balance
-curl -s -X POST $BASE/message \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "id": 3,
-    "method": "tools/call",
-    "params": {
-      "name": "get_balance",
-      "arguments": { "account": "CASH" }
-    }
-  }'
-
-# Post a new entry
-curl -s -X POST $BASE/message \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "id": 4,
-    "method": "tools/call",
-    "params": {
-      "name": "post_entry",
-      "arguments": {
-        "description": "Monthly fee",
-        "debit_account": "CASH",
-        "credit_account": "REVENUE",
-        "amount": 50000,
-        "currency": "USD",
-        "domain": "main"
-      }
-    }
-  }'
-
-# Verify chain integrity
-curl -s -X POST $BASE/message \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "id": 5,
-    "method": "tools/call",
-    "params": { "name": "verify_chain", "arguments": {} }
-  }'
-
-# Compute Merkle root over a range
-curl -s -X POST $BASE/message \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "id": 6,
-    "method": "tools/call",
-    "params": {
-      "name": "merkle_root",
-      "arguments": { "from_seq": 1, "to_seq": 10000 }
-    }
-  }'
-```
-
----
-
-#### Cloud deployment: SSH tunnel reference
-
-All of the clients above use `http://127.0.0.1:3000` — the SSH tunnel makes your
-cloud instance's port 3000 appear as a local port. Here is the complete tunnel
-reference:
-
-**Basic tunnel (interactive — keeps a shell open):**
-
-```bash
-ssh -i './YourKey.pem' -L 3000:127.0.0.1:3000 ubuntu@YOUR-INSTANCE-IP
-```
-
-**Background tunnel (no shell, tunnel only):**
-
-```bash
-ssh -i './YourKey.pem' -L 3000:127.0.0.1:3000 -N ubuntu@YOUR-INSTANCE-IP
-```
-
-**Background tunnel that auto-reconnects (recommended for long sessions):**
-
-```bash
-ssh -i './YourKey.pem' \
-  -L 3000:127.0.0.1:3000 \
-  -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
-  ubuntu@YOUR-INSTANCE-IP &
-```
-
-**Common cloud provider usernames:**
-
-| Cloud | Default username |
-|---|---|
-| AWS EC2 (Ubuntu) | `ubuntu` |
-| AWS EC2 (Amazon Linux) | `ec2-user` |
-| GCP Compute Engine | your Google account username |
-| Azure VM (Ubuntu) | `azureuser` |
-| DigitalOcean Droplet | `root` or `ubuntu` |
-| Hetzner Cloud | `root` |
-
-**Check the tunnel is working:**
-
-```bash
-curl -s http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.4.5","tools":15}
-```
-
-If that returns successfully, every AI client above will work.
-
----
-
-##### Option I — xAI Grok (Python agent via MCP)
-
-Grok's API is fully OpenAI-compatible. Use it as the reasoning engine behind
-any of the Python MCP clients (LangChain, OpenAI Agents SDK, LlamaIndex) by
-swapping the LLM initialisation.
-
-**With LangChain:**
-
-```bash
-pip install langchain-mcp-adapters langchain-openai langgraph
-```
-
-```python
-import asyncio, os
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain_mcp_adapters.tools import load_mcp_tools
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
-
-async def main():
-    # For cloud: keep your SSH tunnel running, then use 127.0.0.1:3000
-    async with sse_client("http://127.0.0.1:3000/sse") as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await load_mcp_tools(session)
-
-            # Point LangChain at xAI's Grok endpoint
-            llm = ChatOpenAI(
-                model="grok-3",
-                openai_api_key=os.environ["XAI_API_KEY"],
-                openai_api_base="https://api.x.ai/v1",
-            )
-            agent = create_react_agent(llm, tools)
-
-            result = await agent.ainvoke({
-                "messages": [{
-                    "role": "user",
-                    "content": (
-                        "Show me all failed transactions from the last 7 days, "
-                        "then verify the chain integrity and summarise the findings."
-                    )
-                }]
-            })
-            print(result["messages"][-1].content)
-
-asyncio.run(main())
-```
-
-**With OpenAI Agents SDK:**
-
-```bash
-pip install openai-agents mcp
-```
-
-```python
-import asyncio, os
-from openai import AsyncOpenAI
-from agents import Agent, Runner, set_default_openai_client
-from agents.mcp import MCPServerSse
-
-async def main():
-    # Point the Agents SDK at xAI
-    grok_client = AsyncOpenAI(
-        api_key=os.environ["XAI_API_KEY"],
-        base_url="https://api.x.ai/v1",
-    )
-    set_default_openai_client(grok_client)
-
-    # For cloud: SSH tunnel must be running first
-    async with MCPServerSse("http://127.0.0.1:3000/sse") as vledger:
-        agent = Agent(
-            name="VectorLedger Grok Agent",
-            model="grok-3",
-            instructions=(
-                "You are a financial ledger assistant with direct access to VectorLedger. "
-                "Use the available tools to answer questions, post entries, and verify integrity."
-            ),
-            mcp_servers=[vledger],
-        )
-        result = await Runner.run(
-            agent,
-            "What are the top 5 accounts by balance? Verify the chain after showing me."
-        )
-        print(result.final_output)
-
-asyncio.run(main())
-```
-
-Get a Grok API key at [console.x.ai](https://console.x.ai).
-
----
-
-##### Option J — OpenAI GPT Actions (ChatGPT Plus / Team / Enterprise)
-
-GPT Actions let you define a custom HTTP action inside ChatGPT that calls an
-external API. You can wire ChatGPT directly to VectorLedger's `/message` endpoint.
-
-**Requirements:**
-- ChatGPT Plus, Team, or Enterprise account
-- VectorLedger MCP server exposed over **HTTPS** with a public URL (not localhost)
-- A domain with TLS — [Caddy](https://caddyserver.com) on your EC2 instance handles
-  this automatically with Let's Encrypt
-
-**Step 1 — Expose the MCP server over HTTPS on EC2:**
-
-```bash
-# Install Caddy
-sudo apt install -y caddy
-
-# Edit /etc/caddy/Caddyfile
-sudo tee /etc/caddy/Caddyfile << 'EOF'
-mcp.yourdomain.com {
-    reverse_proxy 127.0.0.1:3000
-}
-EOF
-
-sudo systemctl reload caddy
-```
-
-**Step 2 — Create a GPT Action in ChatGPT:**
-
-1. Go to [chatgpt.com](https://chatgpt.com) → **Explore GPTs** → **Create**
-2. Click **Configure** → scroll to **Actions** → **Create new action**
-3. Set the schema to point at your public endpoint:
-
-```yaml
-openapi: "3.1.0"
-info:
-  title: VectorLedger
-  version: "1.4.6"
-servers:
-  - url: https://mcp.yourdomain.com
-paths:
-  /message:
-    post:
-      operationId: callTool
-      summary: Call a VectorLedger MCP tool
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                jsonrpc: { type: string, example: "2.0" }
-                id:      { type: integer, example: 1 }
-                method:  { type: string, example: "tools/call" }
-                params:  { type: object }
-      responses:
-        "200":
-          description: Tool result
-```
-
-4. Set **Authentication** to None (the MCP server authenticates at startup via
-   `VLEDGER_CLI_PASSWORD`)
-5. Add instructions to the GPT describing what tools are available
-
-**Caveats:**
-- ChatGPT's consumer UI (`chat.openai.com`) does **not** support MCP natively —
-  GPT Actions is a custom HTTP integration, not a true MCP connection
-- ChatGPT will call the OpenAPI schema, not the SSE stream; it's a REST-style
-  integration rather than a streaming tool protocol
-- Requires a publicly accessible HTTPS endpoint — the SSH tunnel approach used
-  by other clients does not work here
-- Best for read-only queries; write operations (post_entry, execute_correction)
-  should be restricted via a read-only role for ChatGPT access
-
----
-
-##### Option K — OpenAI Codex
-
-[Codex](https://codex.openai.com) is an agentic coding environment that runs in
-a sandboxed cloud container. It can execute shell commands and call external APIs.
-
-**Two approaches:**
-
-**Approach 1 — CLI via `--ask` (no server exposure needed)**
-
-Codex can clone the VectorLedger repo, build or download the binary, and run
-`vledger sql --ask` directly in its sandbox:
-
-```bash
-# Inside Codex task instructions:
-# "Download the VectorLedger binary, set up the data directory,
-#  and query the ledger for last month's activity."
-
-wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.4.6/vledger-v1.4.6-linux-x86_64.tar.gz
-tar -xzf vledger-v1.4.6-linux-x86_64.tar.gz
-chmod +x vledger
-
-export OPENAI_API_KEY=sk-...
-./vledger sql --ask "summarize last month's activity"
-```
-
-This works today without any network configuration. Codex acts as a shell-script
-agent that drives VectorLedger's CLI.
-
-**Approach 2 — MCP via HTTPS (requires public endpoint)**
-
-If the MCP server is exposed over HTTPS (see Option J above), Codex can call it
-directly using Python:
-
-```python
-import httpx, json
-
-BASE = "https://mcp.yourdomain.com"
-
-def call_tool(name, arguments):
-    resp = httpx.post(f"{BASE}/message", json={
-        "jsonrpc": "2.0", "id": 1,
-        "method": "tools/call",
-        "params": {"name": name, "arguments": arguments}
-    })
-    return resp.json()
-
-# Example: query the ledger
-result = call_tool("query_ledger", {"sql": "SELECT * FROM ledger LIMIT 10"})
-print(json.dumps(result, indent=2))
-
-# Example: get account balance
-balance = call_tool("get_balance", {"account": "CASH"})
-print(balance)
-```
-
-**Caveats:**
-- Codex's sandbox is network-isolated by default — it cannot reach `127.0.0.1:3000`
-  through an SSH tunnel
-- Codex is primarily a code-writing agent; for direct ledger queries the other
-  options (Kiro, Claude Desktop, Agents SDK) are better suited
-- Best use case for Codex: *"Write me a Python script that monitors the VectorLedger
-  MCP server and alerts on policy violations"* rather than direct ledger interaction
-
----
-
-#### Client selection guide
-
-Not sure which option to pick? Use this:
-
-| You want to… | Best option |
-|---|---|
-| Ask quick questions from the terminal | `vledger sql --ask` (Part 1) |
-| Use xAI Grok for SQL translation | `--ask` with Grok env vars (Part 1) |
-| Chat with your ledger in a GUI | **Claude Desktop** (Option B) |
-| Work inside VS Code | **Continue.dev** (Option D) or **Cursor** (Option C) |
-| Work inside Kiro CLI | **Kiro** (Option A) |
-| Use Grok as the agent reasoning engine | **LangChain + Grok** or **OpenAI Agents SDK + Grok** (Option I) |
-| Build a Python automation or agent pipeline | **LangChain** (Option E) or **OpenAI Agents SDK** (Option F) |
-| Integrate from a script, cron job, or monitoring system | **Raw HTTP / curl** (Option H) |
-| Build a RAG or document-query system | **LlamaIndex** (Option G) |
-| Use ChatGPT (consumer UI) | **GPT Actions** (Option J) — requires HTTPS public endpoint |
-| Use OpenAI Codex | **Codex + `--ask`** (Option K, Approach 1) — works today with no server exposure |
-| Use a local model with no API key or internet | `--ask` with Ollama (Part 1) |
-| Maximum privacy — no data leaves your network | Ollama + `--ask`, or MCP server on localhost only |
-| Explain why an account balance changed | `explain_balance` tool via any MCP client |
-| Verify balance matches posted lines | `reconcile_account` tool via any MCP client |
-| Find compliance issues or suspicious transactions | `find_policy_violations` tool |
-| Summarize a period in natural language | `summarize_period` tool |
-| Generate an auditor-ready report | `audit_report` tool |
-| Resolve a person's name to their account before posting | `resolve_account` tool |
-| Correct an entry amount with full audit trail | `propose_correction` → confirm → `execute_correction` |
-
----
-
-## Built With
-
-| Component | Library |
-|---|---|
-| Async runtime | [tokio](https://tokio.rs) |
-| Symmetric encryption | [aes-gcm](https://docs.rs/aes-gcm) (AES-256-GCM) |
-| Hashing | [blake3](https://github.com/BLAKE3-team/BLAKE3) |
-| Signing | [ed25519-dalek](https://github.com/dalek-cryptography/ed25519-dalek) |
-| Key derivation | [hkdf](https://docs.rs/hkdf) |
-| Password hashing | [argon2](https://docs.rs/argon2) |
-| TLS | [rustls](https://github.com/rustls/rustls) |
-| SQL parsing | [sqlparser](https://github.com/sqlparser-rs/sqlparser-rs) |
-| Query index | [rusqlite](https://docs.rs/rusqlite) (SQLite) |
-| Secret management | [reqwest](https://github.com/seanmonstar/reqwest) (Vault / AWS KMS) |
-
----
-
-## License
-
-VectorLedger is licensed under the [Business Source License 1.1 (BUSL-1.1)](https://spdx.org/licenses/BUSL-1.1.html).
-
-The source code is available for inspection, development, and non-production use. Production use requires a commercial license. Contact [engineering@vectorguardlabs.com](mailto:engineering@vectorguardlabs.com) for licensing inquiries.
-
----
-
-*VectorGuard Labs — financial infrastructure that proves its own integrity.*
+## Further Reading
+
+- **[OPERATIONS.md](./OPERATIONS.md)** — Installation, configuration reference, CLI command reference, backup/restore, key rotation, replication, monitoring, troubleshooting
+- **[SECURITY.md](./SECURITY.md)** — Security model, cryptographic primitives, vulnerability disclosure, known limitations
+- **VectorGuard Labs:** https://vectorguardlabs.com
+- **Security reports:** security@vectorguardlabs.com
+- **License / sales:** pavon@vectorguardlabs.com
