@@ -4,7 +4,7 @@
 
 VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof proving the returned data has not been modified since it was written. Historical tampering is **cryptographically detectable** — any modification to a past record invalidates every hash in the chain from that point forward.
 
-Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.1** · License: BUSL-1.1
+Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.2** · License: BUSL-1.1
 
 ---
 
@@ -169,29 +169,29 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Option 2 — Download a release binary
 
-Pre-built binaries for v1.5.1 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.1):
+Pre-built binaries for v1.5.2 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.2):
 
 | Platform | Download |
 |---|---|
-| Linux x86_64 | `vledger-v1.5.1-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.1-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.1-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 (Apple Silicon) | `vledger-v1.5.1-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `vledger-v1.5.1-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `vledger-v1.5.2-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.2-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.2-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `vledger-v1.5.2-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `vledger-v1.5.2-x86_64-pc-windows-msvc.zip` |
 
 Each release is accompanied by a `SHA256SUMS` file and a CycloneDX SBOM. Verify before installing:
 
 ```bash
 # Verify SHA-256 checksum
-sha256sum -c vledger-v1.5.1-checksums.txt
+sha256sum -c vledger-v1.5.2-checksums.txt
 
 # Verify cosign signature (keyless OIDC)
 cosign verify-blob \
-  --certificate vledger-v1.5.1-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.1-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.1" \
+  --certificate vledger-v1.5.2-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.2-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.2" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.1-checksums.txt
+  vledger-v1.5.2-checksums.txt
 ```
 
 ### Option 3 — Build from source
@@ -548,7 +548,7 @@ vledger-mcp \
 
 ```bash
 curl http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.5.1","tools":15,
+# {"ok":true,"service":"vledger-mcp","version":"1.5.2","tools":15,
 #  "agent_queries_used":3,"agent_queries_limit":100,"agent_queries_remaining":97}
 ```
 
@@ -707,8 +707,8 @@ vledger-bench \
 
 ## Changelog
 
-### v1.5.1
-- Workspace-wide version bump; all crates at 1.5.1
+### v1.5.2
+- **Bug fix:** `execute_correction` MCP tool was not idempotent — if the agent crashed mid-correction and the request was retried, the reversal+correction pair was posted a second time under the same `external_ref`, resulting in a duplicate that over-corrected both affected accounts. Fixed by deriving deterministic idempotency keys (`reversal-of-<entry_id>` / `correction-of-<entry_id>`) for both INSERTs, with a pre-flight check that detects prior full or partial execution and returns the existing sequences without writing new entries.
 
 ### v1.5.0
 - **Bug fix:** `require_feature()` was only checking the explicit `features` list, not the tier's default features. Licenses on paid tiers were incorrectly blocked from tier-default features.

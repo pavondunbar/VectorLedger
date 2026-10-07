@@ -1300,7 +1300,81 @@ fn tool_execute_correction(
     let escape = |s: &str| s.replace('\'', "''");
     let fmt = |m: i64| format_amount(m, currency);
 
-    // ── Post the reversal ─────────────────────────────────────────────────────
+    // ── Derive stable, deterministic idempotency keys ─────────────────────────
+    //
+    // These keys are derived entirely from `original_entry_id`, which is
+    // provided by the caller and is stable across retries.  If the agent
+    // crashes after posting the reversal but before posting the correction,
+    // or if the user re-submits the same request, the idempotency keys ensure
+    // each of the two entries is posted exactly once — a retry is a no-op.
+    let reversal_idem_key    = format!("reversal-of-{original_entry_id}");
+    let correction_idem_key  = format!("correction-of-{original_entry_id}");
+
+    // ── Pre-flight: detect prior (partial) execution ──────────────────────────
+    //
+    // Query both idempotency keys up-front.  Three states are possible:
+    //   (a) Neither exists  → first execution, proceed normally.
+    //   (b) Both exist      → fully completed on a prior run; return the
+    //                         existing sequences so the caller gets a valid
+    //                         confirmation without any new writes.
+    //   (c) Only reversal   → agent crashed between the two INSERTs; skip the
+    //                         reversal INSERT and post only the correction.
+    let reversal_exists_sql = format!(
+        "SELECT sequence FROM ledger WHERE idempotency_key = '{}' LIMIT 1",
+        escape(&reversal_idem_key)
+    );
+    let correction_exists_sql = format!(
+        "SELECT sequence FROM ledger WHERE idempotency_key = '{}' LIMIT 1",
+        escape(&correction_idem_key)
+    );
+
+    let existing_reversal_seq: Option<u64> = run_sql(&reversal_exists_sql, ledger, session)
+        .ok()
+        .and_then(|r| r.rows.into_iter().next())
+        .and_then(|row| row.values.into_iter().next())
+        .and_then(|v| match v {
+            vledger_sql::result::Value::BigInt(i) => Some(i as u64),
+            vledger_sql::result::Value::Int(i)    => Some(i as u64),
+            _                                      => None,
+        });
+
+    let existing_correction_seq: Option<u64> = run_sql(&correction_exists_sql, ledger, session)
+        .ok()
+        .and_then(|r| r.rows.into_iter().next())
+        .and_then(|row| row.values.into_iter().next())
+        .and_then(|v| match v {
+            vledger_sql::result::Value::BigInt(i) => Some(i as u64),
+            vledger_sql::result::Value::Int(i)    => Some(i as u64),
+            _                                      => None,
+        });
+
+    // Both entries were already posted on a prior run — return confirmation
+    // without making any new writes.
+    if let (Some(rev_seq), Some(cor_seq)) = (existing_reversal_seq, existing_correction_seq) {
+        let chain_ok = run_sql("SELECT VERIFY_CHAIN()", ledger, session)
+            .ok()
+            .map(|r| result_to_text(&r).to_uppercase().contains("OK"))
+            .unwrap_or(false);
+
+        let mut out = String::new();
+        out.push_str("## Correction Already Applied (Idempotent)\n\n");
+        out.push_str("────────────────────────────────────────────\n\n");
+        out.push_str("This correction was already posted on a prior run. ");
+        out.push_str("No new entries have been written.\n\n");
+        out.push_str(&format!("✓ **Reversal** (existing)  \n"));
+        out.push_str(&format!("  Sequence: {rev_seq}  \n"));
+        out.push_str(&format!("  Amount:   {} (original amount reversed)  \n\n", fmt(original_amount)));
+        out.push_str(&format!("✓ **Correction** (existing)  \n"));
+        out.push_str(&format!("  Sequence: {cor_seq}  \n"));
+        out.push_str(&format!("  Amount:   {} (correct amount)  \n\n", fmt(correct_amount)));
+        out.push_str("────────────────────────────────────────────\n\n");
+        out.push_str(&format!("| Hash chain | {} |\n",
+            if chain_ok { "✓ Verified" } else { "⚠ Verify manually with VERIFY_CHAIN()" }
+        ));
+        return Ok(ok_text(out));
+    }
+
+    // ── Post the reversal (skip if already posted from a prior partial run) ───
     let reversal_desc = format!(
         "Reversal of #{sequence} — {}",
         escape(original_description)
@@ -1309,29 +1383,46 @@ fn tool_execute_correction(
         "{{\"reverses\":\"{original_entry_id}\",\"reason\":\"amount_correction\",\
          \"original_amount\":{original_amount},\"correct_amount\":{correct_amount}}}"
     );
-    let reversal_sql = format!(
-        "INSERT INTO ledger \
-         (description, debit_account, credit_account, amount, currency, domain, \
-          external_ref, metadata) \
-         VALUES ('{}', '{}', '{}', {}, '{}', '{}', 'reversal-of-{}', '{}')",
-        escape(&reversal_desc),
-        escape(credit_account_id),   // flip: original credit becomes debit
-        escape(debit_account_id),    // flip: original debit becomes credit
-        original_amount,
-        escape(currency),
-        escape(domain),
-        escape(original_entry_id),
-        escape(&reversal_meta),
-    );
 
-    let reversal_result = match run_sql(&reversal_sql, ledger, session) {
-        Ok(r) => r,
-        Err(e) => return Ok(err_text(format!("Failed to post reversal: {e}"))),
-    };
-
-    let reversal_seq = reversal_result.entry_sequence;
-    let reversal_id  = reversal_result.entry_id.map(|u| u.to_string())
+    let (reversal_seq, reversal_id) = if let Some(seq) = existing_reversal_seq {
+        // Already posted — reuse the existing sequence from the prior run.
+        let id = run_sql(
+            &format!("SELECT id FROM ledger WHERE sequence = {seq} LIMIT 1"),
+            ledger,
+            session,
+        )
+        .ok()
+        .and_then(|r| r.rows.into_iter().next())
+        .and_then(|row| row.values.into_iter().next())
+        .map(|v| ledger_value_to_string(&v))
         .unwrap_or_else(|| "?".to_string());
+        (Some(seq), id)
+    } else {
+        let reversal_sql = format!(
+            "INSERT INTO ledger \
+             (description, debit_account, credit_account, amount, currency, domain, \
+              external_ref, idempotency_key, metadata) \
+             VALUES ('{}', '{}', '{}', {}, '{}', '{}', 'reversal-of-{}', '{}', '{}')",
+            escape(&reversal_desc),
+            escape(credit_account_id),   // flip: original credit becomes debit
+            escape(debit_account_id),    // flip: original debit becomes credit
+            original_amount,
+            escape(currency),
+            escape(domain),
+            escape(original_entry_id),
+            escape(&reversal_idem_key),
+            escape(&reversal_meta),
+        );
+
+        let result = match run_sql(&reversal_sql, ledger, session) {
+            Ok(r) => r,
+            Err(e) => return Ok(err_text(format!("Failed to post reversal: {e}"))),
+        };
+
+        let id = result.entry_id.map(|u| u.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        (result.entry_sequence, id)
+    };
 
     // ── Post the correction ───────────────────────────────────────────────────
     let correction_desc = format!(
@@ -1345,8 +1436,8 @@ fn tool_execute_correction(
     let correction_sql = format!(
         "INSERT INTO ledger \
          (description, debit_account, credit_account, amount, currency, domain, \
-          external_ref, metadata) \
-         VALUES ('{}', '{}', '{}', {}, '{}', '{}', 'correction-of-{}', '{}')",
+          external_ref, idempotency_key, metadata) \
+         VALUES ('{}', '{}', '{}', {}, '{}', '{}', 'correction-of-{}', '{}', '{}')",
         escape(&correction_desc),
         escape(debit_account_id),
         escape(credit_account_id),
@@ -1354,6 +1445,7 @@ fn tool_execute_correction(
         escape(currency),
         escape(domain),
         escape(original_entry_id),
+        escape(&correction_idem_key),
         escape(&correction_meta),
     );
 
