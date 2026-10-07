@@ -1303,29 +1303,40 @@ fn tool_execute_correction(
     // ── Derive stable, deterministic idempotency keys ─────────────────────────
     //
     // These keys are derived entirely from `original_entry_id`, which is
-    // provided by the caller and is stable across retries.  If the agent
-    // crashes after posting the reversal but before posting the correction,
-    // or if the user re-submits the same request, the idempotency keys ensure
-    // each of the two entries is posted exactly once — a retry is a no-op.
-    let reversal_idem_key    = format!("reversal-of-{original_entry_id}");
-    let correction_idem_key  = format!("correction-of-{original_entry_id}");
+    // provided by the caller and is stable across retries.  The same strings
+    // are used for both external_ref (the pre-flight lookup uses
+    // WHERE external_ref = '...', which IS a supported SQL filter) and for the
+    // idempotency_key column (which deduplicates at the LedgerStore level on
+    // any subsequent direct post_entry call).
+    let reversal_idem_key   = format!("reversal-of-{original_entry_id}");
+    let correction_idem_key = format!("correction-of-{original_entry_id}");
 
     // ── Pre-flight: detect prior (partial) execution ──────────────────────────
     //
-    // Query both idempotency keys up-front.  Three states are possible:
+    // Query by external_ref — the SQL planner supports WHERE external_ref = '...'
+    // as a first-class indexed filter (ByExternalRef).  idempotency_key is NOT
+    // a supported WHERE predicate in the current planner, so we use external_ref
+    // for the lookup.  The external_ref values are just as deterministic:
+    //   reversal-of-<original_entry_id>
+    //   correction-of-<original_entry_id>
+    //
+    // Three states are possible:
     //   (a) Neither exists  → first execution, proceed normally.
     //   (b) Both exist      → fully completed on a prior run; return the
     //                         existing sequences so the caller gets a valid
     //                         confirmation without any new writes.
     //   (c) Only reversal   → agent crashed between the two INSERTs; skip the
     //                         reversal INSERT and post only the correction.
+    let reversal_ext_ref    = &reversal_idem_key;
+    let correction_ext_ref  = &correction_idem_key;
+
     let reversal_exists_sql = format!(
-        "SELECT sequence FROM ledger WHERE idempotency_key = '{}' LIMIT 1",
-        escape(&reversal_idem_key)
+        "SELECT sequence FROM ledger WHERE external_ref = '{}' LIMIT 1",
+        escape(reversal_ext_ref)
     );
     let correction_exists_sql = format!(
-        "SELECT sequence FROM ledger WHERE idempotency_key = '{}' LIMIT 1",
-        escape(&correction_idem_key)
+        "SELECT sequence FROM ledger WHERE external_ref = '{}' LIMIT 1",
+        escape(correction_ext_ref)
     );
 
     let existing_reversal_seq: Option<u64> = run_sql(&reversal_exists_sql, ledger, session)
