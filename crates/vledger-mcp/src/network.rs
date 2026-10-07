@@ -981,42 +981,117 @@ pub async fn dispatch_tool_network(
 
             let fmt = |m: i64| format_amount(m, currency);
 
-            // Post reversal
+            // ── Deterministic external_ref values (stable across retries) ─────
+            //
+            // Both values are derived from orig_entry_id only, so every retry
+            // of this correction produces the same strings.  We use external_ref
+            // (not idempotency_key) for the pre-flight lookup because
+            // WHERE external_ref = '...' is a supported indexed SQL filter.
+            let rev_ext_ref = format!("reversal-of-{orig_entry_id}");
+            let cor_ext_ref = format!("correction-of-{orig_entry_id}");
+
+            // ── Pre-flight: check whether this correction was already applied ──
+            //
+            // Three states:
+            //   (a) Neither exists  → first run, proceed normally.
+            //   (b) Both exist      → already completed; return idempotent reply.
+            //   (c) Only reversal   → crashed between the two writes; skip the
+            //                         reversal INSERT and post only the correction.
+            let rev_check  = conn.execute_sql(
+                &format!("SELECT sequence FROM ledger WHERE external_ref = '{}' LIMIT 1",
+                         escape(&rev_ext_ref))
+            ).await.unwrap_or_default_json();
+
+            let cor_check  = conn.execute_sql(
+                &format!("SELECT sequence FROM ledger WHERE external_ref = '{}' LIMIT 1",
+                         escape(&cor_ext_ref))
+            ).await.unwrap_or_default_json();
+
+            let existing_rev_seq: Option<String> = rev_check["rows"].as_array()
+                .and_then(|r| r.first()).and_then(|r| r.as_array())
+                .and_then(|r| r.first())
+                .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()));
+
+            let existing_cor_seq: Option<String> = cor_check["rows"].as_array()
+                .and_then(|r| r.first()).and_then(|r| r.as_array())
+                .and_then(|r| r.first())
+                .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()));
+
+            // Both already posted — return idempotent confirmation, no new writes.
+            if let (Some(ref rev_seq), Some(ref cor_seq)) = (&existing_rev_seq, &existing_cor_seq) {
+                let chain_resp = conn.execute_sql("SELECT VERIFY_CHAIN()").await.unwrap_or_default_json();
+                let chain_ok = response_to_text(&chain_resp).to_uppercase().contains("OK");
+
+                let mut out = String::new();
+                out.push_str("## Correction Already Applied (Idempotent)\n\n");
+                out.push_str("────────────────────────────────────────────\n\n");
+                out.push_str("This correction was already posted on a prior run. ");
+                out.push_str("No new entries have been written.\n\n");
+                out.push_str(&format!("✓ **Reversal** (existing, sequence {rev_seq})  \n"));
+                out.push_str(&format!("  Amount: {} reversed  \n\n", fmt(original_amount)));
+                out.push_str(&format!("✓ **Correction** (existing, sequence {cor_seq})  \n"));
+                out.push_str(&format!("  Amount: {} (correct amount)  \n\n", fmt(correct_amount)));
+                out.push_str("────────────────────────────────────────────\n\n");
+                out.push_str(&format!("| Hash chain | {} |\n",
+                    if chain_ok { "✓ Verified" } else { "⚠ Verify manually with VERIFY_CHAIN()" }
+                ));
+                return Ok(ok_text(out));
+            }
+
+            // ── Post reversal (skip if already posted from a prior partial run) ─
             let rev_desc = format!("Reversal of #{sequence} — {}", escape(orig_desc));
             let rev_meta = format!("{{\"reverses\":\"{orig_entry_id}\",\"reason\":\"amount_correction\",\"original_amount\":{original_amount},\"correct_amount\":{correct_amount}}}");
-            let rev_sql = format!(
-                "INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain, external_ref, metadata) \
-                 VALUES ('{}','{}','{}',{},'{}','{}','reversal-of-{}','{}')",
-                escape(&rev_desc), escape(credit_id), escape(debit_id),
-                original_amount, escape(currency), escape(domain),
-                escape(orig_entry_id), escape(&rev_meta)
-            );
-            let rev_resp = conn.execute_sql(&rev_sql).await.unwrap_or_default_json();
-            if !rev_resp["ok"].as_bool().unwrap_or(false) {
-                return Ok(err_text(format!("Failed to post reversal: {}", rev_resp["error"].as_str().unwrap_or("unknown"))));
-            }
-            let rev_seq = rev_resp["rows"].as_array()
-                .and_then(|r| r.first()).and_then(|r| r.as_array())
-                .and_then(|r| r.first()).and_then(|v| v.as_str())
-                .unwrap_or("?");
 
-            // Post correction
+            let rev_seq: String = if let Some(seq) = existing_rev_seq {
+                // Reversal already posted — reuse it, skip the INSERT.
+                seq
+            } else {
+                let rev_sql = format!(
+                    "INSERT INTO ledger \
+                     (description, debit_account, credit_account, amount, currency, domain, \
+                      external_ref, idempotency_key, metadata) \
+                     VALUES ('{}','{}','{}',{},'{}','{}','{}','{}','{}')",
+                    escape(&rev_desc), escape(credit_id), escape(debit_id),
+                    original_amount, escape(currency), escape(domain),
+                    escape(&rev_ext_ref), escape(&rev_ext_ref), escape(&rev_meta)
+                );
+                let rev_resp = conn.execute_sql(&rev_sql).await.unwrap_or_default_json();
+                if !rev_resp["ok"].as_bool().unwrap_or(false) {
+                    return Ok(err_text(format!("Failed to post reversal: {}",
+                        rev_resp["error"].as_str().unwrap_or("unknown"))));
+                }
+                rev_resp["rows"].as_array()
+                    .and_then(|r| r.first()).and_then(|r| r.as_array())
+                    .and_then(|r| r.first())
+                    .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                    .unwrap_or_else(|| "?".to_string())
+            };
+
+            // ── Post correction ───────────────────────────────────────────────
             let cor_desc = format!("Correction of #{sequence} — {}", escape(orig_desc));
             let cor_meta = format!("{{\"corrects\":\"{orig_entry_id}\",\"reason\":\"amount_correction\",\"original_amount\":{original_amount},\"correct_amount\":{correct_amount}}}");
             let cor_sql = format!(
-                "INSERT INTO ledger (description, debit_account, credit_account, amount, currency, domain, external_ref, metadata) \
-                 VALUES ('{}','{}','{}',{},'{}','{}','correction-of-{}','{}')",
+                "INSERT INTO ledger \
+                 (description, debit_account, credit_account, amount, currency, domain, \
+                  external_ref, idempotency_key, metadata) \
+                 VALUES ('{}','{}','{}',{},'{}','{}','{}','{}','{}')",
                 escape(&cor_desc), escape(debit_id), escape(credit_id),
                 correct_amount, escape(currency), escape(domain),
-                escape(orig_entry_id), escape(&cor_meta)
+                escape(&cor_ext_ref), escape(&cor_ext_ref), escape(&cor_meta)
             );
             let cor_resp = conn.execute_sql(&cor_sql).await.unwrap_or_default_json();
             if !cor_resp["ok"].as_bool().unwrap_or(false) {
                 return Ok(err_text(format!(
-                    "Reversal posted (see above) but correction FAILED: {}\nPost the correction manually.",
+                    "Reversal posted (sequence {rev_seq}) but correction FAILED: {}\n\
+                     The ledger now has an unmatched reversal. Post the correction manually.",
                     cor_resp["error"].as_str().unwrap_or("unknown")
                 )));
             }
+            let cor_seq = cor_resp["rows"].as_array()
+                .and_then(|r| r.first()).and_then(|r| r.as_array())
+                .and_then(|r| r.first())
+                .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                .unwrap_or_else(|| "?".to_string());
 
             let chain_resp = conn.execute_sql("SELECT VERIFY_CHAIN()").await.unwrap_or_default_json();
             let chain_ok = response_to_text(&chain_resp).to_uppercase().contains("OK");
@@ -1027,7 +1102,7 @@ pub async fn dispatch_tool_network(
             out.push_str("## Correction Complete\n\n────────────────────────────────────────────\n\n");
             out.push_str(&format!("✓ **Reversal posted** (sequence {rev_seq})  \n"));
             out.push_str(&format!("  Amount: {} reversed  \n\n", fmt(original_amount)));
-            out.push_str("✓ **Correction posted**  \n");
+            out.push_str(&format!("✓ **Correction posted** (sequence {cor_seq})  \n"));
             out.push_str(&format!("  Amount: {} (correct amount)  \n\n", fmt(correct_amount)));
             out.push_str("────────────────────────────────────────────\n\n");
             out.push_str("| Check | Result |\n|---|---|\n");
@@ -1035,7 +1110,8 @@ pub async fn dispatch_tool_network(
             out.push_str(&format!("| Original entry #{sequence} | ✓ PRESERVED — not modified |\n"));
             out.push_str(&format!("| Hash chain | {} |\n", if chain_ok { "✓ Extended and verified" } else { "⚠ Verify manually" }));
             out.push_str(&format!("| Net adjustment | {adj_str} |\n\n"));
-            out.push_str(&format!("The ledger now reflects {} for this transaction. The original entry #{sequence} at {} is preserved intact.\n", fmt(correct_amount), fmt(original_amount)));
+            out.push_str(&format!("The ledger now reflects {} for this transaction. The original entry #{sequence} at {} is preserved intact.\n",
+                fmt(correct_amount), fmt(original_amount)));
             Ok(ok_text(out))
         }
 

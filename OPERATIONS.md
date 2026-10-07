@@ -1,6 +1,6 @@
 # VectorLedger — Production Operations Runbook
 
-**Version:** 1.5.3  
+**Version:** 1.5.4  
 **Audience:** System administrators and on-call engineers responsible for deployed VectorLedger instances.
 
 This is the operator bible for VectorLedger. Read it end-to-end before going to production.
@@ -103,26 +103,26 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Install from Release Binary
 
-Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.3):
+Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.4):
 
 | Platform | Binary Archive |
 |---|---|
-| Linux x86_64 | `vledger-v1.5.3-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.3-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.3-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 | `vledger-v1.5.3-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `vledger-v1.5.3-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `vledger-v1.5.4-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.4-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.4-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 | `vledger-v1.5.4-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `vledger-v1.5.4-x86_64-pc-windows-msvc.zip` |
 
 **Verify before deploying:**
 ```bash
-sha256sum -c vledger-v1.5.3-checksums.txt
+sha256sum -c vledger-v1.5.4-checksums.txt
 
 cosign verify-blob \
-  --certificate vledger-v1.5.3-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.3-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.3" \
+  --certificate vledger-v1.5.4-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.4-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.4" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.3-checksums.txt
+  vledger-v1.5.4-checksums.txt
 ```
 
 ### Build from Source
@@ -1058,7 +1058,7 @@ vledger sql --server 127.0.0.1:5433 --username admin \
 
 ```bash
 curl http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.5.3","tools":15,...}
+# {"ok":true,"service":"vledger-mcp","version":"1.5.4","tools":15,...}
 ```
 
 ### Prometheus Metrics
