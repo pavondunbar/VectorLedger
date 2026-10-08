@@ -105,13 +105,14 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.6):
 
-| Platform | Binary Archive |
-|---|---|
-| Linux x86_64 | `vledger-v1.5.6-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.6-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.6-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 | `vledger-v1.5.6-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `vledger-v1.5.6-x86_64-pc-windows-msvc.zip` |
+| Platform | Filename | wget |
+|---|---|---|
+| Linux x86_64 | `vledger-v1.5.6-x86_64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.6-aarch64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.6-x86_64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 | `vledger-v1.5.6-aarch64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-aarch64-apple-darwin.tar.gz` |
+
+> **Note on filenames:** Archives use the Rust target triple convention (`aarch64-unknown-linux-gnu`, not `linux-aarch64`). Use the exact filenames above.
 
 **Verify before deploying:**
 ```bash
