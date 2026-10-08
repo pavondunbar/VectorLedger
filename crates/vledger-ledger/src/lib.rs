@@ -22,6 +22,8 @@ pub mod amount;
 #[cfg(test)]
 mod concurrent_tests;
 #[cfg(test)]
+mod correction_concurrency_tests;
+#[cfg(test)]
 mod crash_tests;
 pub mod currency;
 #[cfg(test)]

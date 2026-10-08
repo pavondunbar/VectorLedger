@@ -1,6 +1,6 @@
 # VectorLedger Security Policy
 
-**Version:** 1.5.5  
+**Version:** 1.5.6  
 **Published by:** VectorGuard Labs  
 **Security contact:** security@vectorguardlabs.com
 
@@ -75,9 +75,9 @@ We use [CVSS v3.1](https://www.first.org/cvss/v3.1/specification-document) for s
 
 | Version | Status |
 |---|---|
-| 1.5.5 | ✅ Current — security fixes backported here |
-| 1.5.4 | ✅ Supported |
-| 1.5.x (< 1.5.4) | ⚠ Security fixes only — upgrade to 1.5.5 recommended |
+| 1.5.6 | ✅ Current — security fixes backported here |
+| 1.5.5 | ✅ Supported |
+| 1.5.x (< 1.5.5) | ⚠ Security fixes only — upgrade to 1.5.6 recommended |
 | 1.4.x | ⚠ Security fixes only |
 | < 1.4.0 | ❌ End of life — upgrade strongly recommended |
 
@@ -580,20 +580,72 @@ Every release is:
 **Verify a release:**
 ```bash
 # Verify checksum
-sha256sum -c vledger-v1.5.5-checksums.txt
+sha256sum -c vledger-v1.5.6-checksums.txt
 
 # Verify cosign signature
 cosign verify-blob \
-  --certificate vledger-v1.5.5-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.5-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.5" \
+  --certificate vledger-v1.5.6-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.6-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.6" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.5-checksums.txt
+  vledger-v1.5.6-checksums.txt
 ```
 
 ---
 
 ## 19. Bug Fixes and Security Advisories
+
+### execute_correction concurrency race (investigated in v1.5.6 — no exploitable bug found)
+
+**Severity:** Informational — investigation confirmed the race window exists but the idempotency gate prevents any duplicate entries.
+
+**Affected versions:** All versions. No patch required.
+
+**Components:** `crates/vledger-mcp/src/tools.rs`, `crates/vledger-mcp/src/network.rs`, `crates/vledger-ledger/src/store.rs`, `crates/vledger-ledger/src/correction_concurrency_tests.rs` (new)
+
+#### Background
+
+Community review (October 2026) identified that `execute_correction` in both the embedded (`tools.rs`) and network (`network.rs`) MCP modes follows a three-phase pattern where each SQL call independently acquires and releases the `Arc<RwLock<LedgerStore>>` write lock:
+
+```
+Phase 1 — Pre-flight reads  (2 × read lock acquired, released)
+Phase 2 — Reversal INSERT   (write lock acquired, released)
+Phase 3 — Correction INSERT (write lock acquired, released)
+```
+
+There is no spanning lock across all four operations. Two concurrent callers can both observe "nothing applied yet" during Phase 1 and both proceed to Phase 2, creating a classic TOCTOU (Time-Of-Check Time-Of-Use) window.
+
+#### Why no duplicate entries occur
+
+The protection is `post_entry`'s idempotency key check, which executes atomically while holding `&mut LedgerStore` (the exclusive write lock). Because `execute_correction` always sets `idempotency_key = 'reversal-of-<orig_entry_id>'` and `idempotency_key = 'correction-of-<orig_entry_id>'`, the second concurrent caller's INSERT returns the first caller's sequence number silently — no new entry is written.
+
+Critically, this protection depends entirely on the idempotency key being set. There is no `UNIQUE` constraint on `external_ref` or `idempotency_key` columns in SQLite — only non-unique indexes. If a future code path calls `post_entry` without setting the idempotency key, this backstop would not fire.
+
+#### What the loser receives
+
+Per design: the losing concurrent caller receives the winner's existing `(reversal_seq, correction_seq)` — not an error — so the agent has no reason to retry. This was explicitly verified in testing.
+
+#### Concurrency tests added (v1.5.6)
+
+Five new tests in `crates/vledger-ledger/src/correction_concurrency_tests.rs` formally document and enforce the guarantee:
+
+| Test | What it proves |
+|---|---|
+| `concurrent_correction_idempotency` | 20 tasks from a Tokio barrier → exactly 3 entries, never duplicates |
+| `correction_loser_receives_winner_result_not_error` | Loser gets winner's sequences, not an error |
+| `partial_correction_recovery_only_missing_half_written` | Crash between phases 2 and 3 → retry posts only the missing correction |
+| `correction_does_not_disturb_unrelated_entries` | Append-only: `content_hash` and `chain_hash` of unrelated entries are not mutated |
+| `high_concurrency_correction_stress_50_tasks` | 50 concurrent tasks → 3 entries, all 50 return same result, chain intact |
+
+All 523 tests pass (518 pre-existing + 5 new).
+
+#### Recommendations
+
+- Do not remove the `idempotency_key` assignment from `execute_correction` — it is a load-bearing correctness property, not cosmetic.
+- Any future correction or reversal tool must set `idempotency_key` on both writes.
+- Consider adding a `UNIQUE` constraint on `idempotency_key` in a future schema migration as defense-in-depth. This would promote the application-layer guarantee to a database-layer guarantee.
+
+---
 
 ### MCP SQL injection via unescaped date strings and LIKE wildcards (fixed in v1.5.5)
 

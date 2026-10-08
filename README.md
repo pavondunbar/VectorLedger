@@ -4,7 +4,7 @@
 
 VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof proving the returned data has not been modified since it was written. Historical tampering is **cryptographically detectable** — any modification to a past record invalidates every hash in the chain from that point forward.
 
-Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.5** · License: BUSL-1.1
+Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.6** · License: BUSL-1.1
 
 ---
 
@@ -169,29 +169,29 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Option 2 — Download a release binary
 
-Pre-built binaries for v1.5.5 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.5):
+Pre-built binaries for v1.5.6 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.6):
 
 | Platform | Download |
 |---|---|
-| Linux x86_64 | `vledger-v1.5.5-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.5-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.5-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 (Apple Silicon) | `vledger-v1.5.5-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `vledger-v1.5.5-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `vledger-v1.5.6-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.6-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.6-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `vledger-v1.5.6-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `vledger-v1.5.6-x86_64-pc-windows-msvc.zip` |
 
 Each release is accompanied by a `SHA256SUMS` file and a CycloneDX SBOM. Verify before installing:
 
 ```bash
 # Verify SHA-256 checksum
-sha256sum -c vledger-v1.5.5-checksums.txt
+sha256sum -c vledger-v1.5.6-checksums.txt
 
 # Verify cosign signature (keyless OIDC)
 cosign verify-blob \
-  --certificate vledger-v1.5.5-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.5-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.5" \
+  --certificate vledger-v1.5.6-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.6-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.6" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.5-checksums.txt
+  vledger-v1.5.6-checksums.txt
 ```
 
 ### Option 3 — Build from source
@@ -548,7 +548,7 @@ vledger-mcp \
 
 ```bash
 curl http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.5.5","tools":15,
+# {"ok":true,"service":"vledger-mcp","version":"1.5.6","tools":15,
 #  "agent_queries_used":3,"agent_queries_limit":100,"agent_queries_remaining":97}
 ```
 
@@ -706,6 +706,9 @@ vledger-bench \
 ---
 
 ## Changelog
+
+### v1.5.6
+- **Concurrency test suite:** Added 5 targeted tests in `crates/vledger-ledger/src/correction_concurrency_tests.rs` covering the `execute_correction` TOCTOU race condition identified in community review. Investigation confirmed that `execute_correction` (both embedded and network modes) makes 4 independent lock-acquire/release SQL calls with no spanning lock across the pre-flight read and the two writes. The only race protection is `post_entry`'s idempotency key check which executes atomically under `&mut LedgerStore`. Tests verify: (1) 20 concurrent callers through a Tokio barrier produce exactly 1 reversal + 1 correction entry, never duplicates; (2) the losing caller receives the winner's `(rev_seq, cor_seq)` — not an error — so the agent has no reason to retry; (3) crash-between-writes recovery posts only the missing half; (4) correction entries do not mutate `content_hash` or `chain_hash` of unrelated entries; (5) 50-task stress run holds all invariants. All 523 tests pass (518 pre-existing + 5 new). No concurrency bug was found — the idempotency gate holds — but the tests now formally document and enforce that guarantee.
 
 ### v1.5.5
 - **Security fix:** MCP `tool_summarize_period` and `tool_audit_report` interpolated user-supplied `from`/`to` date strings into SQL `WHERE` clauses without validation, allowing filter-bypass via crafted date values. Fixed with a strict ISO-8601 whitelist validator (`validate_iso8601_timestamp`) applied in both `tools.rs` (embedded mode) and `network.rs` (network mode) — any character that is not a digit, hyphen, colon, `T`, `Z`, or `+` is rejected with an error before any SQL is constructed.

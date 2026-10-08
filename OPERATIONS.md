@@ -1,6 +1,6 @@
 # VectorLedger — Production Operations Runbook
 
-**Version:** 1.5.5  
+**Version:** 1.5.6  
 **Audience:** System administrators and on-call engineers responsible for deployed VectorLedger instances.
 
 This is the operator bible for VectorLedger. Read it end-to-end before going to production.
@@ -103,26 +103,26 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Install from Release Binary
 
-Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.5):
+Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.6):
 
 | Platform | Binary Archive |
 |---|---|
-| Linux x86_64 | `vledger-v1.5.5-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.5-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.5-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 | `vledger-v1.5.5-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `vledger-v1.5.5-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `vledger-v1.5.6-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.6-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.6-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 | `vledger-v1.5.6-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `vledger-v1.5.6-x86_64-pc-windows-msvc.zip` |
 
 **Verify before deploying:**
 ```bash
-sha256sum -c vledger-v1.5.5-checksums.txt
+sha256sum -c vledger-v1.5.6-checksums.txt
 
 cosign verify-blob \
-  --certificate vledger-v1.5.5-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.5-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.5" \
+  --certificate vledger-v1.5.6-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.6-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.6" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.5-checksums.txt
+  vledger-v1.5.6-checksums.txt
 ```
 
 ### Build from Source
@@ -1058,7 +1058,7 @@ vledger sql --server 127.0.0.1:5433 --username admin \
 
 ```bash
 curl http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.5.5","tools":15,...}
+# {"ok":true,"service":"vledger-mcp","version":"1.5.6","tools":15,...}
 ```
 
 ### Prometheus Metrics
@@ -1782,7 +1782,19 @@ Runs deterministic recovery scenarios: power_loss_mid_commit, segment_boundary_c
 vledger self-test-phase3 --data-dir ./vledger-data
 ```
 
-All three phases must pass before deploying a new build to production.
+### Phase 4 — Correction Concurrency Tests
+
+Run the targeted concurrency suite for `execute_correction` race conditions:
+
+```bash
+cargo test --package vledger-ledger correction_concurrency
+```
+
+Expected output: 5 tests pass — `concurrent_correction_idempotency`, `correction_loser_receives_winner_result_not_error`, `partial_correction_recovery_only_missing_half_written`, `correction_does_not_disturb_unrelated_entries`, `high_concurrency_correction_stress_50_tasks`.
+
+These tests fire 20–50 concurrent callers through a Tokio barrier to maximise lock contention and verify: exactly 3 ledger entries result (original + reversal + correction), losing callers receive the winner's result rather than an error, partial-write crash recovery posts only the missing half, and the hash chain remains intact under concurrency.
+
+All three phases plus the concurrency suite must pass before deploying a new build to production.
 
 ---
 
@@ -1852,7 +1864,7 @@ cargo test --package vledger-ledger --package vledger-sql \
            --package vledger-license --package vledger-crypto \
            --package vledger-wal --package vledger-mcp
 ```
-All tests must pass before deploying a new build to production.
+All tests must pass before deploying a new build to production. The `vledger-ledger` package includes the correction concurrency suite (`correction_concurrency_tests`) — 5 tests covering TOCTOU race behaviour under 20–50 concurrent callers.
 
 ---
 
