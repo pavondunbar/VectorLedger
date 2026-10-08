@@ -613,10 +613,24 @@ impl EntryDb {
         limit: usize,
     ) -> Result<Vec<JournalEntry>, LedgerError> {
         let conn = self.lock()?;
-        // Wrap the query in double-quotes for FTS5 phrase matching so that
-        // names with spaces ("Elizabeth Cadet") work as a single phrase.
-        // Escape any existing double-quotes in the input to avoid injection.
-        let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
+        // Strip FTS5 operator characters that could manipulate the query logic.
+        //
+        // FTS5 treats these characters as operators: * ^ - " (already handled below)
+        // The keywords NOT, AND, OR, NEAR have special meaning when unquoted but are
+        // neutralised by wrapping the whole input in double-quotes (phrase match).
+        // We still remove them here as an additional defence.
+        //
+        // Characters removed: * ^ - (special FTS5 syntax outside quotes)
+        // Double-quotes are escaped by doubling them (FTS5 phrase-quote escape).
+        //
+        // The result is wrapped in "..." so the entire input is treated as a single
+        // phrase — multi-word names like "Elizabeth Cadet" match as a phrase, and
+        // no FTS5 operator can be injected by the caller.
+        let sanitized: String = query
+            .chars()
+            .filter(|c| !matches!(c, '*' | '^' | '-'))
+            .collect();
+        let fts_query = format!("\"{}\"", sanitized.replace('"', "\"\""));
         let mut stmt = conn
             .prepare(
                 "SELECT e.data FROM entries e

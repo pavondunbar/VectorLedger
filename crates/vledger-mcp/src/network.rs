@@ -372,6 +372,41 @@ fn escape(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+/// Validate that `s` is a safe ISO-8601 date or datetime string.
+///
+/// Accepts only digits, hyphens, colons, 'T', 'Z', and '+'/'-'.
+/// Rejects any character that could be used to break out of a SQL string literal.
+fn validate_iso8601_timestamp(s: &str) -> Result<()> {
+    if s.is_empty() || s.len() > 32 {
+        anyhow::bail!("timestamp '{}' is not a valid ISO-8601 date or datetime", s);
+    }
+    for ch in s.chars() {
+        if !matches!(ch, '0'..='9' | '-' | ':' | 'T' | 'Z' | '+') {
+            anyhow::bail!(
+                "timestamp '{}' contains invalid character '{}'; \
+                 only ISO-8601 dates (YYYY-MM-DD) and datetimes (YYYY-MM-DDTHH:MM:SSZ) are accepted",
+                s, ch
+            );
+        }
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() < 10
+        || !bytes[0..4].iter().all(|b| b.is_ascii_digit())
+        || bytes[4] != b'-'
+    {
+        anyhow::bail!("timestamp '{}' is not a valid ISO-8601 date or datetime", s);
+    }
+    Ok(())
+}
+
+/// Escape a value for use in a SQL `LIKE` pattern (use with `ESCAPE '\'`).
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('%', "\\%")
+     .replace('_', "\\_")
+     .replace('\'', "''")
+}
+
 fn format_amount(minor_units: i64, currency: &str) -> String {
     let zero_decimal = matches!(currency, "JPY" | "KRW" | "VND" | "CLP" | "IDR");
     if zero_decimal {
@@ -683,6 +718,13 @@ pub async fn dispatch_tool_network(
             let from = args["from"].as_str().ok_or_else(|| anyhow::anyhow!("'from' required"))?;
             let to   = args["to"].as_str().ok_or_else(|| anyhow::anyhow!("'to' required"))?;
             let domain = args["domain"].as_str().unwrap_or("main");
+
+            // Validate date inputs before interpolation — rejects any SQL metacharacter.
+            validate_iso8601_timestamp(from)
+                .map_err(|e| anyhow::anyhow!("'from' parameter invalid: {e}"))?;
+            validate_iso8601_timestamp(to)
+                .map_err(|e| anyhow::anyhow!("'to' parameter invalid: {e}"))?;
+
             let from_ts = if from.contains('T') { from.to_string() } else { format!("{from}T00:00:00Z") };
             let to_ts   = if to.contains('T')   { to.to_string()   } else { format!("{to}T23:59:59Z") };
             let bf = format!("effective_at >= '{from_ts}' AND effective_at <= '{to_ts}' AND domain = '{}'", escape(domain));
@@ -719,6 +761,13 @@ pub async fn dispatch_tool_network(
             let from   = args["from"].as_str().ok_or_else(|| anyhow::anyhow!("'from' required"))?;
             let to     = args["to"].as_str().ok_or_else(|| anyhow::anyhow!("'to' required"))?;            let tenant = args["tenant"].as_str().unwrap_or("VectorLedger Customer");
             let domain = args["domain"].as_str().unwrap_or("main");
+
+            // Validate date inputs before interpolation — rejects any SQL metacharacter.
+            validate_iso8601_timestamp(from)
+                .map_err(|e| anyhow::anyhow!("'from' parameter invalid: {e}"))?;
+            validate_iso8601_timestamp(to)
+                .map_err(|e| anyhow::anyhow!("'to' parameter invalid: {e}"))?;
+
             let from_ts = if from.contains('T') { from.to_string() } else { format!("{from}T00:00:00Z") };
             let to_ts   = if to.contains('T')   { to.to_string()   } else { format!("{to}T23:59:59Z") };
             let bf = format!("effective_at >= '{from_ts}' AND effective_at <= '{to_ts}' AND domain = '{}'", escape(domain));
@@ -788,7 +837,8 @@ pub async fn dispatch_tool_network(
             // Search metadata for name mentions
             let by_meta = conn.execute_sql(
                 &format!("SELECT sequence, description, metadata FROM ledger \
-                          WHERE metadata LIKE '%{esc}%' LIMIT 5")
+                          WHERE metadata LIKE '%{}%' ESCAPE '\\' LIMIT 5",
+                          escape_like(query))
             ).await.unwrap_or_default_json();
 
             // Collect unique matches across all three lookups

@@ -60,6 +60,54 @@ pub fn dispatch_tool(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Validate that `s` is a safe ISO-8601 date or datetime string.
+///
+/// Accepts only the exact forms accepted by VectorLedger's timestamp columns:
+///   - `YYYY-MM-DD`
+///   - `YYYY-MM-DDTHH:MM:SSZ`
+///   - `YYYY-MM-DDTHH:MM:SS+HH:MM` / `YYYY-MM-DDTHH:MM:SS-HH:MM`
+///
+/// Rejects anything containing SQL metacharacters, single-quotes, spaces,
+/// or other unexpected characters that could be used to break out of a
+/// string literal in a dynamically-constructed SQL WHERE clause.
+fn validate_iso8601_timestamp(s: &str) -> Result<(), anyhow::Error> {
+    // Only allow digits, hyphens, colons, 'T', 'Z', and '+'/'-' (for timezone offset).
+    // This whitelist is intentionally narrow: any other character is rejected.
+    if s.is_empty() || s.len() > 32 {
+        anyhow::bail!("timestamp '{}' is not a valid ISO-8601 date or datetime", s);
+    }
+    for ch in s.chars() {
+        if !matches!(ch, '0'..='9' | '-' | ':' | 'T' | 'Z' | '+') {
+            anyhow::bail!(
+                "timestamp '{}' contains invalid character '{}'; \
+                 only ISO-8601 dates (YYYY-MM-DD) and datetimes (YYYY-MM-DDTHH:MM:SSZ) are accepted",
+                s, ch
+            );
+        }
+    }
+    // Must start with a 4-digit year and a hyphen
+    let bytes = s.as_bytes();
+    if bytes.len() < 10
+        || !bytes[0..4].iter().all(|b| b.is_ascii_digit())
+        || bytes[4] != b'-'
+    {
+        anyhow::bail!("timestamp '{}' is not a valid ISO-8601 date or datetime", s);
+    }
+    Ok(())
+}
+
+/// Escape a value for use in a SQL `LIKE` pattern.
+///
+/// SQLite LIKE patterns treat `%` and `_` as wildcards and use `\` as the
+/// escape character (when `ESCAPE '\'` is appended to the LIKE expression).
+/// Callers must add `ESCAPE '\'` to the SQL LIKE clause when using this.
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('%', "\\%")
+     .replace('_', "\\_")
+     .replace('\'', "''")
+}
+
 fn run_sql(
     sql: &str,
     ledger: &Arc<RwLock<LedgerStore>>,
@@ -702,6 +750,12 @@ fn tool_summarize_period(
     let domain = args["domain"].as_str().unwrap_or("main");
     let esc_domain = domain.replace('\'', "''");
 
+    // Validate date inputs before interpolation — rejects any SQL metacharacter.
+    validate_iso8601_timestamp(from)
+        .map_err(|e| anyhow::anyhow!("'from' parameter invalid: {e}"))?;
+    validate_iso8601_timestamp(to)
+        .map_err(|e| anyhow::anyhow!("'to' parameter invalid: {e}"))?;
+
     // Build ISO timestamps if only dates were given
     let from_ts = if from.contains('T') { from.to_string() } else { format!("{from}T00:00:00Z") };
     let to_ts   = if to.contains('T')   { to.to_string()   } else { format!("{to}T23:59:59Z") };
@@ -836,6 +890,12 @@ fn tool_audit_report(
     let tenant = args["tenant"].as_str().unwrap_or("VectorLedger Customer");
     let domain = args["domain"].as_str().unwrap_or("main");
     let esc_domain = domain.replace('\'', "''");
+
+    // Validate date inputs before interpolation — rejects any SQL metacharacter.
+    validate_iso8601_timestamp(from)
+        .map_err(|e| anyhow::anyhow!("'from' parameter invalid: {e}"))?;
+    validate_iso8601_timestamp(to)
+        .map_err(|e| anyhow::anyhow!("'to' parameter invalid: {e}"))?;
 
     let from_ts = if from.contains('T') { from.to_string() } else { format!("{from}T00:00:00Z") };
     let to_ts   = if to.contains('T')   { to.to_string()   } else { format!("{to}T23:59:59Z") };
@@ -1007,7 +1067,7 @@ fn tool_resolve_account(
     // Try metadata search in ledger for entries mentioning this name
     let by_metadata = run_sql(
         &format!("SELECT sequence, description, metadata FROM ledger \
-                  WHERE metadata LIKE '%{esc}%' LIMIT 5"),
+                  WHERE metadata LIKE '%{}%' ESCAPE '\\' LIMIT 5", escape_like(query)),
         ledger, session,
     );
 

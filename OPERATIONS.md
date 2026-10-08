@@ -1,6 +1,6 @@
 # VectorLedger — Production Operations Runbook
 
-**Version:** 1.5.4  
+**Version:** 1.5.5  
 **Audience:** System administrators and on-call engineers responsible for deployed VectorLedger instances.
 
 This is the operator bible for VectorLedger. Read it end-to-end before going to production.
@@ -103,26 +103,26 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Install from Release Binary
 
-Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.4):
+Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.5):
 
 | Platform | Binary Archive |
 |---|---|
-| Linux x86_64 | `vledger-v1.5.4-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.4-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.4-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 | `vledger-v1.5.4-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `vledger-v1.5.4-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `vledger-v1.5.5-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.5-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.5-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 | `vledger-v1.5.5-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `vledger-v1.5.5-x86_64-pc-windows-msvc.zip` |
 
 **Verify before deploying:**
 ```bash
-sha256sum -c vledger-v1.5.4-checksums.txt
+sha256sum -c vledger-v1.5.5-checksums.txt
 
 cosign verify-blob \
-  --certificate vledger-v1.5.4-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.4-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.4" \
+  --certificate vledger-v1.5.5-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.5-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.5" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.4-checksums.txt
+  vledger-v1.5.5-checksums.txt
 ```
 
 ### Build from Source
@@ -1058,7 +1058,7 @@ vledger sql --server 127.0.0.1:5433 --username admin \
 
 ```bash
 curl http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.5.4","tools":15,...}
+# {"ok":true,"service":"vledger-mcp","version":"1.5.5","tools":15,...}
 ```
 
 ### Prometheus Metrics
@@ -1519,6 +1519,13 @@ Counter stored in `<data_dir>/mcp_queries.json`. Resets automatically on the fir
 
 The MCP server does not implement TLS. Bind to `127.0.0.1` (default) or place behind a TLS-terminating reverse proxy for non-loopback access.
 
+All MCP tool inputs are validated server-side before any SQL is constructed:
+- Date/timestamp parameters (`from`, `to`) are validated against an ISO-8601 character whitelist — any character that is not a digit, hyphen, colon, `T`, `Z`, or `+` is rejected before the SQL string is built.
+- `LIKE`-pattern parameters have `%`, `_`, and `\` escaped before interpolation.
+- FTS5 full-text search inputs have operator characters (`*`, `^`, `-`) stripped before phrase-quoting.
+
+These controls supplement the SQL planner's statement-type whitelist and single-statement enforcement. Do not rely on them as the sole defence — run the MCP server behind authentication and restrict access to trusted clients only.
+
 ---
 
 ## 13. User Management
@@ -1830,6 +1837,12 @@ Run through this entire checklist before going to production:
 - [ ] Schedule daily backup cron job
 - [ ] Perform a documented restore drill from a real backup before going live
 
+**MCP server (if used):**
+- [ ] Bind MCP server to `127.0.0.1` (the default) unless behind a TLS-terminating reverse proxy
+- [ ] Restrict network access to port 3000 to trusted AI assistant clients only
+- [ ] Confirm MCP server version is 1.5.5 or later (contains SQL injection fixes for date parameters and LIKE wildcards)
+- [ ] If running an older version, disable `summarize_period`, `audit_report`, and `resolve_account` tools via firewall or by not granting MCP access to untrusted callers until upgraded
+
 **CI/CD verification:**
 ```bash
 cargo test --package vledger-ledger --package vledger-sql \
@@ -1837,7 +1850,7 @@ cargo test --package vledger-ledger --package vledger-sql \
            --package vledger-replication --package vledger-compliance \
            --package vledger-foureyes --package vledger-hsm \
            --package vledger-license --package vledger-crypto \
-           --package vledger-wal
+           --package vledger-wal --package vledger-mcp
 ```
 All tests must pass before deploying a new build to production.
 

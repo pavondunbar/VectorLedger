@@ -4,7 +4,7 @@
 
 VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof proving the returned data has not been modified since it was written. Historical tampering is **cryptographically detectable** — any modification to a past record invalidates every hash in the chain from that point forward.
 
-Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.4** · License: BUSL-1.1
+Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.5** · License: BUSL-1.1
 
 ---
 
@@ -169,29 +169,29 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Option 2 — Download a release binary
 
-Pre-built binaries for v1.5.4 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.4):
+Pre-built binaries for v1.5.5 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.5):
 
 | Platform | Download |
 |---|---|
-| Linux x86_64 | `vledger-v1.5.4-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.4-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.4-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 (Apple Silicon) | `vledger-v1.5.4-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `vledger-v1.5.4-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `vledger-v1.5.5-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.5-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.5-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `vledger-v1.5.5-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `vledger-v1.5.5-x86_64-pc-windows-msvc.zip` |
 
 Each release is accompanied by a `SHA256SUMS` file and a CycloneDX SBOM. Verify before installing:
 
 ```bash
 # Verify SHA-256 checksum
-sha256sum -c vledger-v1.5.4-checksums.txt
+sha256sum -c vledger-v1.5.5-checksums.txt
 
 # Verify cosign signature (keyless OIDC)
 cosign verify-blob \
-  --certificate vledger-v1.5.4-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.4-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.4" \
+  --certificate vledger-v1.5.5-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.5-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.5" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.4-checksums.txt
+  vledger-v1.5.5-checksums.txt
 ```
 
 ### Option 3 — Build from source
@@ -424,7 +424,7 @@ Response: {"ok": true, "columns": [...], "rows": [[...]], "rows_affected": N,
            "proof": {"root_hex": "...", "leaf_count": N, "verified": true}}\n
 ```
 
-All three clients validate account identifiers via the same character allowlist (`^[A-Za-z0-9_\-\.:]{1,128}$`) before SQL interpolation to prevent injection.
+All three clients validate account identifiers via the same character allowlist (`^[A-Za-z0-9_\-\.:]{1,128}$`) before SQL interpolation to prevent injection. The MCP server additionally validates date/timestamp parameters against an ISO-8601 whitelist and escapes `LIKE`-pattern metacharacters before SQL construction (v1.5.5+).
 
 ### Python
 
@@ -548,7 +548,7 @@ vledger-mcp \
 
 ```bash
 curl http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.5.4","tools":15,
+# {"ok":true,"service":"vledger-mcp","version":"1.5.5","tools":15,
 #  "agent_queries_used":3,"agent_queries_limit":100,"agent_queries_remaining":97}
 ```
 
@@ -706,6 +706,11 @@ vledger-bench \
 ---
 
 ## Changelog
+
+### v1.5.5
+- **Security fix:** MCP `tool_summarize_period` and `tool_audit_report` interpolated user-supplied `from`/`to` date strings into SQL `WHERE` clauses without validation, allowing filter-bypass via crafted date values. Fixed with a strict ISO-8601 whitelist validator (`validate_iso8601_timestamp`) applied in both `tools.rs` (embedded mode) and `network.rs` (network mode) — any character that is not a digit, hyphen, colon, `T`, `Z`, or `+` is rejected with an error before any SQL is constructed.
+- **Security fix:** MCP `tool_resolve_account` (and the network-mode equivalent) used `LIKE '%{value}%'` with only single-quote escaping, leaving `%` and `_` wildcards unescaped. Fixed with an `escape_like()` helper that escapes `\`, `%`, and `_` and adds `ESCAPE '\'` to the SQL clause.
+- **Security fix:** `search_metadata` in `entry_db.rs` wrapped user input in FTS5 double-quote phrase syntax but did not strip FTS5 operator characters (`*`, `^`, `-`). An attacker could inject FTS5 operators to manipulate which entries were returned. Fixed by filtering operator characters from the input before phrase-quoting.
 
 ### v1.5.4
 - **Bug fix (v1.5.2/v1.5.3 regression):** Previous fixes patched `tools.rs` (the embedded/direct-access code path) but the production MCP server runs in network mode, which routes all tool calls through `network.rs` — a completely separate implementation of `execute_correction` that had no idempotency logic at all. Fixed `network.rs` with the same pre-flight `external_ref` check and deterministic idempotency keys.

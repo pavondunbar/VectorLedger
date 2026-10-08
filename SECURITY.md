@@ -1,6 +1,6 @@
 # VectorLedger Security Policy
 
-**Version:** 1.5.1  
+**Version:** 1.5.5  
 **Published by:** VectorGuard Labs  
 **Security contact:** security@vectorguardlabs.com
 
@@ -75,8 +75,9 @@ We use [CVSS v3.1](https://www.first.org/cvss/v3.1/specification-document) for s
 
 | Version | Status |
 |---|---|
-| 1.5.1 | ✅ Current — security fixes backported here |
-| 1.5.0 | ✅ Supported |
+| 1.5.5 | ✅ Current — security fixes backported here |
+| 1.5.4 | ✅ Supported |
+| 1.5.x (< 1.5.4) | ⚠ Security fixes only — upgrade to 1.5.5 recommended |
 | 1.4.x | ⚠ Security fixes only |
 | < 1.4.0 | ❌ End of life — upgrade strongly recommended |
 
@@ -543,7 +544,7 @@ VectorLedger is designed to be **tamper-detectable even by internal privileged a
 - **Transaction forgery**: WAL commits are Ed25519-signed; forgery requires the private signing key.
 - **Duplicate entries**: idempotency key enforcement prevents double-posting.
 - **Unauthorized high-value writes**: four-eyes workflow prevents single-actor posting to protected accounts.
-- **SQL injection**: all three client SDKs validate account identifiers via allowlist before interpolation; RBAC enforced on logical plan, not raw SQL.
+- **SQL injection**: all three client SDKs validate account identifiers via allowlist before interpolation; RBAC enforced on logical plan, not raw SQL; MCP layer uses ISO-8601 timestamp validation (`validate_iso8601_timestamp`) and LIKE-pattern escaping (`escape_like`) for all user-supplied filter values; FTS5 query inputs have operator characters stripped before phrase-quoting (v1.5.5+).
 
 ### What a Privileged Attacker With WAL Directory Access Could Do
 
@@ -579,20 +580,60 @@ Every release is:
 **Verify a release:**
 ```bash
 # Verify checksum
-sha256sum -c vledger-v1.5.1-checksums.txt
+sha256sum -c vledger-v1.5.5-checksums.txt
 
 # Verify cosign signature
 cosign verify-blob \
-  --certificate vledger-v1.5.1-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.1-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.1" \
+  --certificate vledger-v1.5.5-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.5-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.5" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.1-checksums.txt
+  vledger-v1.5.5-checksums.txt
 ```
 
 ---
 
 ## 19. Bug Fixes and Security Advisories
+
+### MCP SQL injection via unescaped date strings and LIKE wildcards (fixed in v1.5.5)
+
+**Severity:** Medium — filter bypass; no data destruction or schema modification possible.
+
+**Affected versions:** All versions through v1.5.4.
+
+**Components:** `crates/vledger-mcp/src/tools.rs`, `crates/vledger-mcp/src/network.rs`, `crates/vledger-ledger/src/entry_db.rs`
+
+#### CVE-1: Unescaped date strings in `tool_summarize_period` and `tool_audit_report`
+
+The MCP tools `summarize_period` and `audit_report` built SQL `WHERE` clauses by directly interpolating the user-supplied `from` and `to` date string parameters without any sanitization. The `domain` parameter was correctly escaped with `replace('\'', "''")`, but the date fields were not.
+
+A caller supplying `from = "2026-01-01' OR '1'='1"` would produce SQL like:
+```sql
+SELECT COUNT(sequence) FROM ledger WHERE effective_at >= '2026-01-01' OR '1'='1' AND ...
+```
+The injected `OR '1'='1'` predicate makes the condition always true, bypassing the intended date range and domain filters. The most significant practical consequence was cross-tenant data exposure in multi-domain deployments — financial summary counts and audit report entry sets could be made to span all domains rather than the requested one.
+
+Destructive DDL (`DROP`, `DELETE`, `UPDATE`) was not achievable because the custom SQL planner enforces a statement-type whitelist and single-statement enforcement as a hard backstop.
+
+**Fix:** A `validate_iso8601_timestamp()` function whitelists only the characters valid in ISO-8601 date/datetime values (`0-9`, `-`, `:`, `T`, `Z`, `+`). Inputs containing any other character are rejected with an error before any SQL string is constructed. Applied in both `tools.rs` (embedded/direct mode) and `network.rs` (network proxy mode).
+
+#### CVE-2: LIKE wildcard injection in `tool_resolve_account` metadata search
+
+The `resolve_account` tool searched ledger metadata via `WHERE metadata LIKE '%{value}%'`. The `value` was escaped for single-quotes (`replace('\'', "''")`) but the LIKE metacharacters `%` and `_` were not escaped, and no `ESCAPE` clause was present.
+
+An attacker could pass `%` to match all entries, or construct patterns to widen the search beyond the intended account name lookup.
+
+**Fix:** An `escape_like()` helper escapes `\`, `%`, and `_` from user input and the SQL clause now includes `ESCAPE '\'`.
+
+#### CVE-3: FTS5 query operator injection in `search_metadata`
+
+`search_metadata` in `entry_db.rs` wrapped user input in FTS5 double-quote phrase syntax (`"input"`) and escaped embedded double-quotes. However, the FTS5 operator characters `*` (prefix wildcard), `^` (boost), and `-` (negation) were not filtered. These characters have syntactic meaning inside an FTS5 phrase expression and could be used to manipulate which entries the search returned — for example, using `-word` negation to suppress expected results or `*` suffix to broaden matching beyond the intended scope.
+
+The SQL statement itself was not injectable (the FTS5 query was passed as a bound `?1` parameter), but FTS5 query logic could be manipulated.
+
+**Fix:** The FTS5 operator characters `*`, `^`, and `-` are now filtered from the user input before phrase-quoting. All other characters are preserved; multi-word phrases like `"Elizabeth Cadet"` continue to work correctly.
+
+---
 
 ### Feature gating for paid tiers fixed (v1.5.0)
 
