@@ -4,7 +4,7 @@
 
 VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof proving the returned data has not been modified since it was written. Historical tampering is **cryptographically detectable** — any modification to a past record invalidates every hash in the chain from that point forward.
 
-Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.6** · License: BUSL-1.1
+Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.7** · License: BUSL-1.1
 
 ---
 
@@ -169,14 +169,14 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Option 2 — Download a release binary
 
-Pre-built binaries for v1.5.6 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.6):
+Pre-built binaries for v1.5.7 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.7):
 
 | Platform | Filename | wget |
 |---|---|---|
-| Linux x86_64 | `vledger-v1.5.6-x86_64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.6-aarch64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.6-x86_64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 (Apple Silicon) | `vledger-v1.5.6-aarch64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-aarch64-apple-darwin.tar.gz` |
+| Linux x86_64 | `vledger-v1.5.7-x86_64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.7-aarch64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.7-x86_64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `vledger-v1.5.7-aarch64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-aarch64-apple-darwin.tar.gz` |
 
 > **Note on filenames:** Archives use the Rust target triple convention (`aarch64-unknown-linux-gnu`, not `linux-aarch64`). Use the exact filenames above.
 
@@ -184,15 +184,15 @@ Each release is accompanied by a `SHA256SUMS` file and a CycloneDX SBOM. Verify 
 
 ```bash
 # Verify SHA-256 checksum
-sha256sum -c vledger-v1.5.6-checksums.txt
+sha256sum -c vledger-v1.5.7-checksums.txt
 
 # Verify cosign signature (keyless OIDC)
 cosign verify-blob \
-  --certificate vledger-v1.5.6-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.6-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.6" \
+  --certificate vledger-v1.5.7-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.7-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.7" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.6-checksums.txt
+  vledger-v1.5.7-checksums.txt
 ```
 
 ### Option 3 — Build from source
@@ -549,7 +549,7 @@ vledger-mcp \
 
 ```bash
 curl http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.5.6","tools":15,
+# {"ok":true,"service":"vledger-mcp","version":"1.5.7","tools":15,
 #  "agent_queries_used":3,"agent_queries_limit":100,"agent_queries_remaining":97}
 ```
 
@@ -707,6 +707,12 @@ vledger-bench \
 ---
 
 ## Changelog
+
+### v1.5.7
+- **Hardening:** Added `UNIQUE(idempotency_key)` constraint to the `entries` table in SQLite, promoted the idempotency guarantee from application-layer-only to dual application-layer + database-layer enforcement. Previously the only protection against duplicate `idempotency_key` values was the explicit `idempotency_key_exists()` check inside `post_entry()` running under the exclusive `RwLock` write guard — correct within a single process but not durable at the database layer and not effective against a future multi-host deployment. The constraint is added via an automatic schema migration (schema version 0 → 1) using SQLite's rename-create-copy-drop pattern, wrapped in a single atomic transaction. The migration runs automatically on every database open — existing deployments upgrade silently on the next server start with no operator action required. `PRAGMA user_version` is used to track the schema level; the migration is idempotent.
+- **`INSERT OR IGNORE` semantics corrected:** `EntryDb::insert()` now captures the row count from the SQLite execute call. The FTS metadata index insert is guarded by `rows_inserted > 0` — if the UNIQUE constraint silently ignores a duplicate via `OR IGNORE`, the FTS table stays consistent. Previously the FTS insert ran unconditionally, which would have left a dangling FTS row with no corresponding `entries` row.
+- **`LedgerStore::entry_db()` accessor:** New public method exposing `&EntryDb` for diagnostic and test use.
+- **Two new concurrency tests** in `correction_concurrency_tests.rs`: `schema_version_is_current` (verifies the migration ran and `PRAGMA user_version == 1`) and `database_unique_constraint_prevents_duplicate_without_app_layer_check` (bypasses `post_entry` entirely and calls `EntryDb::insert()` directly with two entries sharing an `idempotency_key` — asserts the count stays at 1, proving the database constraint fires independently of the application-layer check). Total test count: 525 (523 pre-existing + 2 new).
 
 ### v1.5.6
 - **Concurrency test suite:** Added 5 targeted tests in `crates/vledger-ledger/src/correction_concurrency_tests.rs` covering the `execute_correction` TOCTOU race condition identified in community review. Investigation confirmed that `execute_correction` (both embedded and network modes) makes 4 independent lock-acquire/release SQL calls with no spanning lock across the pre-flight read and the two writes. The only race protection is `post_entry`'s idempotency key check which executes atomically under `&mut LedgerStore`. Tests verify: (1) 20 concurrent callers through a Tokio barrier produce exactly 1 reversal + 1 correction entry, never duplicates; (2) the losing caller receives the winner's `(rev_seq, cor_seq)` — not an error — so the agent has no reason to retry; (3) crash-between-writes recovery posts only the missing half; (4) correction entries do not mutate `content_hash` or `chain_hash` of unrelated entries; (5) 50-task stress run holds all invariants. All 523 tests pass (518 pre-existing + 5 new). No concurrency bug was found — the idempotency gate holds — but the tests now formally document and enforce that guarantee.

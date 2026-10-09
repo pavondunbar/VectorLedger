@@ -1733,6 +1733,16 @@ impl LedgerStore {
         self.tx_manager.signing_pubkey()
     }
 
+    /// Expose the underlying [`EntryDb`] for diagnostic and test use.
+    ///
+    /// This accessor is intentionally kept narrow — callers should prefer the
+    /// higher-level `LedgerStore` API.  The primary use case is tests that
+    /// need to inspect schema metadata (e.g. `schema_version()`) or probe the
+    /// database-layer constraint directly.
+    pub fn entry_db(&self) -> &crate::entry_db::EntryDb {
+        &self.entry_db
+    }
+
     /// Sign `message` with the database signing key.
     ///
     /// Returns `Some((signature, pubkey))` when a signing key is configured,

@@ -1,6 +1,6 @@
 # VectorLedger — Production Operations Runbook
 
-**Version:** 1.5.6  
+**Version:** 1.5.7  
 **Audience:** System administrators and on-call engineers responsible for deployed VectorLedger instances.
 
 This is the operator bible for VectorLedger. Read it end-to-end before going to production.
@@ -103,27 +103,27 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Install from Release Binary
 
-Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.6):
+Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.7):
 
 | Platform | Filename | wget |
 |---|---|---|
-| Linux x86_64 | `vledger-v1.5.6-x86_64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.6-aarch64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.6-x86_64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 | `vledger-v1.5.6-aarch64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.6/vledger-v1.5.6-aarch64-apple-darwin.tar.gz` |
+| Linux x86_64 | `vledger-v1.5.7-x86_64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `vledger-v1.5.7-aarch64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `vledger-v1.5.7-x86_64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 | `vledger-v1.5.7-aarch64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-aarch64-apple-darwin.tar.gz` |
 
 > **Note on filenames:** Archives use the Rust target triple convention (`aarch64-unknown-linux-gnu`, not `linux-aarch64`). Use the exact filenames above.
 
 **Verify before deploying:**
 ```bash
-sha256sum -c vledger-v1.5.6-checksums.txt
+sha256sum -c vledger-v1.5.7-checksums.txt
 
 cosign verify-blob \
-  --certificate vledger-v1.5.6-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.6-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.6" \
+  --certificate vledger-v1.5.7-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.7-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.7" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.6-checksums.txt
+  vledger-v1.5.7-checksums.txt
 ```
 
 ### Build from Source
@@ -167,6 +167,8 @@ cargo build --release
    vledger start --data-dir /var/lib/vledger/data --pgwire &
    vledger sql --username admin --query "SELECT VERIFY_CHAIN()"
    ```
+
+> **v1.5.7 upgrade note:** On first start after upgrading from any version prior to v1.5.7, the server automatically runs a one-time SQLite schema migration (version 0 → 1) that adds a `UNIQUE(idempotency_key)` constraint to the `entries` table. The migration is atomic and crash-safe — if it is interrupted, it rolls back and retries on the next start. No manual steps are required. Expect a brief pause on startup proportional to the number of entries in the database (~1–5 seconds for most deployments; up to ~2 minutes for 25M+ entries). The migration is logged as `schema migration 0→1: adding UNIQUE(idempotency_key)` at INFO level.
 
 ---
 
@@ -1059,7 +1061,7 @@ vledger sql --server 127.0.0.1:5433 --username admin \
 
 ```bash
 curl http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.5.6","tools":15,...}
+# {"ok":true,"service":"vledger-mcp","version":"1.5.7","tools":15,...}
 ```
 
 ### Prometheus Metrics
@@ -1785,15 +1787,22 @@ vledger self-test-phase3 --data-dir ./vledger-data
 
 ### Phase 4 — Correction Concurrency Tests
 
-Run the targeted concurrency suite for `execute_correction` race conditions:
+Run the targeted concurrency suite for `execute_correction` race conditions and the database-layer UNIQUE constraint:
 
 ```bash
 cargo test --package vledger-ledger correction_concurrency
 ```
 
-Expected output: 5 tests pass — `concurrent_correction_idempotency`, `correction_loser_receives_winner_result_not_error`, `partial_correction_recovery_only_missing_half_written`, `correction_does_not_disturb_unrelated_entries`, `high_concurrency_correction_stress_50_tasks`.
+Expected output: 7 tests pass —
+- `concurrent_correction_idempotency`
+- `correction_loser_receives_winner_result_not_error`
+- `partial_correction_recovery_only_missing_half_written`
+- `correction_does_not_disturb_unrelated_entries`
+- `high_concurrency_correction_stress_50_tasks`
+- `schema_version_is_current` *(new in v1.5.7 — verifies `PRAGMA user_version == 1`)*
+- `database_unique_constraint_prevents_duplicate_without_app_layer_check` *(new in v1.5.7 — bypasses `post_entry` and proves the SQLite UNIQUE constraint fires independently)*
 
-These tests fire 20–50 concurrent callers through a Tokio barrier to maximise lock contention and verify: exactly 3 ledger entries result (original + reversal + correction), losing callers receive the winner's result rather than an error, partial-write crash recovery posts only the missing half, and the hash chain remains intact under concurrency.
+The last two tests are specifically designed to catch a regression where the schema migration fails to run or the UNIQUE constraint is accidentally dropped. If either fails, the database-layer idempotency guarantee is gone.
 
 All three phases plus the concurrency suite must pass before deploying a new build to production.
 
@@ -1854,6 +1863,7 @@ Run through this entire checklist before going to production:
 - [ ] Bind MCP server to `127.0.0.1` (the default) unless behind a TLS-terminating reverse proxy
 - [ ] Restrict network access to port 3000 to trusted AI assistant clients only
 - [ ] Confirm MCP server version is 1.5.5 or later (contains SQL injection fixes for date parameters and LIKE wildcards)
+- [ ] Confirm database schema is at version 1 (v1.5.7+) — verify with `vledger sql --query "PRAGMA user_version"` against the SQLite file, or check server startup logs for "schema migration 0→1" message
 - [ ] If running an older version, disable `summarize_period`, `audit_report`, and `resolve_account` tools via firewall or by not granting MCP access to untrusted callers until upgraded
 
 **CI/CD verification:**
@@ -1865,7 +1875,7 @@ cargo test --package vledger-ledger --package vledger-sql \
            --package vledger-license --package vledger-crypto \
            --package vledger-wal --package vledger-mcp
 ```
-All tests must pass before deploying a new build to production. The `vledger-ledger` package includes the correction concurrency suite (`correction_concurrency_tests`) — 5 tests covering TOCTOU race behaviour under 20–50 concurrent callers.
+All tests must pass before deploying a new build to production. The `vledger-ledger` package includes the correction concurrency suite (`correction_concurrency_tests`) — 7 tests covering TOCTOU race behaviour under 20–50 concurrent callers, schema migration verification, and the database-layer UNIQUE constraint on `idempotency_key`.
 
 ---
 

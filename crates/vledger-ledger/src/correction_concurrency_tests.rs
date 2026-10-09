@@ -658,4 +658,107 @@ mod tests {
         // ── Hash chain intact ─────────────────────────────────────────────
         g.verify_chain_integrity().unwrap();
     }
+
+    // ── Test 6: schema version is at CURRENT_SCHEMA_VERSION ──────────────
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Confirms that `apply_schema_migrations` ran and the database is at
+    /// schema version 1 (the version that adds UNIQUE(idempotency_key)).
+    #[tokio::test]
+    async fn schema_version_is_current() {
+        let dir = setup_dir();
+        let store = Arc::new(RwLock::new(LedgerStore::open(dir.path()).unwrap()));
+
+        // Reach into the store's entry_db via the public accessor.
+        let g = store.read().await;
+        let version = g.entry_db().schema_version().unwrap();
+        assert_eq!(
+            version,
+            1,
+            "expected schema version 1 (UNIQUE idempotency_key constraint); \
+             got {version} — apply_schema_migrations may not have run"
+        );
+    }
+
+    // ── Test 7: database-layer UNIQUE constraint fires independently ──────
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// This test deliberately bypasses the application-layer idempotency check
+    /// in `post_entry` and calls `entry_db.insert()` directly with two entries
+    /// that share the same non-NULL idempotency key.
+    ///
+    /// The expected outcome is:
+    ///   - First insert: succeeds (1 row written).
+    ///   - Second insert: silently ignored by `OR IGNORE` due to the UNIQUE
+    ///     constraint — no error, no duplicate row.
+    ///   - Final entry count: 1, not 2.
+    ///
+    /// This proves the database-layer guarantee holds independently of the
+    /// application-layer check.  If the UNIQUE constraint is ever accidentally
+    /// dropped (e.g., a botched migration), this test will fail with entry
+    /// count 2 instead of 1.
+    #[tokio::test]
+    async fn database_unique_constraint_prevents_duplicate_without_app_layer_check() {
+        use crate::entry_db::EntryDb;
+
+        let dir = setup_dir();
+        let db_path = dir.path().join("vledger.db");
+
+        // Open EntryDb directly — bypasses LedgerStore and post_entry entirely.
+        let entry_db = EntryDb::open(&db_path).unwrap();
+
+        // Confirm migration ran.
+        assert_eq!(entry_db.schema_version().unwrap(), 1,
+            "schema must be at version 1 before this test is meaningful");
+
+        // Build two minimal JournalEntry values that share an idempotency key
+        // but have different sequence numbers (different PKs).
+        let shared_key = "test-unique-constraint-key";
+        let make_entry = |seq: u64| {
+            use crate::entry::JournalEntryBuilder;
+            use crate::account::{Account, AccountType};
+
+            // We need valid AccountIds — use fixed UUIDs.
+            let cash = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+            let rev  = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+            let amt  = crate::amount::Amount::new(100).unwrap();
+
+            let mut entry = JournalEntryBuilder::new("test entry", "test")
+                .debit(cash, amt, "USD")
+                .credit(rev, amt, "USD")
+                .idempotency_key(shared_key)
+                .build();
+
+            // Manually set a deterministic sequence and hashes so we can
+            // insert directly into EntryDb without going through LedgerStore.
+            entry.sequence = seq;
+            entry.content_hash = [seq as u8; 32];
+            entry.chain_hash   = [seq as u8 + 100; 32];
+            entry
+        };
+
+        let entry_a = make_entry(1);
+        let entry_b = make_entry(2); // different PK, same idempotency_key
+
+        // Insert first entry — must succeed.
+        entry_db.insert(&entry_a).unwrap();
+        assert_eq!(entry_db.count().unwrap(), 1, "first insert must write 1 row");
+
+        // Insert second entry with same idempotency_key — must be silently ignored.
+        entry_db.insert(&entry_b).unwrap();
+        assert_eq!(
+            entry_db.count().unwrap(),
+            1,
+            "second insert with duplicate idempotency_key must be silently ignored \
+             by the UNIQUE constraint (OR IGNORE); count must remain 1, not 2"
+        );
+
+        // The surviving row must be the first entry (sequence 1), not the second.
+        let stored = entry_db.get_by_sequence(1).unwrap();
+        assert!(stored.is_some(), "entry at sequence 1 must still exist");
+        assert!(
+            entry_db.get_by_sequence(2).unwrap().is_none(),
+            "entry at sequence 2 must not exist — it was blocked by the UNIQUE constraint"
+        );
+    }
 }

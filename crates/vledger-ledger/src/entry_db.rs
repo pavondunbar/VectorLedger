@@ -12,23 +12,40 @@
 //!
 //! ```sql
 //! CREATE TABLE entries (
-//!     sequence     INTEGER PRIMARY KEY,
-//!     id           TEXT    NOT NULL,
-//!     status       TEXT    NOT NULL,
-//!     domain       TEXT    NOT NULL,
-//!     external_ref TEXT,
-//!     idempotency_key TEXT,
-//!     content_hash TEXT    NOT NULL,
-//!     chain_hash   TEXT    NOT NULL,
-//!     effective_at TEXT    NOT NULL,
-//!     posted_at    TEXT    NOT NULL,
-//!     data         BLOB    NOT NULL    -- full bincode JournalEntry
+//!     sequence        INTEGER PRIMARY KEY,
+//!     id              TEXT    NOT NULL,
+//!     status          TEXT    NOT NULL,
+//!     domain          TEXT    NOT NULL,
+//!     external_ref    TEXT,
+//!     idempotency_key TEXT    UNIQUE,   -- NULL allowed (many entries have none);
+//!                                       -- each non-NULL value must be unique.
+//!                                       -- Enforced at both the application layer
+//!                                       -- (post_entry idempotency check) and the
+//!                                       -- database layer (this constraint).
+//!     content_hash    TEXT    NOT NULL,
+//!     chain_hash      TEXT    NOT NULL,
+//!     effective_at    TEXT    NOT NULL,
+//!     posted_at       TEXT    NOT NULL,
+//!     data            BLOB    NOT NULL    -- full bincode JournalEntry
 //! );
 //! CREATE INDEX idx_entries_domain       ON entries(domain);
 //! CREATE INDEX idx_entries_status       ON entries(status);
 //! CREATE INDEX idx_entries_external_ref ON entries(external_ref);
-//! CREATE INDEX idx_entries_idem_key     ON entries(idempotency_key);
+//! -- No separate idx_entries_idem_key needed: the UNIQUE constraint
+//! -- creates an implicit index on idempotency_key automatically.
 //! ```
+//!
+//! ## Schema versioning
+//!
+//! `PRAGMA user_version` tracks the schema migration level:
+//!
+//! | user_version | Change |
+//! |---|---|
+//! | 0 | Original schema (no UNIQUE constraint on idempotency_key) |
+//! | 1 | Added `UNIQUE(idempotency_key)` via table recreation (v1.5.7) |
+//!
+//! `apply_schema_migrations()` is called at every `open_with_mode` invocation
+//! and is idempotent — safe to run on a database already at the current version.
 //!
 //! ## Memory model
 //!
@@ -71,6 +88,134 @@ pub struct EntryDb {
     conn: Mutex<Connection>,
 }
 
+// ── Schema versioning ─────────────────────────────────────────────────────────
+
+/// Current schema version stored in `PRAGMA user_version`.
+///
+/// Increment this whenever a schema migration is added to
+/// `apply_schema_migrations()`.
+const CURRENT_SCHEMA_VERSION: i64 = 1;
+
+/// Apply any pending schema migrations to `conn`.
+///
+/// This function is **idempotent**: calling it on a database that is already
+/// at `CURRENT_SCHEMA_VERSION` is a no-op.  It is safe to run on every open.
+///
+/// ## Migration history
+///
+/// ### Version 0 → 1  (v1.5.7)
+///
+/// Added `UNIQUE(idempotency_key)` to the `entries` table.
+///
+/// SQLite does not support `ALTER TABLE … ADD CONSTRAINT`, so the migration
+/// recreates the table via the standard SQLite "rename-create-copy-drop"
+/// pattern:
+///
+/// 1. Rename `entries` to `entries_old`.
+/// 2. Create `entries_new` with the UNIQUE constraint.
+/// 3. Copy all rows from `entries_old` to `entries_new`.
+/// 4. Drop `entries_old`.
+/// 5. Rename `entries_new` to `entries`.
+/// 6. Recreate all secondary indexes (the rename drops them).
+/// 7. Bump `PRAGMA user_version` to 1.
+///
+/// The entire operation is wrapped in a single SQLite transaction so it is
+/// atomic — the database either completes the migration or stays at version 0.
+fn apply_schema_migrations(conn: &Connection) -> Result<(), LedgerError> {
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| LedgerError::Serialization(format!("PRAGMA user_version: {e}")))?;
+
+    if version >= CURRENT_SCHEMA_VERSION {
+        return Ok(()); // already up-to-date
+    }
+
+    // ── Migration 0 → 1: add UNIQUE(idempotency_key) ─────────────────────
+    if version < 1 {
+        // Check whether the entries table actually exists yet (a brand-new
+        // database reaches this point before the CREATE TABLE in open_with_mode).
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='entries'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+
+        if table_exists {
+            // Recreate the table with the UNIQUE constraint.
+            //
+            // PRAGMA foreign_keys=OFF is a safety measure: it prevents SQLite
+            // from enforcing FK constraints during the table recreation.  We
+            // have no FK constraints on entries, but the pragma is idiomatic
+            // for this pattern and harmless.
+            conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 BEGIN;
+
+                 -- Step 1: rename old table
+                 ALTER TABLE entries RENAME TO entries_v0;
+
+                 -- Step 2: create new table with UNIQUE on idempotency_key
+                 CREATE TABLE entries (
+                     sequence        INTEGER PRIMARY KEY,
+                     id              TEXT    NOT NULL,
+                     status          TEXT    NOT NULL,
+                     domain          TEXT    NOT NULL,
+                     external_ref    TEXT,
+                     idempotency_key TEXT    UNIQUE,
+                     content_hash    TEXT    NOT NULL,
+                     chain_hash      TEXT    NOT NULL,
+                     effective_at    TEXT    NOT NULL,
+                     posted_at       TEXT    NOT NULL,
+                     data            BLOB    NOT NULL
+                 );
+
+                 -- Step 3: copy all rows
+                 INSERT INTO entries
+                     SELECT sequence, id, status, domain, external_ref,
+                            idempotency_key, content_hash, chain_hash,
+                            effective_at, posted_at, data
+                     FROM entries_v0;
+
+                 -- Step 4: drop old table
+                 DROP TABLE entries_v0;
+
+                 -- Step 5: recreate secondary indexes
+                 --   (the UNIQUE constraint creates the idempotency_key index
+                 --    implicitly; we only need the others)
+                 CREATE INDEX IF NOT EXISTS idx_entries_domain
+                     ON entries(domain);
+                 CREATE INDEX IF NOT EXISTS idx_entries_status
+                     ON entries(status);
+                 CREATE INDEX IF NOT EXISTS idx_entries_external_ref
+                     ON entries(external_ref) WHERE external_ref IS NOT NULL;
+
+                 -- Step 6: bump schema version
+                 PRAGMA user_version=1;
+
+                 COMMIT;
+                 PRAGMA foreign_keys=ON;",
+            )
+            .map_err(|e| LedgerError::Serialization(
+                format!("schema migration 0→1 failed: {e}")
+            ))?;
+        } else {
+            // Table doesn't exist yet — the CREATE TABLE in open_with_mode
+            // will create it with the UNIQUE constraint already present.
+            // Just bump the version so we don't attempt the migration again.
+            conn.execute_batch("PRAGMA user_version=1;")
+                .map_err(|e| LedgerError::Serialization(
+                    format!("PRAGMA user_version=1: {e}")
+                ))?;
+        }
+    }
+
+    Ok(())
+}
+
 impl EntryDb {
     /// Open (or create) the entry index at `db_path`.
     /// Creates the schema on first open; no-op if it already exists.
@@ -107,6 +252,9 @@ impl EntryDb {
             )
             .map_err(|e| LedgerError::Serialization(format!("SQLite pragma error: {e}")))?;
 
+            // Apply any pending schema migrations before creating tables.
+            apply_schema_migrations(&conn)?;
+
             // Create entries table WITHOUT secondary indexes.
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS entries (
@@ -115,7 +263,7 @@ impl EntryDb {
                     status          TEXT    NOT NULL,
                     domain          TEXT    NOT NULL,
                     external_ref    TEXT,
-                    idempotency_key TEXT,
+                    idempotency_key TEXT    UNIQUE,
                     content_hash    TEXT    NOT NULL,
                     chain_hash      TEXT    NOT NULL,
                     effective_at    TEXT    NOT NULL,
@@ -135,6 +283,9 @@ impl EntryDb {
             conn.execute_batch("PRAGMA cache_size=-16384;")
                 .map_err(|e| LedgerError::Serialization(format!("SQLite pragma error: {e}")))?;
 
+            // Apply any pending schema migrations before creating/verifying tables.
+            apply_schema_migrations(&conn)?;
+
             // Normal open: create table + all indexes.
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS entries (
@@ -143,7 +294,7 @@ impl EntryDb {
                     status          TEXT    NOT NULL,
                     domain          TEXT    NOT NULL,
                     external_ref    TEXT,
-                    idempotency_key TEXT,
+                    idempotency_key TEXT    UNIQUE,
                     content_hash    TEXT    NOT NULL,
                     chain_hash      TEXT    NOT NULL,
                     effective_at    TEXT    NOT NULL,
@@ -160,8 +311,8 @@ impl EntryDb {
                     ON entries(status);
                 CREATE INDEX IF NOT EXISTS idx_entries_external_ref
                     ON entries(external_ref) WHERE external_ref IS NOT NULL;
-                CREATE INDEX IF NOT EXISTS idx_entries_idem_key
-                    ON entries(idempotency_key) WHERE idempotency_key IS NOT NULL;
+                -- Note: no separate idx_entries_idem_key — the UNIQUE constraint
+                -- above creates an implicit B-tree index on idempotency_key.
                 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts
                     USING fts5(metadata, content='', tokenize='unicode61');",
             )
@@ -178,15 +329,15 @@ impl EntryDb {
         let conn = self.lock()?;
         // These are expensive but run as single sorted scans — far faster
         // than 25M individual B-tree insertions during row inserts.
+        // Note: no explicit idx_entries_idem_key — the UNIQUE constraint on
+        // idempotency_key creates an implicit index automatically.
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_entries_domain
                 ON entries(domain);
              CREATE INDEX IF NOT EXISTS idx_entries_status
                 ON entries(status);
              CREATE INDEX IF NOT EXISTS idx_entries_external_ref
-                ON entries(external_ref) WHERE external_ref IS NOT NULL;
-             CREATE INDEX IF NOT EXISTS idx_entries_idem_key
-                ON entries(idempotency_key) WHERE idempotency_key IS NOT NULL;",
+                ON entries(external_ref) WHERE external_ref IS NOT NULL;",
         )
         .map_err(|e| LedgerError::Serialization(format!("build indexes: {e}")))?;
         Ok(())
@@ -338,10 +489,31 @@ impl EntryDb {
 
         Ok(count)
     }
+    /// Insert a new entry into the SQLite index.
+    ///
+    /// ## Idempotency behaviour
+    ///
+    /// Two layers protect against duplicate entries:
+    ///
+    /// 1. **Application layer** (`post_entry` in store.rs): explicitly checks
+    ///    `idempotency_key_exists()` before assigning a sequence number and
+    ///    calling this method.  Returns the existing sequence to the caller.
+    ///
+    /// 2. **Database layer** (this method): the `UNIQUE(idempotency_key)`
+    ///    constraint on the `entries` table acts as a backstop.  If a row
+    ///    with the same non-NULL `idempotency_key` somehow reaches this
+    ///    method (bypassing the application-layer check), the `OR IGNORE`
+    ///    clause causes SQLite to silently skip the insert rather than
+    ///    returning an error.
+    ///
+    /// If the insert is skipped due to either the primary-key conflict
+    /// (WAL replay) **or** the idempotency-key UNIQUE constraint, the
+    /// FTS insert is also skipped — the `rows_inserted > 0` guard ensures
+    /// the two operations stay consistent.
     pub fn insert(&self, entry: &JournalEntry) -> Result<(), LedgerError> {
         let data = encode_entry(entry)?;
         let conn = self.lock()?;
-        conn.execute(
+        let rows_inserted = conn.execute(
             "INSERT OR IGNORE INTO entries
                  (sequence, id, status, domain, external_ref, idempotency_key,
                   content_hash, chain_hash, effective_at, posted_at, data)
@@ -361,15 +533,21 @@ impl EntryDb {
             ],
         )
         .map_err(|e| LedgerError::Serialization(format!("SQLite insert error: {e}")))?;
-        // Populate FTS index for metadata search.
-        conn.execute(
-            "INSERT INTO entries_fts(rowid, metadata) VALUES (?1, ?2)",
-            params![
-                entry.sequence as i64,
-                entry.metadata.as_deref().unwrap_or(""),
-            ],
-        )
-        .map_err(|e| LedgerError::Serialization(format!("FTS insert error: {e}")))?;
+
+        // Only insert the FTS row if the entry was actually written.
+        // If rows_inserted == 0 the entry was skipped by OR IGNORE (duplicate
+        // sequence PK from WAL replay, or duplicate idempotency_key from the
+        // database-layer UNIQUE constraint).
+        if rows_inserted > 0 {
+            conn.execute(
+                "INSERT INTO entries_fts(rowid, metadata) VALUES (?1, ?2)",
+                params![
+                    entry.sequence as i64,
+                    entry.metadata.as_deref().unwrap_or(""),
+                ],
+            )
+            .map_err(|e| LedgerError::Serialization(format!("FTS insert error: {e}")))?;
+        }
         Ok(())
     }
 
@@ -427,6 +605,16 @@ impl EntryDb {
             )
             .map_err(|e| LedgerError::Serialization(format!("SQLite query error: {e}")))?;
         Ok(count > 0)
+    }
+
+    /// Return the current `PRAGMA user_version` — the schema migration level.
+    ///
+    /// Used in tests and diagnostics to confirm that `apply_schema_migrations`
+    /// ran successfully.  The expected value is [`CURRENT_SCHEMA_VERSION`].
+    pub fn schema_version(&self) -> Result<i64, LedgerError> {
+        let conn = self.lock()?;
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(|e| LedgerError::Serialization(format!("PRAGMA user_version: {e}")))
     }
 
     /// Get the sequence number of an entry by idempotency key (O(1) index lookup).

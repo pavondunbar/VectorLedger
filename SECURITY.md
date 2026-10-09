@@ -1,6 +1,6 @@
 # VectorLedger Security Policy
 
-**Version:** 1.5.6  
+**Version:** 1.5.7  
 **Published by:** VectorGuard Labs  
 **Security contact:** security@vectorguardlabs.com
 
@@ -75,9 +75,9 @@ We use [CVSS v3.1](https://www.first.org/cvss/v3.1/specification-document) for s
 
 | Version | Status |
 |---|---|
-| 1.5.6 | ✅ Current — security fixes backported here |
-| 1.5.5 | ✅ Supported |
-| 1.5.x (< 1.5.5) | ⚠ Security fixes only — upgrade to 1.5.6 recommended |
+| 1.5.7 | ✅ Current — security fixes backported here |
+| 1.5.6 | ✅ Supported |
+| 1.5.x (< 1.5.6) | ⚠ Security fixes only — upgrade to 1.5.7 recommended |
 | 1.4.x | ⚠ Security fixes only |
 | < 1.4.0 | ❌ End of life — upgrade strongly recommended |
 
@@ -542,7 +542,7 @@ VectorLedger is designed to be **tamper-detectable even by internal privileged a
 - **Data modification by any actor**: any change to a historical record breaks the BLAKE3 hash chain at that entry and every subsequent entry — detectable by `VERIFY_CHAIN()`.
 - **Log scrubbing**: the audit log is O_APPEND-only with its own independent hash chain. Deletions or modifications break the chain immediately.
 - **Transaction forgery**: WAL commits are Ed25519-signed; forgery requires the private signing key.
-- **Duplicate entries**: idempotency key enforcement prevents double-posting.
+- **Duplicate entries**: idempotency key enforcement prevents double-posting at two independent layers: the application-layer `idempotency_key_exists()` check inside `post_entry()` (runs atomically under the exclusive write lock), and the database-layer `UNIQUE(idempotency_key)` constraint on the `entries` table (v1.5.7+). The database constraint fires even if the application-layer check is bypassed, and even if the process holding the lock dies before the write completes — the constraint is durable in the SQLite file itself.
 - **Unauthorized high-value writes**: four-eyes workflow prevents single-actor posting to protected accounts.
 - **SQL injection**: all three client SDKs validate account identifiers via allowlist before interpolation; RBAC enforced on logical plan, not raw SQL; MCP layer uses ISO-8601 timestamp validation (`validate_iso8601_timestamp`) and LIKE-pattern escaping (`escape_like`) for all user-supplied filter values; FTS5 query inputs have operator characters stripped before phrase-quoting (v1.5.5+).
 
@@ -580,20 +580,59 @@ Every release is:
 **Verify a release:**
 ```bash
 # Verify checksum
-sha256sum -c vledger-v1.5.6-checksums.txt
+sha256sum -c vledger-v1.5.7-checksums.txt
 
 # Verify cosign signature
 cosign verify-blob \
-  --certificate vledger-v1.5.6-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.6-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.6" \
+  --certificate vledger-v1.5.7-checksums.txt.sig.pem \
+  --signature   vledger-v1.5.7-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.7" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.6-checksums.txt
+  vledger-v1.5.7-checksums.txt
 ```
 
 ---
 
 ## 19. Bug Fixes and Security Advisories
+
+### UNIQUE(idempotency_key) database constraint added (v1.5.7)
+
+**Severity:** Hardening — no exploitable vulnerability existed; this promotes a correctness guarantee from application-layer-only to dual-layer enforcement.
+
+**Components:** `crates/vledger-ledger/src/entry_db.rs`, `crates/vledger-ledger/src/store.rs`, `crates/vledger-ledger/src/correction_concurrency_tests.rs`
+
+#### Background
+
+Prior to v1.5.7, the only protection against inserting two entries with the same `idempotency_key` value was the explicit `idempotency_key_exists()` check inside `post_entry()` in `store.rs`. This check ran atomically while holding `&mut LedgerStore` (backed by the exclusive `tokio::sync::RwLock` write guard), making it safe within a single process on a single host.
+
+The `entries` table schema had no `UNIQUE` constraint on `idempotency_key` — only a non-unique index (`CREATE INDEX`, not `CREATE UNIQUE INDEX`). The `INSERT OR IGNORE` in `EntryDb::insert()` only suppressed conflicts on the `sequence` primary key.
+
+This meant:
+- A future multi-host deployment (two workers sharing a SQLite file via NFS or similar) would have no database-layer protection.
+- Code that called `EntryDb::insert()` directly, bypassing `post_entry`, had no database backstop.
+- The invariant was invisible in the schema — an auditor inspecting the database file could not verify it without reading application code.
+
+#### Fix
+
+1. **`UNIQUE(idempotency_key)` constraint** added to the `entries` table. SQLite treats each `NULL` as distinct, so entries without an idempotency key are unaffected.
+
+2. **Automatic schema migration** (schema version 0 → 1) runs at every `LedgerStore::open()`. For existing databases the migration uses SQLite's standard rename-create-copy-drop pattern wrapped in a single atomic transaction. `PRAGMA user_version` tracks the migration level. The migration is idempotent and requires no operator action — existing deployments migrate silently on the next server start.
+
+3. **`INSERT OR IGNORE` semantics corrected.** `EntryDb::insert()` now checks `rows_inserted > 0` before inserting the corresponding FTS metadata row. Previously the FTS insert ran unconditionally — with the new UNIQUE constraint a silently-ignored duplicate would have produced a dangling FTS row.
+
+4. **Two new tests** formally prove the database constraint fires independently of the application-layer check:
+   - `schema_version_is_current` — asserts `PRAGMA user_version == 1` after open.
+   - `database_unique_constraint_prevents_duplicate_without_app_layer_check` — bypasses `post_entry` entirely, inserts two entries sharing an `idempotency_key` with different sequence numbers directly via `EntryDb::insert()`, asserts count remains 1.
+
+#### What this changes for operators
+
+Nothing. The migration runs automatically on the next server start. There is no manual migration command to run. Schema version 1 is backward-compatible — the binary and data format are unchanged; only the SQLite index structure changes.
+
+#### Remaining gap
+
+The `UNIQUE` constraint hardens the single-host guarantee at the database layer. It does not provide a distributed lock for multi-host deployments. If VectorLedger is ever deployed with multiple writers sharing a single SQLite file, a distributed coordination mechanism (etcd, Postgres advisory lock, etc.) would be required in addition to this constraint. The current architecture is single-writer by design (enforced by the OS advisory `flock` in `lockfile.rs`).
+
+---
 
 ### execute_correction concurrency race (investigated in v1.5.6 — no exploitable bug found)
 
