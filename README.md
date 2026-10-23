@@ -709,10 +709,51 @@ vledger-bench \
 ## Changelog
 
 ### v1.5.7
-- **Hardening:** Added `UNIQUE(idempotency_key)` constraint to the `entries` table in SQLite, promoted the idempotency guarantee from application-layer-only to dual application-layer + database-layer enforcement. Previously the only protection against duplicate `idempotency_key` values was the explicit `idempotency_key_exists()` check inside `post_entry()` running under the exclusive `RwLock` write guard — correct within a single process but not durable at the database layer and not effective against a future multi-host deployment. The constraint is added via an automatic schema migration (schema version 0 → 1) using SQLite's rename-create-copy-drop pattern, wrapped in a single atomic transaction. The migration runs automatically on every database open — existing deployments upgrade silently on the next server start with no operator action required. `PRAGMA user_version` is used to track the schema level; the migration is idempotent.
-- **`INSERT OR IGNORE` semantics corrected:** `EntryDb::insert()` now captures the row count from the SQLite execute call. The FTS metadata index insert is guarded by `rows_inserted > 0` — if the UNIQUE constraint silently ignores a duplicate via `OR IGNORE`, the FTS table stays consistent. Previously the FTS insert ran unconditionally, which would have left a dangling FTS row with no corresponding `entries` row.
-- **`LedgerStore::entry_db()` accessor:** New public method exposing `&EntryDb` for diagnostic and test use.
-- **Two new concurrency tests** in `correction_concurrency_tests.rs`: `schema_version_is_current` (verifies the migration ran and `PRAGMA user_version == 1`) and `database_unique_constraint_prevents_duplicate_without_app_layer_check` (bypasses `post_entry` entirely and calls `EntryDb::insert()` directly with two entries sharing an `idempotency_key` — asserts the count stays at 1, proving the database constraint fires independently of the application-layer check). Total test count: 525 (523 pre-existing + 2 new).
+
+- **Hardening — dual-layer idempotency enforcement:** Added a `UNIQUE(idempotency_key)` constraint to the `entries` table in SQLite. Previously the only protection against duplicate `idempotency_key` values was the explicit `idempotency_key_exists()` check inside `post_entry()` running atomically under the exclusive `RwLock` write guard — correct within a single process, but not durable at the database layer and not effective against a hypothetical future multi-host deployment. The constraint is added via an automatic schema migration (schema version 0 → 1) using SQLite's standard rename-create-copy-drop pattern, wrapped in a single atomic transaction. The migration runs at every `LedgerStore::open()` — existing deployments upgrade silently on the next server start with no operator action required. `PRAGMA user_version` is used to track the schema level; the migration is fully idempotent and crash-safe.
+
+- **`INSERT OR IGNORE` semantics corrected:** `EntryDb::insert()` now checks `rows_inserted > 0` before inserting the corresponding FTS5 metadata row. If the new UNIQUE constraint silently ignores a duplicate via `OR IGNORE`, the FTS table stays consistent. Previously the FTS insert ran unconditionally — with the new constraint, a silently-ignored duplicate would have produced a dangling FTS row with no corresponding `entries` row, corrupting full-text search results.
+
+- **`LedgerStore::entry_db()` accessor:** New public method exposing `&EntryDb` for diagnostic and test use without requiring internal access to the store's private fields.
+
+- **Two new concurrency tests** in `correction_concurrency_tests.rs`:
+  - `schema_version_is_current` — opens a fresh `LedgerStore`, queries `PRAGMA user_version`, and asserts it equals `1`. Catches any future regression where the schema migration silently fails to run.
+  - `database_unique_constraint_prevents_duplicate_without_app_layer_check` — bypasses `post_entry()` entirely and inserts two entries sharing the same `idempotency_key` via `EntryDb::insert()` directly, asserting only one row is retained. Proves the database-layer constraint fires independently of the application-layer check.
+
+- **jemalloc global allocator** (`tikv-jemallocator`) added on Linux and macOS. During large WAL recovery (25M+ records), ptmalloc accumulates ~7 GB of RSS because it does not aggressively return freed memory to the OS. jemalloc eliminates this. No configuration change is required — it is the default allocator in the release binary.
+
+- **Key rotation (`vledger rotate-keys`) enhanced for remote PyHSM (Model 2):** The rotate-keys command now fully supports `--pyhsm-endpoint` with mTLS (`--pyhsm-ca-cert`, `--pyhsm-client-cert`, `--pyhsm-client-key`), matching the Model 2 init path. Per-table encryption key IDs are discovered by scanning the `pages/` directory for `table_<id>_*` entries and are included in the rotation batch alongside `wal.signing` and `commit.signing` key slots. Every rotation records `KeyRotationStarted` and a `KeyRotated` event per key slot in the WORM audit log.
+
+- **Backup subsystem hardened — plaintext backups structurally removed:** `create_backup()` and `create_backup_audited()` now unconditionally return `Err`. The only callable public paths are `create_backup_encrypted()` and `create_backup_encrypted_audited()`, both of which require a `&MasterKey`. A compile-time `#[deprecated]` attribute on the old functions surfaces the change at build time in any downstream code that still calls them. Per-backup encryption keys are derived from the master key via HKDF-SHA256 with a timestamp-scoped context and stored in a mode-0o600 `.tar.key` sidecar file — the archive cannot be decrypted without it.
+
+- **Symlink traversal hardening in backup and restore:** `walkdir_safe()` now calls `canonicalize()` on every entry and rejects any resolved path that does not start with the canonical `data_dir` root. The restore path applies the same check using the canonical `target_dir` root. Symlinks pointing outside the data directory are silently skipped with a `warn!` log entry rather than followed.
+
+- **Four-eyes queue file permissions fixed (Fix #8):** `FourEyesQueue` now creates `pending.jsonl`, `approved.jsonl`, `rejected.jsonl`, and `pending.jsonl.tmp` at mode 0o600 immediately on creation — before any content is written — eliminating the race window where a newly-created file could be readable by group or other users with the default umask. The atomic rename of `pending.jsonl.tmp` → `pending.jsonl` (used when removing an approved/rejected entry from the pending set) now also applies the permission before data is written to the temp file.
+
+- **Approve idempotency guard (Fix #8):** `FourEyesQueue::approve()` now checks `approved.jsonl` for the `approval_id` before calling `post_fn`. If the record is already present (e.g., the process crashed after `post_fn` succeeded but before the pending-file rewrite completed), the already-approved record is returned immediately without re-posting. This makes crash recovery safe against double-posting without relying on the entry-level idempotency key check alone.
+
+- **Self-test expanded to 7 concurrency tests:** The `vledger-ledger` correction concurrency suite (`cargo test --package vledger-ledger correction_concurrency`) now includes 7 tests (up from 5 in v1.5.6): the original 5 plus `schema_version_is_current` and `database_unique_constraint_prevents_duplicate_without_app_layer_check`.
+
+### v1.5.6
+
+- **Five new correction concurrency tests** formally document and enforce the `execute_correction` TOCTOU guarantee: `concurrent_correction_idempotency`, `correction_loser_receives_winner_result_not_error`, `partial_correction_recovery_only_missing_half_written`, `correction_does_not_disturb_unrelated_entries`, `high_concurrency_correction_stress_50_tasks`.
+- **`execute_correction` TOCTOU investigation:** Community review identified that `execute_correction` does not hold a spanning lock across all four SQL operations (2 pre-flight reads + reversal + correction). The idempotency key mechanism prevents any duplicate entries — the losing concurrent caller silently receives the winner's result, not an error. No fix required; behaviour formally documented and test-covered.
+
+### v1.5.5
+
+- **MCP SQL injection fixes:** `validate_iso8601_timestamp()` added to all date/timestamp parameters in `summarize_period` and `audit_report`; `escape_like()` added to `resolve_account` LIKE queries; FTS5 operator characters (`*`, `^`, `-`) stripped before phrase-quoting in `search_metadata`. Affected tools in both embedded (`tools.rs`) and network (`network.rs`) MCP modes.
+
+### v1.5.0
+
+- **Feature gating fixed:** `require_feature()` now checks both the explicit `features` list and the tier's default features. Paid-tier licenses were incorrectly blocked from default features.
+- **AgenticAI gate:** MCP server and `vledger sql --ask` gated behind `Feature::AgenticAi`. Monthly limits enforced: Starter 10, Growth 100, Enterprise unlimited.
+
+### v1.4.5 — v1.4.8
+
+- **`propose_correction` / `execute_correction`:** Both tools post through the normal `post_entry` pipeline, subject to RBAC and all 16 financial invariants. Neither can modify or delete existing entries.
+- **`resolve_account` identity enforcement:** `NOT_FOUND` or `MULTIPLE_FOUND` halts the operation; mandatory identity gate before any write.
+
+unique_constraint_prevents_duplicate_without_app_layer_check` (bypasses `post_entry` entirely and calls `EntryDb::insert()` directly with two entries sharing an `idempotency_key` — asserts the count stays at 1, proving the database constraint fires independently of the application-layer check). Total test count: 525 (523 pre-existing + 2 new).
 
 ### v1.5.6
 - **Concurrency test suite:** Added 5 targeted tests in `crates/vledger-ledger/src/correction_concurrency_tests.rs` covering the `execute_correction` TOCTOU race condition identified in community review. Investigation confirmed that `execute_correction` (both embedded and network modes) makes 4 independent lock-acquire/release SQL calls with no spanning lock across the pre-flight read and the two writes. The only race protection is `post_entry`'s idempotency key check which executes atomically under `&mut LedgerStore`. Tests verify: (1) 20 concurrent callers through a Tokio barrier produce exactly 1 reversal + 1 correction entry, never duplicates; (2) the losing caller receives the winner's `(rev_seq, cor_seq)` — not an error — so the agent has no reason to retry; (3) crash-between-writes recovery posts only the missing half; (4) correction entries do not mutate `content_hash` or `chain_hash` of unrelated entries; (5) 50-task stress run holds all invariants. All 523 tests pass (518 pre-existing + 5 new). No concurrency bug was found — the idempotency gate holds — but the tests now formally document and enforce that guarantee.
@@ -783,8 +824,8 @@ vledger-bench \
 
 ## Further Reading
 
-- **[OPERATIONS.md](./OPERATIONS.md)** — Installation, configuration reference, CLI command reference, backup/restore, key rotation, replication, monitoring, troubleshooting
-- **[SECURITY.md](./SECURITY.md)** — Security model, cryptographic primitives, vulnerability disclosure, known limitations
+- **[OPERATIONS.md](./OPERATIONS.md)** — Installation, upgrade procedures, configuration reference, full CLI command reference, backup/restore, key rotation, replication, HSM integration, pgwire setup, MCP server setup, user management, license management, compliance reports, audit log management, self-test suite, security hardening checklist, performance tuning, failure modes and recovery, SQL syntax notes, and RPO/RTO objectives.
+- **[SECURITY.md](./SECURITY.md)** — Security model, all cryptographic primitives and formulas, hash chain and Merkle commitment design, key management architecture, HSM support, four-eyes workflow, audit trail, compliance engine, authentication and session security, transport security, RBAC, threat model, secure release process, bug fixes and security advisories, known limitations, and fuzz-found vulnerabilities.
 - **VectorGuard Labs:** https://vectorguardlabs.com
 - **Security reports:** security@vectorguardlabs.com
 - **License / sales:** pavon@vectorguardlabs.com

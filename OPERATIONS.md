@@ -30,7 +30,8 @@ This is the operator bible for VectorLedger. Read it end-to-end before going to 
 19. [Performance Tuning](#19-performance-tuning)
 20. [Failure Modes and Recovery](#20-failure-modes-and-recovery)
 21. [SQL Syntax Notes and Client Compatibility](#21-sql-syntax-notes-and-client-compatibility)
-22. [Recovery Point and Time Objectives](#22-recovery-point-and-time-objectives)
+22. [Benchmarking](#22-benchmarking)
+23. [Recovery Point and Time Objectives](#23-recovery-point-and-time-objectives)
 
 ---
 
@@ -168,7 +169,15 @@ cargo build --release
    vledger sql --username admin --query "SELECT VERIFY_CHAIN()"
    ```
 
-> **v1.5.7 upgrade note:** On first start after upgrading from any version prior to v1.5.7, the server automatically runs a one-time SQLite schema migration (version 0 → 1) that adds a `UNIQUE(idempotency_key)` constraint to the `entries` table. The migration is atomic and crash-safe — if it is interrupted, it rolls back and retries on the next start. No manual steps are required. Expect a brief pause on startup proportional to the number of entries in the database (~1–5 seconds for most deployments; up to ~2 minutes for 25M+ entries). The migration is logged as `schema migration 0→1: adding UNIQUE(idempotency_key)` at INFO level.
+> **v1.5.7 upgrade notes:**
+>
+> **SQLite schema migration (version 0 → 1):** On first start after upgrading from any version prior to v1.5.7, the server automatically runs a one-time migration that adds a `UNIQUE(idempotency_key)` constraint to the `entries` table. The migration is atomic and crash-safe — if it is interrupted, it rolls back and retries on the next start. No manual steps are required. Expect a brief pause on startup proportional to the number of entries (~1–5 seconds for most deployments; up to ~2 minutes for 25M+ entries). The migration is logged as `schema migration 0→1: adding UNIQUE(idempotency_key)` at INFO level. After startup, confirm the migration ran: `vledger sql --query "PRAGMA user_version"` should return `1`.
+>
+> **jemalloc allocator:** The release binary now uses jemalloc (`tikv-jemallocator`) on Linux and macOS. No configuration is required — it is the default allocator. This eliminates the ~7 GB RSS accumulation that occurred during large WAL recovery (25M+ records) when using ptmalloc.
+>
+> **Backup subsystem:** Plaintext backup paths have been structurally removed. Any code that called the old `create_backup()` or `create_backup_audited()` functions (now deprecated and always returning `Err`) must be updated to call `create_backup_encrypted()` instead. The `vledger backup` CLI command is unaffected — it has always used the encrypted path.
+>
+> **Four-eyes queue file permissions:** Files in `vledger-data/foureyes/` are now created at mode `0o600` immediately on first write. Existing queue files are unaffected; their permissions may need to be corrected manually on existing deployments: `chmod 600 /var/lib/vledger/data/foureyes/*.jsonl`.
 
 ---
 
@@ -2064,7 +2073,50 @@ psql "host=127.0.0.1 port=5432 user=admin dbname=vledger sslmode=require"
 
 ---
 
-## 22. Recovery Point and Time Objectives
+---
+
+## 22. Benchmarking
+
+The `vledger-bench` tool (included in the workspace under `tools/vledger-bench/`) measures throughput and latency for a running VectorLedger instance.
+
+### Running a Benchmark
+
+The server must be running before invoking `vledger-bench`.
+
+```bash
+vledger-bench \
+  --server 127.0.0.1:5433 \
+  --clients 10 \
+  --transactions 1000 \
+  --workload mixed \
+  --report bench-report.json
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--server <HOST:PORT>` | `127.0.0.1:5433` | Running vledger server address |
+| `--clients <N>` | `10` | Number of concurrent client goroutines |
+| `--transactions <N>` | `1000` | Transactions per client |
+| `--workload <mixed\|insert\|select>` | `mixed` | Workload distribution (70% INSERT / 30% SELECT for `mixed`) |
+| `--report <PATH>` | — | Write a JSON report file at completion |
+
+### Reference Performance Numbers
+
+Measured on Apple Silicon, `group_commit` mode, 10 clients × 1,000 transactions (70% INSERT / 30% SELECT):
+
+| Metric | Result |
+|---|---|
+| Throughput | 430 TPS |
+| Min latency | 311 µs |
+| p50 latency | 23 ms |
+| p95 latency | 36 ms |
+| p99 latency | 42 ms |
+
+These numbers are measured with `group_commit` at default 2 ms flush interval. `per_record` mode will show 30–50% lower throughput with zero-loss durability.
+
+---
+
+## 23. Recovery Point and Time Objectives
 
 | Scenario | RPO | RTO |
 |---|---|---|

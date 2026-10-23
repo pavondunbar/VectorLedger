@@ -260,6 +260,17 @@ Compromising one derived key does not expose the master key or any other derived
 - Every rotation event is recorded in the WORM audit log (`KeyRotated`, `KeyRotationStarted`)
 - Requires Enterprise tier (HSM license feature)
 
+### Backup Encryption Key
+
+Every backup archive uses a unique per-archive AES-256-GCM key derived from the master key via HKDF-SHA256:
+
+```
+backup_key = HKDF-SHA256(master_key, context="vgdb/backup/<unix_timestamp>")
+wrap_key   = HKDF-SHA256(master_key, context="vgdb/backup-key-wrap")
+```
+
+The backup key is then encrypted under `wrap_key` (AES-256-GCM, AAD = `"vgdb/backup-key-wrap"`) and stored as a mode-0o600 `.tar.key` sidecar alongside the archive. The archive cannot be decrypted without the sidecar. Private key material is never included in backups — only the `keys/db_signing_pubkey.hex` public key is archived.
+
 ### Database Signing Key
 
 At `vledger init`, an Ed25519 signing keypair is generated:
@@ -345,7 +356,7 @@ For accounts with `require_four_eyes = true`, every entry goes through mandatory
 
 **Idempotency guard:** `approve()` checks `approved.jsonl` before calling `post_fn`, making crash recovery safe against double-posting.
 
-**Persistence:** JSONL files at `vledger-data/foureyes/` (mode 0o600): `pending.jsonl`, `approved.jsonl`, `rejected.jsonl`.
+**Persistence:** JSONL files at `vledger-data/foureyes/` (mode 0o600, enforced at creation time since v1.5.7): `pending.jsonl`, `approved.jsonl`, `rejected.jsonl`. Atomic rename of `pending.jsonl.tmp` → `pending.jsonl` is used when removing an approved/rejected record from the pending set; the temp file is also created at mode 0o600 before any data is written.
 
 **Audit events:** `FourEyesSubmitted`, `FourEyesApproved`, `FourEyesRejected` are written to the WORM audit log on every state change.
 
@@ -545,6 +556,8 @@ VectorLedger is designed to be **tamper-detectable even by internal privileged a
 - **Duplicate entries**: idempotency key enforcement prevents double-posting at two independent layers: the application-layer `idempotency_key_exists()` check inside `post_entry()` (runs atomically under the exclusive write lock), and the database-layer `UNIQUE(idempotency_key)` constraint on the `entries` table (v1.5.7+). The database constraint fires even if the application-layer check is bypassed, and even if the process holding the lock dies before the write completes — the constraint is durable in the SQLite file itself.
 - **Unauthorized high-value writes**: four-eyes workflow prevents single-actor posting to protected accounts.
 - **SQL injection**: all three client SDKs validate account identifiers via allowlist before interpolation; RBAC enforced on logical plan, not raw SQL; MCP layer uses ISO-8601 timestamp validation (`validate_iso8601_timestamp`) and LIKE-pattern escaping (`escape_like`) for all user-supplied filter values; FTS5 query inputs have operator characters stripped before phrase-quoting (v1.5.5+).
+- **Backup data exposure**: backups are always AES-256-GCM encrypted using a per-archive key derived from the master key via HKDF-SHA256. The plaintext backup path was structurally removed in v1.5.7 — only `create_backup_encrypted()` is callable.
+- **Backup symlink traversal**: backup walker and restore extractor both canonicalize every path and reject entries that resolve outside `data_dir` / `target_dir` (v1.5.7+).
 
 ### What a Privileged Attacker With WAL Directory Access Could Do
 
@@ -634,6 +647,85 @@ The `UNIQUE` constraint hardens the single-host guarantee at the database layer.
 
 ---
 
+### Plaintext backup path structurally removed (v1.5.7)
+
+**Severity:** Hardening — no exploitable vulnerability; prior plaintext path was caller-accessible but unused by the CLI.
+
+**Components:** `crates/vledger/src/backup.rs`
+
+#### Background
+
+`backup.rs` previously exposed two functions that created unencrypted tar archives: `create_backup()` and `create_backup_audited()`. These functions were never called by the `vledger backup` CLI subcommand (which always used the encrypted path), but were callable from Rust code that depended on the `vledger` crate directly.
+
+An operator or script that called these functions would have silently written a plaintext archive of the page store, WAL, and catalog — including data protected at rest by AES-256-GCM. The lack of a compiler warning made this easy to miss.
+
+#### Fix
+
+Both functions are now marked `#[deprecated]` and return `Err` unconditionally with a clear message directing callers to `create_backup_encrypted()`. The only callable public paths are `create_backup_encrypted()` and `create_backup_encrypted_audited()`, both of which require a `&MasterKey` argument.
+
+The backup key is a 32-byte ephemeral key derived per-archive from the master key via `HKDF-SHA256(master_key, context="vgdb/backup/<unix_timestamp>")`. It is stored in a mode-0o600 `.tar.key` sidecar file alongside the archive. The archive cannot be decrypted without it.
+
+#### What this changes for operators
+
+Nothing for normal use. The `vledger backup` CLI command was already using the encrypted path and is unaffected. Any custom code calling the old functions will receive a compile-time deprecation warning and a runtime `Err`.
+
+---
+
+### Symlink traversal hardening in backup and restore (v1.5.7)
+
+**Severity:** Hardening — prevents a symlink-based directory traversal attack in the backup and restore subsystems.
+
+**Components:** `crates/vledger/src/backup.rs`
+
+#### Background
+
+The backup walker (`walkdir_safe`) and the restore extractor both had potential symlink traversal vectors:
+
+- **Backup:** a symlink inside `vledger-data/` pointing to a file outside the directory (e.g., `/etc/passwd`) would have been silently followed and its content archived.
+- **Restore:** a crafted tar archive containing entry names with `../` sequences (path traversal) could write files outside the target restore directory.
+
+#### Fix
+
+`walkdir_safe()` now calls `fs::canonicalize()` on every entry and checks that the resolved path starts with the canonical `data_dir` root. Entries that resolve outside the root are skipped with a `warn!` log message.
+
+The restore extractor applies the same check on the canonical `target_dir` root — tar entries whose logical destination path would escape the target directory are skipped with a `warn!` log message.
+
+In both cases the operation continues after skipping a suspect entry (fail-open for the non-suspect files) rather than aborting, ensuring a partially-compromised archive does not block a needed restore.
+
+---
+
+### Four-eyes queue files created with mode 0o600 (v1.5.7 — Fix #8)
+
+**Severity:** Low — race window for file disclosure; not exploitable without local filesystem access.
+
+**Components:** `crates/vledger-foureyes/src/queue.rs`
+
+#### Background
+
+`FourEyesQueue` created JSONL files (`pending.jsonl`, `approved.jsonl`, `rejected.jsonl`) using `OpenOptions::new().create(true).append(true).open()`. On POSIX systems, new files inherit the process umask (commonly `0o022`), leaving them world-readable (`0o644`) for a brief window between creation and the first `chmod` call.
+
+The `pending.jsonl.tmp` swap file used during atomic removal of approved/rejected entries had the same issue — it was created with default umask permissions and only renamed afterward.
+
+The approval records stored in these files contain the hex-encoded raw `entry_payload_hex` bytes of pending journal entries (the bincode-serialised `JournalEntry`), which includes financial amounts, account identifiers, and descriptions.
+
+#### Fix
+
+Each file is now explicitly created with `File::create()` and `set_mode_600()` is called immediately after creation, **before** any content is written. The mode is set before the `OpenOptions::new().create(true).append(true).open()` call that writes data, eliminating the window.
+
+`pending.jsonl.tmp` receives the same treatment: created, permission-set, then written, then renamed.
+
+#### What this changes for operators
+
+Existing queue files on disk are **not** retroactively `chmod`'d. On upgraded deployments, run:
+
+```bash
+chmod 600 /var/lib/vledger/data/foureyes/*.jsonl 2>/dev/null || true
+```
+
+New files created after upgrade are automatically mode 0o600.
+
+---
+
 ### execute_correction concurrency race (investigated in v1.5.6 — no exploitable bug found)
 
 **Severity:** Informational — investigation confirmed the race window exists but the idempotency gate prevents any duplicate entries.
@@ -676,13 +768,13 @@ Five new tests in `crates/vledger-ledger/src/correction_concurrency_tests.rs` fo
 | `correction_does_not_disturb_unrelated_entries` | Append-only: `content_hash` and `chain_hash` of unrelated entries are not mutated |
 | `high_concurrency_correction_stress_50_tasks` | 50 concurrent tasks → 3 entries, all 50 return same result, chain intact |
 
-All 523 tests pass (518 pre-existing + 5 new).
+All 530 tests pass (518 pre-existing + 5 new in v1.5.6 + 2 new in v1.5.7).
 
 #### Recommendations
 
 - Do not remove the `idempotency_key` assignment from `execute_correction` — it is a load-bearing correctness property, not cosmetic.
 - Any future correction or reversal tool must set `idempotency_key` on both writes.
-- Consider adding a `UNIQUE` constraint on `idempotency_key` in a future schema migration as defense-in-depth. This would promote the application-layer guarantee to a database-layer guarantee.
+- ~~Consider adding a `UNIQUE` constraint on `idempotency_key` in a future schema migration~~ — **resolved in v1.5.7**: the `UNIQUE(idempotency_key)` constraint was added as a schema migration and is now independently enforced at the database layer. See the UNIQUE constraint advisory above.
 
 ---
 
@@ -771,6 +863,10 @@ The following are **by design** and are **not** security vulnerabilities:
 - **`resolve_account`** enforces semantic correctness (right account → right person) but cannot substitute for organizational authorization policies outside the ledger engine.
 
 - **Compliance reports** generate technical evidence supporting an audit. They do not by themselves make an organization compliant.
+
+- **Four-eyes queue files on pre-v1.5.7 deployments** may have been created with default umask permissions (commonly `0o644`). Upgrade to v1.5.7 and run `chmod 600 /var/lib/vledger/data/foureyes/*.jsonl` to correct existing file permissions. New files are created at mode 0o600 automatically after upgrade.
+
+- **Single-writer architecture.** The `UNIQUE(idempotency_key)` database constraint added in v1.5.7 hardens the single-host idempotency guarantee but does not provide a distributed lock. If VectorLedger is ever deployed with multiple writers sharing a single SQLite file, a distributed coordination mechanism would be required. The current architecture is single-writer by design (enforced by the OS advisory `flock` in `lockfile.rs`).
 
 ---
 
