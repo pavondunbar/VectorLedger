@@ -674,8 +674,8 @@ mod tests {
         let version = g.entry_db().schema_version().unwrap();
         assert_eq!(
             version,
-            1,
-            "expected schema version 1 (UNIQUE idempotency_key constraint); \
+            2,
+            "expected schema version 2 (CHECK constraints + append-only triggers); \
              got {version} — apply_schema_migrations may not have run"
         );
     }
@@ -708,8 +708,8 @@ mod tests {
         let entry_db = EntryDb::open(&db_path).unwrap();
 
         // Confirm migration ran.
-        assert_eq!(entry_db.schema_version().unwrap(), 1,
-            "schema must be at version 1 before this test is meaningful");
+        assert_eq!(entry_db.schema_version().unwrap(), 2,
+            "schema must be at version 2 before this test is meaningful");
 
         // Build two minimal JournalEntry values that share an idempotency key
         // but have different sequence numbers (different PKs).

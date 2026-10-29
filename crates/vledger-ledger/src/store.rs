@@ -79,6 +79,14 @@ const TABLE_REVERSAL_EVENTS: u32 = 2;
 /// is never modified, preserving its hash chain integrity.
 const TABLE_SETTLEMENT_EVENTS: u32 = 3;
 
+/// table_id=4 — reconciliation run records (Fix #38)
+///
+/// Every time `reconcile()` is called, a `ReconciliationRecord` is written
+/// here.  This provides a durable, append-only history of every reconciliation
+/// run — when it ran, how many entries were checked, and whether any
+/// discrepancies were found.
+const TABLE_RECONCILIATION_EVENTS: u32 = 4;
+
 // ── Serialization helpers ─────────────────────────────────────────────────────
 
 fn encode<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, LedgerError> {
@@ -142,6 +150,38 @@ pub struct ReconciliationDiscrepancy {
     pub delta: i128,
 }
 
+// ── ReconciliationRecord (Fix #38) ────────────────────────────────────────────
+
+/// An immutable, append-only record of a single reconciliation run.
+///
+/// Written to `TABLE_RECONCILIATION_EVENTS` (table_id=4) via the WAL every
+/// time `LedgerStore::reconcile_and_record()` is called.  Provides a durable
+/// audit history of every reconciliation: when it ran, what the ledger state
+/// was at the time, and whether any discrepancies were detected.
+///
+/// If `discrepancy_count > 0` the full details are serialised into
+/// `discrepancy_json` so the record is self-contained.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReconciliationRecord {
+    /// Unique ID for this reconciliation run.
+    pub id: Uuid,
+    /// UTC timestamp when the reconciliation was executed.
+    pub run_at: chrono::DateTime<Utc>,
+    /// Total number of journal entries scanned.
+    pub entries_scanned: u64,
+    /// Total number of accounts checked.
+    pub accounts_checked: u64,
+    /// Number of accounts with a discrepancy between cache and recomputed balance.
+    pub discrepancy_count: u64,
+    /// JSON array of discrepancy details (empty array when `discrepancy_count == 0`).
+    /// Format: `[{"account_id":"…","account_code":"…","cached":…,"recomputed":…,"delta":…}]`
+    pub discrepancy_json: String,
+    /// Ledger sequence number of the last entry at the time of this run.
+    pub ledger_sequence_at_run: u64,
+    /// BLAKE3 chain tip at the time of this run (hex).
+    pub chain_tip_at_run: String,
+}
+
 // ── LedgerStore ──────────────────────────────────────────────────────────────
 
 /// The append-only financial ledger.
@@ -172,6 +212,11 @@ pub struct LedgerStore {
 
     // ── Settlement event index ────────────────────────────────────────────
     settlement_event_index: HashMap<Uuid, crate::entry::EntryStatus>,
+
+    // ── Reconciliation history (Fix #38) ─────────────────────────────────
+    /// Append-only list of all past reconciliation run records.
+    /// Rebuilt from WAL replay on startup.
+    reconciliation_history: Vec<ReconciliationRecord>,
 
     // ── Legal hold index ──────────────────────────────────────────────────
     legal_hold_accounts: std::collections::HashSet<AccountId>,
@@ -250,6 +295,7 @@ impl LedgerStore {
             last_chain_hash: ZERO_HASH,
             reversal_event_index: HashMap::new(),
             settlement_event_index: HashMap::new(),
+            reconciliation_history: Vec::new(),
             legal_hold_accounts: std::collections::HashSet::new(),
             currency_registry: crate::currency::CurrencyRegistry::new(),
             next_account_page: 0,
@@ -341,6 +387,7 @@ impl LedgerStore {
             last_chain_hash: ZERO_HASH,
             reversal_event_index: HashMap::new(),
             settlement_event_index: HashMap::new(),
+            reconciliation_history: Vec::new(),
             legal_hold_accounts: std::collections::HashSet::new(),
             currency_registry: crate::currency::CurrencyRegistry::new(),
             next_account_page: 0,
@@ -765,6 +812,11 @@ impl LedgerStore {
                                 let event: SettlementEvent = decode(&payload.row_data)?;
                                 self.settlement_event_index
                                     .insert(event.entry_id, event.new_status);
+                            }
+                            TABLE_RECONCILIATION_EVENTS => {
+                                // Fix #38 — rebuild reconciliation history on replay.
+                                let record: ReconciliationRecord = decode(&payload.row_data)?;
+                                self.reconciliation_history.push(record);
                             }
                             _ => {}
                         },
@@ -1991,9 +2043,75 @@ impl LedgerStore {
         discrepancies
     }
 
-    // ── Financial invariant check ─────────────────────────────────────────
+    // ── Reconciliation with persistence (Fix #38) ────────────────────────
 
-    /// Check the global ledger equation: Σ(Assets+Expenses) == Σ(Liabilities+Equity+Income).
+    /// Run a full reconciliation and **persist the result** as an append-only
+    /// `ReconciliationRecord` in the WAL (table_id=4).
+    ///
+    /// Returns `(discrepancies, record)`.  The record is durable before this
+    /// method returns — it can be queried later via `reconciliation_history()`.
+    ///
+    /// Use this instead of the bare `reconcile()` whenever you want an
+    /// auditable history of reconciliation runs.
+    pub fn reconcile_and_record(&mut self) -> Result<(Vec<ReconciliationDiscrepancy>, ReconciliationRecord), LedgerError> {
+        let discrepancies = self.reconcile();
+
+        let entries_scanned = self.entry_count() as u64;
+        let accounts_checked = self.accounts.len() as u64;
+        let discrepancy_count = discrepancies.len() as u64;
+        let ledger_sequence_at_run = self.next_sequence.load(Ordering::SeqCst).saturating_sub(1);
+        let chain_tip_at_run = hex::encode(self.last_chain_hash);
+
+        // Serialise discrepancy details to a compact JSON array.
+        let discrepancy_json = {
+            let arr: Vec<serde_json::Value> = discrepancies.iter().map(|d| {
+                serde_json::json!({
+                    "account_id":   d.account_id.to_string(),
+                    "account_code": d.account_code,
+                    "cached":       d.cached_balance,
+                    "recomputed":   d.recomputed_balance,
+                    "delta":        d.delta,
+                })
+            }).collect();
+            serde_json::to_string(&arr).unwrap_or_else(|_| "[]".into())
+        };
+
+        let record = ReconciliationRecord {
+            id: Uuid::new_v4(),
+            run_at: Utc::now(),
+            entries_scanned,
+            accounts_checked,
+            discrepancy_count,
+            discrepancy_json,
+            ledger_sequence_at_run,
+            chain_tip_at_run,
+        };
+
+        // Persist to WAL — this is an append-only write, consistent with
+        // the rest of the event-sourced design.
+        let bytes = encode(&record)?;
+        self.persist_row(TABLE_RECONCILIATION_EVENTS, &bytes, MutationKind::Insert, None)?;
+
+        info!(
+            run_id = %record.id,
+            entries_scanned,
+            discrepancy_count,
+            "Reconciliation complete — result persisted to WAL"
+        );
+
+        Ok((discrepancies, record))
+    }
+
+    /// Return all persisted reconciliation records, oldest first.
+    ///
+    /// Records are replayed from the in-memory index maintained during
+    /// WAL replay.  O(n) where n is the number of past reconciliation runs
+    /// (expected to be small — typically one per day or per operator action).
+    pub fn reconciliation_history(&self) -> &[ReconciliationRecord] {
+        &self.reconciliation_history
+    }
+
+    // ── Financial invariant check ─────────────────────────────────────────    /// Check the global ledger equation: Σ(Assets+Expenses) == Σ(Liabilities+Equity+Income).
     ///
     /// Returns `Ok(())` if balanced, or `Err(String)` describing the imbalance.
     pub fn check_financial_invariants(&self) -> Result<(), String> {
@@ -2027,6 +2145,95 @@ impl LedgerStore {
     /// Use this to add currencies beyond the built-in defaults.
     pub fn register_currency(&mut self, currency: crate::currency::Currency) {
         self.currency_registry.register(currency);
+    }
+
+    // ── Snapshot isolation (Fix #40) ──────────────────────────────────────
+
+    /// Return the current ledger sequence number.
+    ///
+    /// This is the **snapshot point**: pass the returned value to any
+    /// `snapshot_seq` parameter to get a consistent read view of the ledger
+    /// as it existed at this instant, even if new entries are written
+    /// concurrently before the read completes.
+    ///
+    /// ## Usage
+    ///
+    /// ```rust,ignore
+    /// // Take a snapshot before starting a multi-step read.
+    /// let snap = store.current_snapshot();
+    ///
+    /// // Both reads see the same ledger state — entries posted after
+    /// // `snap` was taken are invisible to them.
+    /// let balance = store.balance_at_snapshot(&account_id, snap);
+    /// let entries = store.entries_at_snapshot(snap);
+    /// ```
+    pub fn current_snapshot(&self) -> u64 {
+        // next_sequence - 1 is the last committed sequence.
+        // SeqCst ordering ensures we see all writes that completed before
+        // this call.
+        self.next_sequence.load(Ordering::SeqCst).saturating_sub(1)
+    }
+
+    /// Compute the balance for `account_id` as of `snapshot_seq`.
+    ///
+    /// Only entries with `sequence <= snapshot_seq` are included.
+    /// Returns 0 if the account had no activity up to that point.
+    ///
+    /// This is an O(n) scan over the account's entries from SQLite.
+    /// For the live (current) balance, prefer `balance()` which is O(1)
+    /// from the running cache.
+    pub fn balance_at_snapshot(&self, account_id: &AccountId, snapshot_seq: u64) -> i128 {
+        let acct = match self.accounts.get(account_id) {
+            Some(a) => a,
+            None => return 0,
+        };
+        let is_debit_normal = matches!(
+            acct.account_type,
+            crate::account::AccountType::Asset | crate::account::AccountType::Expense
+        );
+        let entries = self.entry_db
+            .entries_for_account(account_id)
+            .unwrap_or_default();
+
+        let mut balance: i128 = 0;
+        for entry in &entries {
+            if entry.sequence > snapshot_seq {
+                continue; // exclude entries posted after the snapshot
+            }
+            let affects = matches!(entry.status, EntryStatus::Posted | EntryStatus::Reversal);
+            if !affects {
+                continue;
+            }
+            for line in &entry.lines {
+                if line.account_id != *account_id {
+                    continue;
+                }
+                let delta: i128 = if is_debit_normal {
+                    match line.dr_cr {
+                        DrCr::Debit => line.amount.as_i128(),
+                        DrCr::Credit => -line.amount.as_i128(),
+                    }
+                } else {
+                    match line.dr_cr {
+                        DrCr::Credit => line.amount.as_i128(),
+                        DrCr::Debit => -line.amount.as_i128(),
+                    }
+                };
+                balance += delta;
+            }
+        }
+        balance
+    }
+
+    /// Return all entries with `sequence <= snapshot_seq`, in posting order.
+    ///
+    /// Provides a consistent read view of the ledger as of a point captured
+    /// by `current_snapshot()`.
+    pub fn entries_at_snapshot(&self, snapshot_seq: u64) -> Vec<crate::entry::JournalEntry> {
+        let all = self.entry_db
+            .scan_range(1, snapshot_seq)
+            .unwrap_or_default();
+        all
     }
 }
 

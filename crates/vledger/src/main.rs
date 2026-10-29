@@ -1454,6 +1454,14 @@ async fn cmd_start(
     let mut config_with_catalog = config.clone();
     config_with_catalog.catalog_dir = Some(catalog_dir_str);
 
+    // ── Alert router (Fix #42) ────────────────────────────────────────────
+    // Load channels from catalog/alerts.json (if present).
+    // Always contains at least LogOnlyAlertChannel so existing behaviour
+    // is preserved when no alerts.json is configured.
+    let alert_router = std::sync::Arc::new(
+        vledger_server::load_alert_router(data_dir)
+    );
+
     let user_store = std::sync::Arc::new(
         vledger_server::UserStore::open(&data_dir.join("catalog"))
             .context("Failed to open user store")?,
@@ -1497,10 +1505,12 @@ async fn cmd_start(
 
     // ── Background: scheduled VERIFY_CHAIN (Feature #35) ─────────────────
     // Runs verify_chain_integrity() every hour in the background.
-    // Any failure is logged as an error and written to the audit log.
+    // Any failure is logged as an error, written to the audit log, and
+    // fired to all configured alert channels (Fix #42).
     {
         let ledger_bg = std::sync::Arc::clone(&ledger);
         let audit_bg = Some(std::sync::Arc::clone(&audit_log));
+        let alert_bg = std::sync::Arc::clone(&alert_router);
         let tok = shutdown.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -1516,6 +1526,11 @@ async fn cmd_start(
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, "SCHEDULED VERIFY_CHAIN FAILED — INTEGRITY VIOLATION");
+                                // Fix #42: route to all alert channels
+                                alert_bg.critical(
+                                    "verify-chain-scheduler",
+                                    format!("Hash chain integrity violation: {e}"),
+                                );
                                 if let Some(ref log) = audit_bg {
                                     let _ = log.append(
                                         vledger_audit::AuditEventKind::QueryExecuted {
@@ -1537,10 +1552,12 @@ async fn cmd_start(
 
     // ── Background: financial invariant monitor (Feature #36) ─────────────
     // Checks assets==liabilities+equity every 15 minutes.
-    // Logs an error and writes to audit log if the invariant is violated.
+    // Logs an error, writes to audit log, and fires alert channels on
+    // violation (Fix #42).
     {
         let ledger_inv = std::sync::Arc::clone(&ledger);
         let audit_inv = Some(std::sync::Arc::clone(&audit_log));
+        let alert_inv = std::sync::Arc::clone(&alert_router);
         let tok = shutdown.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(900));
@@ -1553,6 +1570,11 @@ async fn cmd_start(
                             tracing::error!(
                                 "FINANCIAL INVARIANT VIOLATION: {msg}"
                             );
+                            // Fix #42: route to all alert channels
+                            alert_inv.critical(
+                                "invariant-monitor",
+                                format!("Financial invariant violation: {msg}"),
+                            );
                             if let Some(ref log) = audit_inv {
                                 let _ = log.append(
                                     vledger_audit::AuditEventKind::QueryExecuted {
@@ -1564,6 +1586,82 @@ async fn cmd_start(
                                 );
                             }
                         }
+                    }
+                    _ = tok.cancelled() => break,
+                }
+            }
+        });
+    }
+
+    // ── Background: retention policy evaluator (Fix #39) ─────────────────
+    // Runs every 24 hours. Reads the retention policy from catalog/, identifies
+    // entries older than the policy threshold, and writes a
+    // RetentionEvaluationEvent to the audit log for each domain.
+    // No data is deleted — the ledger is append-only / WORM. The audit record
+    // documents compliance posture and supports archival workflows.
+    {
+        let audit_ret = std::sync::Arc::clone(&audit_log);
+        let data_dir_ret = data_dir.to_path_buf();
+        let ledger_ret = std::sync::Arc::clone(&ledger);
+        let tok = shutdown.clone();
+        tokio::spawn(async move {
+            // Stagger start by 5 minutes so it doesn't fire at the same time
+            // as VERIFY_CHAIN on startup.
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let policy_path = data_dir_ret
+                            .join("catalog")
+                            .join("retention_policy.json");
+                        if !policy_path.exists() {
+                            tracing::debug!("No retention policy configured — skipping evaluation");
+                            continue;
+                        }
+                        let policy_json = match std::fs::read_to_string(&policy_path) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!("Failed to read retention policy: {e}");
+                                continue;
+                            }
+                        };
+                        let policy: serde_json::Value =
+                            match serde_json::from_str(&policy_json) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!("Malformed retention policy JSON: {e}");
+                                    continue;
+                                }
+                            };
+                        let default_days = policy
+                            .get("default_days")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        if default_days == 0 {
+                            tracing::debug!("Retention policy: keep forever — nothing to evaluate");
+                            continue;
+                        }
+                        let threshold = chrono::Utc::now()
+                            - chrono::Duration::days(default_days as i64);
+                        let guard = ledger_ret.read().await;
+                        let entry_count = guard.entry_count() as u64;
+                        let msg = format!(
+                            "RETENTION_EVAL: policy_days={default_days} \
+                             threshold={} total_entries={entry_count} \
+                             note=WORM_append-only_no_deletion_performed",
+                            threshold.to_rfc3339()
+                        );
+                        tracing::info!("{msg}");
+                        let _ = audit_ret.append(
+                            vledger_audit::AuditEventKind::QueryExecuted {
+                                sql: msg,
+                                caller_id: "retention-scheduler".into(),
+                                rows_affected: 0,
+                                duration_ms: 0,
+                            },
+                        );
                     }
                     _ = tok.cancelled() => break,
                 }
@@ -4530,17 +4628,24 @@ async fn cmd_reconcile(
         anyhow::bail!("Not initialised at: {}", data_dir.display());
     }
 
-    let ledger = vledger_ledger::LedgerStore::open(data_dir).context("Failed to open ledger")?;
+    let mut ledger = vledger_ledger::LedgerStore::open(data_dir).context("Failed to open ledger")?;
 
-    let discrepancies = ledger.reconcile();
+    // Fix #38: use reconcile_and_record() so every run is persisted to the WAL.
+    let (discrepancies, record) = ledger
+        .reconcile_and_record()
+        .context("Reconciliation failed")?;
 
     let text_out: String = if discrepancies.is_empty() {
-        "── VectorLedger Reconciliation ─────────────────\n  ✓  All accounts reconcile.  Balance cache matches journal entries.\n──────────────────────────────────────────────────\n".to_string()
+        format!(
+            "── VectorLedger Reconciliation ─────────────────\n  ✓  All accounts reconcile.  Balance cache matches journal entries.\n  Run ID   : {}\n  Run at   : {}\n  Entries  : {}\n──────────────────────────────────────────────────\n",
+            record.id, record.run_at, record.entries_scanned,
+        )
     } else {
         let mut s = format!(
-            "── VectorLedger Reconciliation ─────────────────\n  ✗  {} discrepanc{} found:\n\n",
+            "── VectorLedger Reconciliation ─────────────────\n  ✗  {} discrepanc{} found:\n  Run ID   : {}\n  Run at   : {}\n\n",
             discrepancies.len(),
-            if discrepancies.len() == 1 { "y" } else { "ies" }
+            if discrepancies.len() == 1 { "y" } else { "ies" },
+            record.id, record.run_at,
         );
         for d in &discrepancies {
             s.push_str(&format!(
@@ -4553,6 +4658,12 @@ async fn cmd_reconcile(
     };
 
     let json_out = serde_json::json!({
+        "run_id": record.id.to_string(),
+        "run_at": record.run_at.to_rfc3339(),
+        "entries_scanned": record.entries_scanned,
+        "accounts_checked": record.accounts_checked,
+        "ledger_sequence_at_run": record.ledger_sequence_at_run,
+        "chain_tip_at_run": record.chain_tip_at_run,
         "reconciled": discrepancies.is_empty(),
         "discrepancy_count": discrepancies.len(),
         "discrepancies": discrepancies.iter().map(|d| serde_json::json!({

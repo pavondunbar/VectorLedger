@@ -1,5 +1,6 @@
 //! # vledger-server — TLS 1.3 server with authentication and authorisation.
 
+pub mod alert;
 pub mod auth;
 pub mod config;
 pub mod error;
@@ -10,6 +11,7 @@ pub mod tls;
 #[cfg(test)]
 mod auth_tests;
 
+pub use alert::{load_alert_router, Alert, AlertChannel, AlertRouter, LogOnlyAlertChannel, Severity, WebhookAlertChannel};
 pub use auth::{check_plan_privilege, Role, Session, UserStore};
 pub use config::ServerConfig;
 pub use error::ServerError;

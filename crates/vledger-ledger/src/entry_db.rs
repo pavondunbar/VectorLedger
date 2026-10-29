@@ -94,7 +94,13 @@ pub struct EntryDb {
 ///
 /// Increment this whenever a schema migration is added to
 /// `apply_schema_migrations()`.
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+///
+/// | version | change |
+/// |---------|--------|
+/// | 0 | Original schema |
+/// | 1 | Added UNIQUE(idempotency_key) |
+/// | 2 | Added CHECK constraints + append-only triggers (Fix #41) |
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 /// Apply any pending schema migrations to `conn`.
 ///
@@ -213,6 +219,109 @@ fn apply_schema_migrations(conn: &Connection) -> Result<(), LedgerError> {
         }
     }
 
+    // ── Migration 1 → 2: CHECK constraints + append-only triggers (Fix #41) ──
+    //
+    // SQLite cannot add CHECK constraints to an existing table via ALTER TABLE,
+    // so we use the standard rename-create-copy-drop pattern again.
+    //
+    // We also add two BEFORE UPDATE / BEFORE DELETE triggers that raise an
+    // ABORT error if anyone attempts to modify or delete an existing entry row.
+    // This gives database-layer enforcement of the append-only guarantee in
+    // addition to the application-layer enforcement in post_entry().
+    if version < 2 {
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='entries'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+
+        if table_exists {
+            conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 BEGIN;
+
+                 -- Step 1: rename the existing table
+                 ALTER TABLE entries RENAME TO entries_v1;
+
+                 -- Step 2: create the new table with CHECK constraints
+                 CREATE TABLE entries (
+                     sequence        INTEGER PRIMARY KEY
+                                     CHECK (sequence > 0),
+                     id              TEXT    NOT NULL,
+                     status          TEXT    NOT NULL
+                                     CHECK (status IN (
+                                         'Posted','Reversed','Reversal',
+                                         'Pending','Settled','Failed',
+                                         'PendingApproval','Rejected'
+                                     )),
+                     domain          TEXT    NOT NULL,
+                     external_ref    TEXT,
+                     idempotency_key TEXT    UNIQUE,
+                     content_hash    TEXT    NOT NULL
+                                     CHECK (length(content_hash) = 64),
+                     chain_hash      TEXT    NOT NULL
+                                     CHECK (length(chain_hash) = 64),
+                     effective_at    TEXT    NOT NULL,
+                     posted_at       TEXT    NOT NULL,
+                     data            BLOB    NOT NULL
+                 );
+
+                 -- Step 3: copy all rows
+                 INSERT INTO entries
+                     SELECT sequence, id, status, domain, external_ref,
+                            idempotency_key, content_hash, chain_hash,
+                            effective_at, posted_at, data
+                     FROM entries_v1;
+
+                 -- Step 4: drop the old table
+                 DROP TABLE entries_v1;
+
+                 -- Step 5: recreate secondary indexes
+                 CREATE INDEX IF NOT EXISTS idx_entries_domain
+                     ON entries(domain);
+                 CREATE INDEX IF NOT EXISTS idx_entries_status
+                     ON entries(status);
+                 CREATE INDEX IF NOT EXISTS idx_entries_external_ref
+                     ON entries(external_ref) WHERE external_ref IS NOT NULL;
+
+                 -- Step 6: append-only guard triggers
+                 -- These fire BEFORE any UPDATE or DELETE on the entries table
+                 -- and raise an error, making it impossible to mutate or
+                 -- remove a row through any SQL path — application or direct.
+                 CREATE TRIGGER IF NOT EXISTS entries_no_update
+                     BEFORE UPDATE ON entries
+                     BEGIN
+                         SELECT RAISE(ABORT,
+                             'entries table is append-only: UPDATE is not permitted');
+                     END;
+
+                 CREATE TRIGGER IF NOT EXISTS entries_no_delete
+                     BEFORE DELETE ON entries
+                     BEGIN
+                         SELECT RAISE(ABORT,
+                             'entries table is append-only: DELETE is not permitted');
+                     END;
+
+                 PRAGMA user_version=2;
+                 COMMIT;
+                 PRAGMA foreign_keys=ON;",
+            )
+            .map_err(|e| LedgerError::Serialization(
+                format!("schema migration 1→2 failed: {e}")
+            ))?;
+        } else {
+            // Table does not exist yet — the CREATE TABLE in open_with_mode
+            // will add constraints directly; just bump the version.
+            conn.execute_batch("PRAGMA user_version=2;")
+                .map_err(|e| LedgerError::Serialization(
+                    format!("PRAGMA user_version=2: {e}")
+                ))?;
+        }
+    }
+
     Ok(())
 }
 
@@ -286,17 +395,25 @@ impl EntryDb {
             // Apply any pending schema migrations before creating/verifying tables.
             apply_schema_migrations(&conn)?;
 
-            // Normal open: create table + all indexes.
+            // Normal open: create table + CHECK constraints + indexes + triggers.
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS entries (
-                    sequence        INTEGER PRIMARY KEY,
+                    sequence        INTEGER PRIMARY KEY
+                                    CHECK (sequence > 0),
                     id              TEXT    NOT NULL,
-                    status          TEXT    NOT NULL,
+                    status          TEXT    NOT NULL
+                                    CHECK (status IN (
+                                        'Posted','Reversed','Reversal',
+                                        'Pending','Settled','Failed',
+                                        'PendingApproval','Rejected'
+                                    )),
                     domain          TEXT    NOT NULL,
                     external_ref    TEXT,
                     idempotency_key TEXT    UNIQUE,
-                    content_hash    TEXT    NOT NULL,
-                    chain_hash      TEXT    NOT NULL,
+                    content_hash    TEXT    NOT NULL
+                                    CHECK (length(content_hash) = 64),
+                    chain_hash      TEXT    NOT NULL
+                                    CHECK (length(chain_hash) = 64),
                     effective_at    TEXT    NOT NULL,
                     posted_at       TEXT    NOT NULL,
                     data            BLOB    NOT NULL
@@ -314,7 +431,21 @@ impl EntryDb {
                 -- Note: no separate idx_entries_idem_key — the UNIQUE constraint
                 -- above creates an implicit B-tree index on idempotency_key.
                 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts
-                    USING fts5(metadata, content='', tokenize='unicode61');",
+                    USING fts5(metadata, content='', tokenize='unicode61');
+                -- Append-only guard triggers (Fix #41) — reject any attempt to
+                -- UPDATE or DELETE a row through any SQL path.
+                CREATE TRIGGER IF NOT EXISTS entries_no_update
+                    BEFORE UPDATE ON entries
+                    BEGIN
+                        SELECT RAISE(ABORT,
+                            'entries table is append-only: UPDATE is not permitted');
+                    END;
+                CREATE TRIGGER IF NOT EXISTS entries_no_delete
+                    BEFORE DELETE ON entries
+                    BEGIN
+                        SELECT RAISE(ABORT,
+                            'entries table is append-only: DELETE is not permitted');
+                    END;",
             )
             .map_err(|e| LedgerError::Serialization(format!("SQLite schema error: {e}")))?;
         }
