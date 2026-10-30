@@ -1,6 +1,6 @@
 # VectorLedger Security Policy
 
-**Version:** 1.5.7  
+**Version:** 1.6.0  
 **Published by:** VectorGuard Labs  
 **Security contact:** security@vectorguardlabs.com
 
@@ -75,9 +75,9 @@ We use [CVSS v3.1](https://www.first.org/cvss/v3.1/specification-document) for s
 
 | Version | Status |
 |---|---|
-| 1.5.7 | ✅ Current — security fixes backported here |
-| 1.5.6 | ✅ Supported |
-| 1.5.x (< 1.5.6) | ⚠ Security fixes only — upgrade to 1.5.7 recommended |
+| 1.6.0 | ✅ Current — security fixes backported here |
+| 1.5.7 | ✅ Supported |
+| 1.5.x (< 1.5.7) | ⚠ Security fixes only — upgrade to 1.6.0 recommended |
 | 1.4.x | ⚠ Security fixes only |
 | < 1.4.0 | ❌ End of life — upgrade strongly recommended |
 
@@ -553,7 +553,7 @@ VectorLedger is designed to be **tamper-detectable even by internal privileged a
 - **Data modification by any actor**: any change to a historical record breaks the BLAKE3 hash chain at that entry and every subsequent entry — detectable by `VERIFY_CHAIN()`.
 - **Log scrubbing**: the audit log is O_APPEND-only with its own independent hash chain. Deletions or modifications break the chain immediately.
 - **Transaction forgery**: WAL commits are Ed25519-signed; forgery requires the private signing key.
-- **Duplicate entries**: idempotency key enforcement prevents double-posting at two independent layers: the application-layer `idempotency_key_exists()` check inside `post_entry()` (runs atomically under the exclusive write lock), and the database-layer `UNIQUE(idempotency_key)` constraint on the `entries` table (v1.5.7+). The database constraint fires even if the application-layer check is bypassed, and even if the process holding the lock dies before the write completes — the constraint is durable in the SQLite file itself.
+- **Duplicate entries**: idempotency key enforcement prevents double-posting at two independent layers: the application-layer `idempotency_key_exists()` check inside `post_entry()` (runs atomically under the exclusive write lock), and the database-layer `UNIQUE(idempotency_key)` constraint on the `entries` table (v1.5.7+). The database constraint fires even if the application-layer check is bypassed, and even if the process holding the lock dies before the write completes — the constraint is durable in the SQLite file itself. In addition, `BEFORE UPDATE` and `BEFORE DELETE` triggers (v1.6.0+) ensure that no SQL path — application code or direct database access — can mutate or remove an existing entry row.
 - **Unauthorized high-value writes**: four-eyes workflow prevents single-actor posting to protected accounts.
 - **SQL injection**: all three client SDKs validate account identifiers via allowlist before interpolation; RBAC enforced on logical plan, not raw SQL; MCP layer uses ISO-8601 timestamp validation (`validate_iso8601_timestamp`) and LIKE-pattern escaping (`escape_like`) for all user-supplied filter values; FTS5 query inputs have operator characters stripped before phrase-quoting (v1.5.5+).
 - **Backup data exposure**: backups are always AES-256-GCM encrypted using a per-archive key derived from the master key via HKDF-SHA256. The plaintext backup path was structurally removed in v1.5.7 — only `create_backup_encrypted()` is callable.
@@ -593,20 +593,83 @@ Every release is:
 **Verify a release:**
 ```bash
 # Verify checksum
-sha256sum -c vledger-v1.5.7-checksums.txt
+sha256sum -c vledger-v1.6.0-checksums.txt
 
 # Verify cosign signature
 cosign verify-blob \
-  --certificate vledger-v1.5.7-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.7-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.7" \
+  --certificate vledger-v1.6.0-checksums.txt.sig.pem \
+  --signature   vledger-v1.6.0-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.6.0" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.7-checksums.txt
+  vledger-v1.6.0-checksums.txt
 ```
 
 ---
 
 ## 19. Bug Fixes and Security Advisories
+
+### SQLite CHECK constraints + append-only triggers added (v1.6.0 — Fix #41)
+
+**Severity:** Hardening — no exploitable vulnerability; promotes application-layer constraints to dual-layer enforcement at the database level.
+
+**Components:** `crates/vledger-ledger/src/entry_db.rs`
+
+#### Background
+
+Prior to v1.6.0, the SQLite `entries` table had no CHECK constraints on field values — only `NOT NULL` and `UNIQUE(idempotency_key)`. Business-rule validation (status enum values, hash length correctness, sequence positivity) was enforced exclusively in application code. A crafted direct SQLite write bypassing the application layer could insert rows with invalid `status` values, zero-length hashes, or a sequence of `0` without any database-level rejection.
+
+Additionally, while `MutationKind::Insert` was the only write kind used by application code, there was no database-level trigger preventing a future code path from issuing an `UPDATE` or `DELETE` against the `entries` table and breaking the append-only guarantee.
+
+#### Fix
+
+Schema migration 1→2 (runs automatically on the next server start after upgrading to v1.6.0):
+
+1. Recreates the `entries` table with four CHECK constraints:
+   - `sequence > 0` — sequence numbers start at 1
+   - `status IN ('Posted','Reversed','Reversal','Pending','Settled','Failed','PendingApproval','Rejected')` — only valid enum values
+   - `length(content_hash) = 64` — BLAKE3 hex is always 64 characters
+   - `length(chain_hash) = 64` — same
+
+2. Adds two `BEFORE` triggers that fire on any attempt to `UPDATE` or `DELETE` a row:
+   ```sql
+   CREATE TRIGGER entries_no_update BEFORE UPDATE ON entries
+       BEGIN SELECT RAISE(ABORT, 'entries table is append-only: UPDATE is not permitted'); END;
+   CREATE TRIGGER entries_no_delete BEFORE DELETE ON entries
+       BEGIN SELECT RAISE(ABORT, 'entries table is append-only: DELETE is not permitted'); END;
+   ```
+   These fire on any SQL path — application code, MCP tools, direct SQLite shell access, or any future code that attempts a mutation.
+
+#### What this changes for operators
+
+Nothing. The migration runs automatically on the next server start. Existing data is preserved — the migration uses SQLite's rename-create-copy-drop pattern in a single atomic transaction. Confirm it ran: `PRAGMA user_version` should return `2`.
+
+---
+
+### Reconciliation runs now persisted to WAL (v1.6.0 — Fix #38)
+
+**Severity:** Compliance hardening — no security vulnerability; addresses a compliance gap where reconciliation results had no durable record.
+
+**Components:** `crates/vledger-ledger/src/store.rs`, `crates/vledger/src/main.rs`
+
+Prior to v1.6.0, `vledger reconcile` computed discrepancies on demand and printed them to stdout. No record of the run was stored — an operator or auditor could not prove that reconciliation had been performed, when it ran, or what the ledger state was at that time.
+
+`reconcile_and_record()` writes a `ReconciliationRecord` to `TABLE_RECONCILIATION_EVENTS` (WAL table_id=4) before returning. The record includes run UUID, UTC timestamp, entries scanned, discrepancy count and full JSON details, and the chain tip at run time. Records are rebuilt deterministically from WAL replay on restart, providing a tamper-evident history of all reconciliation runs.
+
+---
+
+### Alert channel pipeline added (v1.6.0 — Fix #42)
+
+**Severity:** Operational hardening — no security vulnerability; addresses the gap where critical integrity alerts were only observable via logs and Prometheus.
+
+**Components:** `crates/vledger-server/src/alert.rs` (new)
+
+The background monitors (`VERIFY_CHAIN` hourly, financial invariant check every 15 minutes) previously emitted `tracing::error!` log lines and incremented Prometheus counters on failure. These signals require an operator to be watching logs or to have wired Prometheus to an external alertmanager.
+
+`v1.6.0` adds an `AlertChannel` trait with `LogOnlyAlertChannel` (default, preserves existing behaviour) and `WebhookAlertChannel` (HTTP POST to Slack, PagerDuty, Teams, or any generic JSON endpoint). An `AlertRouter` fans out to all configured channels with per-source cooldown. Both monitors now call `alert_router.critical(...)` in addition to their existing log/audit paths.
+
+Configuration is opt-in via `catalog/alerts.json`. Absence of the file preserves the pre-v1.6.0 behaviour exactly.
+
+---
 
 ### UNIQUE(idempotency_key) database constraint added (v1.5.7)
 
@@ -774,7 +837,8 @@ All 530 tests pass (518 pre-existing + 5 new in v1.5.6 + 2 new in v1.5.7).
 
 - Do not remove the `idempotency_key` assignment from `execute_correction` — it is a load-bearing correctness property, not cosmetic.
 - Any future correction or reversal tool must set `idempotency_key` on both writes.
-- ~~Consider adding a `UNIQUE` constraint on `idempotency_key` in a future schema migration~~ — **resolved in v1.5.7**: the `UNIQUE(idempotency_key)` constraint was added as a schema migration and is now independently enforced at the database layer. See the UNIQUE constraint advisory above.
+- ~~Consider adding a `UNIQUE` constraint on `idempotency_key` in a future schema migration~~ — **resolved in v1.5.7**: the `UNIQUE(idempotency_key)` constraint was added as a schema migration and is now independently enforced at the database layer.
+- ~~Consider adding append-only triggers to prevent direct UPDATE/DELETE~~ — **resolved in v1.6.0**: `BEFORE UPDATE` and `BEFORE DELETE` triggers added in schema migration 1→2. See the v1.6.0 advisory above.
 
 ---
 
@@ -866,7 +930,7 @@ The following are **by design** and are **not** security vulnerabilities:
 
 - **Four-eyes queue files on pre-v1.5.7 deployments** may have been created with default umask permissions (commonly `0o644`). Upgrade to v1.5.7 and run `chmod 600 /var/lib/vledger/data/foureyes/*.jsonl` to correct existing file permissions. New files are created at mode 0o600 automatically after upgrade.
 
-- **Single-writer architecture.** The `UNIQUE(idempotency_key)` database constraint added in v1.5.7 hardens the single-host idempotency guarantee but does not provide a distributed lock. If VectorLedger is ever deployed with multiple writers sharing a single SQLite file, a distributed coordination mechanism would be required. The current architecture is single-writer by design (enforced by the OS advisory `flock` in `lockfile.rs`).
+- **Single-writer architecture.** The `UNIQUE(idempotency_key)` database constraint added in v1.5.7 and the append-only triggers added in v1.6.0 harden the single-host guarantees at the database layer but do not provide a distributed lock. If VectorLedger is ever deployed with multiple writers sharing a single SQLite file, a distributed coordination mechanism would be required. The current architecture is single-writer by design (enforced by the OS advisory `flock` in `lockfile.rs`).
 
 ---
 

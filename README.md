@@ -4,7 +4,7 @@
 
 VectorLedger is a purpose-built, append-only financial ledger written entirely in Rust. Every journal entry is linked by a tamper-evident BLAKE3 hash chain, every page of data is encrypted at rest with AES-256-GCM, and every query result can carry a cryptographic Merkle proof proving the returned data has not been modified since it was written. Historical tampering is **cryptographically detectable** — any modification to a past record invalidates every hash in the chain from that point forward.
 
-Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.5.7** · License: BUSL-1.1
+Built by [VectorGuard Labs](https://vectorguardlabs.com) · **Version 1.6.0** · License: BUSL-1.1
 
 ---
 
@@ -55,7 +55,8 @@ VectorLedger makes tampering **cryptographically detectable**:
 - **Hash-protected metadata** — arbitrary JSON metadata included in `canonical_bytes()` and indexed via SQLite FTS5 for full-text search
 - **Settlement lifecycle** — entries support `Pending → Settled | Failed` status transitions as append-only events
 - **Legal holds** — accounts can be placed under a legal hold, blocking all new entries, reversals, and settlement transitions
-- **Reconciliation** — on-demand balance reconciliation recomputes all account balances from journal lines
+- **Reconciliation** — on-demand balance reconciliation recomputes all account balances from journal lines; every run is **persisted as an append-only `ReconciliationRecord`** to the WAL with run timestamp, entries scanned, discrepancy count, and chain tip at time of run
+- **Snapshot isolation** — `current_snapshot()` captures a sequence-number read fence; `balance_at_snapshot()` and `entries_at_snapshot()` provide consistent point-in-time reads without blocking writers
 
 ### Cryptographic Security
 
@@ -79,6 +80,9 @@ VectorLedger makes tampering **cryptographically detectable**:
 - **WORM audit log** with its own independent BLAKE3 hash chain
 - **Cryptographic audit packages** — Ed25519-signed Merkle commitments over any entry range
 - **Four-eyes (dual-control) approval** workflow for high-value transactions
+- **Persistent reconciliation history** — every `vledger reconcile` run is stored as an immutable WAL record with full discrepancy details, run timestamp, and chain tip
+- **Retention policy scheduling** — daily background evaluation writes `RETENTION_EVAL` audit events documenting compliance posture (WORM-compatible — no deletion)
+- **Alert channels** — critical events (chain integrity failures, financial invariant violations) routed to Slack, PagerDuty, Teams, or any webhook via `catalog/alerts.json`
 
 ### Developer Experience
 
@@ -169,30 +173,32 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Option 2 — Download a release binary
 
-Pre-built binaries for v1.5.7 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.7):
+Pre-built binaries for v1.6.0 are available on the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.6.0):
 
 | Platform | Filename | wget |
 |---|---|---|
-| Linux x86_64 | `vledger-v1.5.7-x86_64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.7-aarch64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.7-x86_64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 (Apple Silicon) | `vledger-v1.5.7-aarch64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-aarch64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc) | `vledger-v1.6.0-linux-x86_64.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-linux-x86_64.tar.gz` |
+| Linux x86_64 **musl** (fully static) | `vledger-v1.6.0-linux-x86_64-musl.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-linux-x86_64-musl.tar.gz` |
+| Linux ARM64 (glibc) | `vledger-v1.6.0-linux-aarch64.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-linux-aarch64.tar.gz` |
+| Linux ARM64 **musl** (fully static) | `vledger-v1.6.0-linux-aarch64-musl.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-linux-aarch64-musl.tar.gz` |
+| macOS x86_64 | `vledger-v1.6.0-macos-x86_64.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-macos-x86_64.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `vledger-v1.6.0-macos-aarch64.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-macos-aarch64.tar.gz` |
 
-> **Note on filenames:** Archives use the Rust target triple convention (`aarch64-unknown-linux-gnu`, not `linux-aarch64`). Use the exact filenames above.
+> **musl builds** (`*-musl`) are fully statically linked — no glibc dependency. Use them for Alpine Linux, distroless containers, or any system with an older or non-standard libc.
 
-Each release is accompanied by a `SHA256SUMS` file and a CycloneDX SBOM. Verify before installing:
+Each release is accompanied by a checksums file and a CycloneDX SBOM. Verify before installing:
 
 ```bash
 # Verify SHA-256 checksum
-sha256sum -c vledger-v1.5.7-checksums.txt
+sha256sum -c vledger-v1.6.0-checksums.txt
 
 # Verify cosign signature (keyless OIDC)
 cosign verify-blob \
-  --certificate vledger-v1.5.7-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.7-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.7" \
+  --certificate vledger-v1.6.0-checksums.txt.sig.pem \
+  --signature   vledger-v1.6.0-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.6.0" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.7-checksums.txt
+  vledger-v1.6.0-checksums.txt
 ```
 
 ### Option 3 — Build from source
@@ -549,7 +555,7 @@ vledger-mcp \
 
 ```bash
 curl http://127.0.0.1:3000/health
-# {"ok":true,"service":"vledger-mcp","version":"1.5.7","tools":15,
+# {"ok":true,"service":"vledger-mcp","version":"1.6.0","tools":15,
 #  "agent_queries_used":3,"agent_queries_limit":100,"agent_queries_remaining":97}
 ```
 
@@ -707,6 +713,20 @@ vledger-bench \
 ---
 
 ## Changelog
+
+### v1.6.0
+
+- **#38 Reconciliation evidence retention:** `vledger reconcile` now calls `reconcile_and_record()` instead of `reconcile()`. Every run persists an append-only `ReconciliationRecord` to the WAL (table_id=4) containing: run UUID, UTC timestamp, entries scanned, accounts checked, discrepancy count, full discrepancy JSON, ledger sequence at run time, and chain tip at run time. Records survive restarts (rebuilt from WAL replay) and are accessible via `LedgerStore::reconciliation_history()`. CLI output now includes `run_id` and `run_at` fields in both text and JSON formats.
+
+- **#39 Retention policy scheduling:** The server background task scheduler now includes a daily retention evaluator (fires 5 minutes after startup, then every 24 hours). It reads `catalog/retention_policy.json`, calculates entries falling within the declared threshold, and writes a `RETENTION_EVAL` event to the WORM audit log. No data is deleted — the ledger is append-only WORM by design. This produces a durable compliance paper trail of every retention evaluation, supporting regulatory requirements that mandate documented data governance reviews.
+
+- **#40 Snapshot isolation:** Three new public methods on `LedgerStore`: `current_snapshot() -> u64` (captures the last committed sequence with `SeqCst` ordering), `balance_at_snapshot(account_id, snapshot_seq)` (recomputes balance including only entries `<= snapshot_seq`), and `entries_at_snapshot(snapshot_seq)` (returns all entries up to the snapshot point). Callers can take a snapshot before a multi-step read and all subsequent reads see a consistent point-in-time view of the ledger regardless of concurrent writes.
+
+- **#41 Database-enforced constraints + append-only triggers (SQLite schema v2):** Automatic schema migration 1→2 adds four CHECK constraints to the `entries` table: `sequence > 0`, `status IN (...)` (full enum), `length(content_hash) = 64`, `length(chain_hash) = 64`. Two `BEFORE` triggers prevent any UPDATE or DELETE on `entries` rows via any SQL path — `RAISE(ABORT, 'entries table is append-only')`. Fresh databases include all constraints and triggers from first open. Existing deployments migrate automatically on next start. Verify: `vledger sql --query "PRAGMA user_version"` should return `2`.
+
+- **#42 Alert channels:** New `AlertChannel` trait in `vledger-server` with two implementations: `LogOnlyAlertChannel` (default, preserves existing `tracing::error!` behaviour) and `WebhookAlertChannel` (HTTP POST to Slack/PagerDuty/Teams/generic — auto-detected by URL host). `AlertRouter` fans out to all configured channels with per-source cooldown to prevent alert storms. Configured via `catalog/alerts.json` at server startup; falls back to log-only if the file is absent. The VERIFY_CHAIN scheduler and financial invariant monitor both now call `alert_router.critical(...)` in addition to existing log/audit paths.
+
+- **musl release builds:** The release matrix now includes `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` targets. These produce fully statically linked binaries with no glibc dependency, suitable for Alpine Linux, distroless containers, and systems with non-standard or older glibc versions.
 
 ### v1.5.7
 

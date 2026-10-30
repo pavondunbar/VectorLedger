@@ -1,6 +1,6 @@
 # VectorLedger — Production Operations Runbook
 
-**Version:** 1.5.7  
+**Version:** 1.6.0  
 **Audience:** System administrators and on-call engineers responsible for deployed VectorLedger instances.
 
 This is the operator bible for VectorLedger. Read it end-to-end before going to production.
@@ -104,27 +104,29 @@ irm https://raw.githubusercontent.com/pavondunbar/VectorLedger/main/install.ps1 
 
 ### Install from Release Binary
 
-Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.5.7):
+Download from the [GitHub Releases page](https://github.com/pavondunbar/VectorLedger/releases/tag/v1.6.0):
 
 | Platform | Filename | wget |
 |---|---|---|
-| Linux x86_64 | `vledger-v1.5.7-x86_64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `vledger-v1.5.7-aarch64-unknown-linux-gnu.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `vledger-v1.5.7-x86_64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 | `vledger-v1.5.7-aarch64-apple-darwin.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.5.7/vledger-v1.5.7-aarch64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc) | `vledger-v1.6.0-linux-x86_64.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-linux-x86_64.tar.gz` |
+| Linux x86_64 **musl** (fully static) | `vledger-v1.6.0-linux-x86_64-musl.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-linux-x86_64-musl.tar.gz` |
+| Linux ARM64 (glibc) | `vledger-v1.6.0-linux-aarch64.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-linux-aarch64.tar.gz` |
+| Linux ARM64 **musl** (fully static) | `vledger-v1.6.0-linux-aarch64-musl.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-linux-aarch64-musl.tar.gz` |
+| macOS x86_64 | `vledger-v1.6.0-macos-x86_64.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-macos-x86_64.tar.gz` |
+| macOS ARM64 (Apple Silicon) | `vledger-v1.6.0-macos-aarch64.tar.gz` | `wget https://github.com/pavondunbar/VectorLedger/releases/download/v1.6.0/vledger-v1.6.0-macos-aarch64.tar.gz` |
 
-> **Note on filenames:** Archives use the Rust target triple convention (`aarch64-unknown-linux-gnu`, not `linux-aarch64`). Use the exact filenames above.
+> **musl builds:** The `*-musl` binaries are fully statically linked — they have no dependency on glibc and run on any Linux distribution, including Alpine, distroless containers, and systems with older glibc versions. Use them for containerised deployments.
 
 **Verify before deploying:**
 ```bash
-sha256sum -c vledger-v1.5.7-checksums.txt
+sha256sum -c vledger-v1.6.0-checksums.txt
 
 cosign verify-blob \
-  --certificate vledger-v1.5.7-checksums.txt.sig.pem \
-  --signature   vledger-v1.5.7-checksums.txt.sig \
-  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.5.7" \
+  --certificate vledger-v1.6.0-checksums.txt.sig.pem \
+  --signature   vledger-v1.6.0-checksums.txt.sig \
+  --certificate-identity "https://github.com/pavondunbar/VectorLedger/.github/workflows/release.yml@refs/tags/v1.6.0" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  vledger-v1.5.7-checksums.txt
+  vledger-v1.6.0-checksums.txt
 ```
 
 ### Build from Source
@@ -169,9 +171,21 @@ cargo build --release
    vledger sql --username admin --query "SELECT VERIFY_CHAIN()"
    ```
 
+> **v1.6.0 upgrade notes:**
+>
+> **SQLite schema migration (version 1 → 2):** On first start after upgrading, the server automatically runs a one-time migration that adds CHECK constraints (`sequence > 0`, status enum, `length(content_hash) = 64`, `length(chain_hash) = 64`) and two append-only guard triggers (`BEFORE UPDATE` / `BEFORE DELETE` on the `entries` table) to the SQLite index. The migration is atomic and crash-safe. Expect a brief pause proportional to the number of entries. After startup confirm it ran: `vledger sql --query "PRAGMA user_version"` should return `2`.
+>
+> **Reconciliation persistence:** `vledger reconcile` now persists every run as an append-only `ReconciliationRecord` to the WAL (table_id=4). The output includes a `run_id` and `run_at` timestamp. History survives restarts and is rebuilt deterministically from WAL replay.
+>
+> **Alert channels:** A new `catalog/alerts.json` configuration file lets you route critical alerts (chain integrity failures, financial invariant violations, retention evaluations) to Slack, PagerDuty, Teams, or any generic webhook. See the [Alert Channels](#alert-channels) section below. If `alerts.json` is absent, behaviour is unchanged — alerts continue to appear in `tracing::error!` logs and Prometheus metrics only.
+>
+> **Retention scheduling:** The server now runs a daily background evaluation of `catalog/retention_policy.json`. Each evaluation writes a `RETENTION_EVAL` event to the WORM audit log, documenting compliance posture. No data is deleted — the ledger is append-only WORM by design.
+>
+> **Snapshot isolation:** `LedgerStore::current_snapshot()`, `balance_at_snapshot()`, and `entries_at_snapshot()` are new public methods for point-in-time consistent reads. Existing code is unaffected.
+>
 > **v1.5.7 upgrade notes:**
 >
-> **SQLite schema migration (version 0 → 1):** On first start after upgrading from any version prior to v1.5.7, the server automatically runs a one-time migration that adds a `UNIQUE(idempotency_key)` constraint to the `entries` table. The migration is atomic and crash-safe — if it is interrupted, it rolls back and retries on the next start. No manual steps are required. Expect a brief pause on startup proportional to the number of entries (~1–5 seconds for most deployments; up to ~2 minutes for 25M+ entries). The migration is logged as `schema migration 0→1: adding UNIQUE(idempotency_key)` at INFO level. After startup, confirm the migration ran: `vledger sql --query "PRAGMA user_version"` should return `1`.
+> **SQLite schema migration (version 0 → 1):** On first start after upgrading from any version prior to v1.5.7, the server automatically runs a one-time migration that adds a `UNIQUE(idempotency_key)` constraint to the `entries` table. The migration is atomic and crash-safe — if it is interrupted, it rolls back and retries on the next start. No manual steps are required. Expect a brief pause on startup proportional to the number of entries (~1–5 seconds for most deployments; up to ~2 minutes for 25M+ entries). The migration is logged as `schema migration 0→1: adding UNIQUE(idempotency_key)` at INFO level.
 >
 > **jemalloc allocator:** The release binary now uses jemalloc (`tikv-jemallocator`) on Linux and macOS. No configuration is required — it is the default allocator. This eliminates the ~7 GB RSS accumulation that occurred during large WAL recovery (25M+ records) when using ptmalloc.
 >
@@ -368,10 +382,52 @@ Checked at startup and at UTC midnight daily via a background watcher. Downgrade
 ### `catalog/retention_policy.json`
 
 ```json
-{ "days": 0, "domain": null }
+{ "default_days": 0, "domain_overrides": {}, "updated_at": "2026-01-01T00:00:00Z" }
 ```
 
-`0` = keep forever. Set a positive integer to enforce a retention period in days.
+`default_days: 0` = keep forever. Set a positive integer to declare a retention period in days. A daily background task evaluates this policy and writes a `RETENTION_EVAL` audit event documenting compliance posture. Because the ledger is append-only (WORM), no data is deleted — the policy governs archival intent and the compliance paper trail.
+
+Per-domain overrides:
+```json
+{ "default_days": 2555, "domain_overrides": { "staging": 90 }, "updated_at": "2026-01-01T00:00:00Z" }
+```
+
+### `catalog/alerts.json`
+
+Optional. When present, alert channels are loaded at server startup. If absent, alerts appear only in `tracing::error!` logs and Prometheus metrics (existing behaviour).
+
+```json
+{
+  "channels": [
+    {
+      "type": "webhook",
+      "url": "https://hooks.slack.com/services/T.../B.../...",
+      "min_severity": "warning"
+    },
+    {
+      "type": "webhook",
+      "url": "https://events.pagerduty.com/v2/enqueue",
+      "min_severity": "critical"
+    }
+  ],
+  "cooldown_seconds": 300
+}
+```
+
+| Field | Values | Description |
+|---|---|---|
+| `type` | `"webhook"` | Channel type. `webhook` covers Slack, PagerDuty, Teams, and any generic JSON endpoint. |
+| `url` | URL string | Webhook destination. Format auto-detected from host: `hooks.slack.com` → Slack format, `events.pagerduty.com` → PagerDuty v2, anything else → generic JSON. |
+| `min_severity` | `"info"` \| `"warning"` \| `"critical"` | Alerts below this threshold are suppressed for this channel. |
+| `cooldown_seconds` | integer ≥ 0 | Per-source cooldown between repeated alerts. `0` disables cooldown. Default: `300`. |
+
+Alerts fired:
+
+| Event | Severity | Source |
+|---|---|---|
+| Hash chain integrity failure | `critical` | `verify-chain-scheduler` (hourly) |
+| Financial invariant violation | `critical` | `invariant-monitor` (every 15 min) |
+| Retention policy evaluation | `warning` | `retention-scheduler` (daily) |
 
 ### `catalog/accounting_rules.json`
 
@@ -905,7 +961,7 @@ Target field mappings: `debit_account`, `credit_account`, `amount`, `description
 
 ### `vledger reconcile`
 
-Reconcile all accounts. Recomputes balances from ledger lines and compares against cached balances. Exits non-zero on discrepancy.
+Reconcile all accounts. Recomputes balances from ledger lines and compares against cached balances. **Every run is persisted as an append-only `ReconciliationRecord` to the WAL** — results survive restarts and are accessible via `LedgerStore::reconciliation_history()`. Exits non-zero on discrepancy.
 
 ```bash
 vledger reconcile --data-dir ./vledger-data --format text
@@ -915,6 +971,8 @@ vledger reconcile --data-dir ./vledger-data --format text
 |---|---|---|
 | `--format <text\|json>` | `text` | Output format |
 | `--output <PATH>` | stdout | Output file |
+
+Output includes a `run_id` (UUID) and `run_at` timestamp for every run. JSON format also includes `entries_scanned`, `accounts_checked`, `ledger_sequence_at_run`, and `chain_tip_at_run` for a complete point-in-time snapshot of reconciliation state.
 
 ---
 
@@ -1091,9 +1149,29 @@ curl -s http://127.0.0.1:9090/metrics | grep vledger
 | Replication lag | > 10s | > 60s | Check replica connectivity and disk |
 | License expiry | 30 days | 7 days | Contact pavon@vectorguardlabs.com |
 
-### Recommended Cron Jobs
+### Alert Channels
 
-```cron
+VectorLedger's background monitors (hourly `VERIFY_CHAIN`, 15-minute invariant check, daily retention evaluation) can route alerts to external destinations via `catalog/alerts.json`. See the [Configuration Reference](#4-configuration-reference) for the full schema.
+
+**Slack example:**
+```json
+{
+  "channels": [{ "type": "webhook", "url": "https://hooks.slack.com/services/T.../B.../...", "min_severity": "warning" }],
+  "cooldown_seconds": 300
+}
+```
+
+**PagerDuty example:**
+```json
+{
+  "channels": [{ "type": "webhook", "url": "https://events.pagerduty.com/v2/enqueue", "min_severity": "critical" }],
+  "cooldown_seconds": 60
+}
+```
+
+When `alerts.json` is absent, alerts surface only as `tracing::error!` log lines and Prometheus counter increments — the pre-v1.6.0 behaviour.
+
+### Recommended Cron Jobs```cron
 # Daily chain integrity check — 2 AM UTC
 0 2 * * * /opt/vledger/bin/vledger sql --server 127.0.0.1:5433 \
   --username admin --query "SELECT VERIFY_CHAIN()" \
@@ -1104,6 +1182,13 @@ curl -s http://127.0.0.1:9090/metrics | grep vledger
   --username admin \
   --query "SELECT MERKLE_ROOT(1, (SELECT MAX(sequence) FROM ledger))" \
   >> /var/log/vledger/merkle-root.log 2>&1
+
+# Daily reconciliation (result persisted to WAL automatically) — 2:10 AM UTC
+10 2 * * * /opt/vledger/bin/vledger reconcile \
+  --data-dir /var/lib/vledger/data \
+  --format json \
+  --output /var/log/vledger/reconcile-$(date +%Y%m%d).json \
+  >> /var/log/vledger/reconcile.log 2>&1
 
 # Daily backup — 3 AM UTC
 0 3 * * * /opt/vledger/scripts/daily-backup.sh >> /var/log/vledger/backup.log 2>&1
@@ -1796,7 +1881,7 @@ vledger self-test-phase3 --data-dir ./vledger-data
 
 ### Phase 4 — Correction Concurrency Tests
 
-Run the targeted concurrency suite for `execute_correction` race conditions and the database-layer UNIQUE constraint:
+Run the targeted concurrency suite for `execute_correction` race conditions and the database-layer constraints:
 
 ```bash
 cargo test --package vledger-ledger correction_concurrency
@@ -1808,10 +1893,8 @@ Expected output: 7 tests pass —
 - `partial_correction_recovery_only_missing_half_written`
 - `correction_does_not_disturb_unrelated_entries`
 - `high_concurrency_correction_stress_50_tasks`
-- `schema_version_is_current` *(new in v1.5.7 — verifies `PRAGMA user_version == 1`)*
-- `database_unique_constraint_prevents_duplicate_without_app_layer_check` *(new in v1.5.7 — bypasses `post_entry` and proves the SQLite UNIQUE constraint fires independently)*
-
-The last two tests are specifically designed to catch a regression where the schema migration fails to run or the UNIQUE constraint is accidentally dropped. If either fails, the database-layer idempotency guarantee is gone.
+- `schema_version_is_current` *(v1.6.0: asserts `PRAGMA user_version == 2`)*
+- `database_unique_constraint_prevents_duplicate_without_app_layer_check` *(asserts schema version 2 before bypassing `post_entry` to prove SQLite UNIQUE + CHECK constraints fire independently)*
 
 All three phases plus the concurrency suite must pass before deploying a new build to production.
 
@@ -1872,8 +1955,13 @@ Run through this entire checklist before going to production:
 - [ ] Bind MCP server to `127.0.0.1` (the default) unless behind a TLS-terminating reverse proxy
 - [ ] Restrict network access to port 3000 to trusted AI assistant clients only
 - [ ] Confirm MCP server version is 1.5.5 or later (contains SQL injection fixes for date parameters and LIKE wildcards)
-- [ ] Confirm database schema is at version 1 (v1.5.7+) — verify with `vledger sql --query "PRAGMA user_version"` against the SQLite file, or check server startup logs for "schema migration 0→1" message
+- [ ] Confirm database schema is at version 2 (v1.6.0+) — verify with `vledger sql --query "PRAGMA user_version"` against the SQLite file; should return `2`
 - [ ] If running an older version, disable `summarize_period`, `audit_report`, and `resolve_account` tools via firewall or by not granting MCP access to untrusted callers until upgraded
+
+**Alert channels (recommended for production):**
+- [ ] Create `catalog/alerts.json` with at least one webhook channel pointing to your on-call system (Slack, PagerDuty, Teams)
+- [ ] Set `min_severity: "critical"` for your paging destination and `min_severity: "warning"` for non-urgent channels
+- [ ] Verify a test alert fires by temporarily stopping and restarting the server with a broken chain (use `vledger verify --self-test` in a separate data directory, not production)
 
 **CI/CD verification:**
 ```bash
