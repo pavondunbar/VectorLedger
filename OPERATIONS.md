@@ -1563,7 +1563,112 @@ Add to your AI assistant's MCP config:
 }
 ```
 
-### Kiro Configuration
+### AI Agent Configuration
+
+The VectorLedger MCP server (`http://127.0.0.1:3000/sse`) works with any MCP-capable AI agent. Each agent stores its config in a different location. Start the MCP server first before connecting any agent.
+
+---
+
+#### Kiro
+
+**Config file:** `.kiro/settings/mcp.json` inside the project directory.
+
+```json
+{
+  "mcpServers": {
+    "vledger": {
+      "url": "http://127.0.0.1:3000/sse",
+      "disabled": false
+    }
+  }
+}
+```
+
+Kiro reads this file automatically when the workspace is opened. No restart required after saving.
+
+---
+
+#### Claude Code
+
+**Config file:** `.mcp.json` in the project root (project-level) **or** `~/.claude.json` (user-level, under the `mcpServers` key for a specific project path).
+
+The project-level file is recommended — it travels with the repo and is scoped to this project only.
+
+**Step 1 — Create `.mcp.json` in the project root:**
+
+```json
+{
+  "mcpServers": {
+    "vledger": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3000/sse"
+    }
+  }
+}
+```
+
+**Step 2 — Verify Claude Code picks it up:**
+
+```bash
+# In the project directory, start Claude Code
+claude
+
+# Claude will prompt you to trust the .mcp.json file on first load.
+# Accept the trust dialog to activate the vledger MCP server.
+```
+
+**Step 3 — Confirm the server is available:**
+
+In a Claude Code session, run:
+```
+/mcp
+```
+You should see `vledger` listed as a connected server with 15 tools available.
+
+---
+
+#### ChatGPT Codex (OpenAI Codex CLI)
+
+**Config file:** `~/.codex/config.json` (user-level, applies to all projects).
+
+**Step 1 — Edit `~/.codex/config.json`** and add the `mcpServers` block alongside your existing settings:
+
+```json
+{
+  "model": "gpt-5-2025-08-07",
+  "provider": "openai",
+  "history": {
+    "maxSize": 1000,
+    "saveHistory": true,
+    "sensitivePatterns": []
+  },
+  "mcpServers": {
+    "vledger": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3000/sse"
+    }
+  }
+}
+```
+
+**Step 2 — Verify Codex picks it up:**
+
+```bash
+# Start Codex in the project directory
+codex
+
+# Codex will automatically connect to any mcpServers listed in config.json.
+# Ask it directly to confirm:
+# "What MCP tools do you have available?"
+```
+
+---
+
+#### Cursor
+
+**Config file:** `~/.cursor/mcp.json` (user-level, applies across all Cursor projects).
+
+**Step 1 — Edit `~/.cursor/mcp.json`:**
 
 ```json
 {
@@ -1574,6 +1679,71 @@ Add to your AI assistant's MCP config:
   }
 }
 ```
+
+**Step 2 — Reload Cursor:**
+
+Open Cursor Settings → **MCP** tab. The `vledger` server should appear with a green status indicator. If it shows as disconnected, ensure the MCP server is running (`vledger mcp --bind 127.0.0.1:3000`) then click **Reconnect**.
+
+**Step 3 — Use it in Agent mode:**
+
+Switch Cursor to **Agent** mode (not Ask or Edit). The vledger tools will be available automatically. You can reference them explicitly:
+```
+Use the vledger MCP tools to show me the current balance of the CASH account.
+```
+
+---
+
+#### Grok (xAI)
+
+Grok does not use a local config file for MCP. The MCP server is passed **per API request** in the `tools` array. A ready-to-use Python script is provided at `mcp-grok.py` in the project root.
+
+**Prerequisites:**
+
+```bash
+pip install openai
+export XAI_API_KEY=your_xai_api_key_here
+```
+
+**Usage:**
+
+```bash
+# Run the included helper script
+python mcp-grok.py
+
+# Or integrate into your own code:
+from openai import OpenAI
+
+client = OpenAI(api_key=os.environ["XAI_API_KEY"], base_url="https://api.x.ai/v1")
+
+response = client.responses.create(
+    model="grok-4.7",
+    input=[{"role": "user", "content": "What is the balance of the CASH account?"}],
+    tools=[{
+        "type": "mcp",
+        "server_url": "http://127.0.0.1:3000/sse",
+        "server_label": "vledger",
+        "server_description": "VectorLedger ledger operations, audit, compliance, and crypto tools.",
+    }],
+)
+print(response.output_text)
+```
+
+> **Note:** The VectorLedger MCP server must be reachable from the machine making the API call. Grok's servers connect to your MCP server URL directly — if your server is on localhost, it must be exposed via a tunnel (e.g. `ngrok http 3000`) for Grok to reach it. For production use, deploy the MCP server on a public HTTPS endpoint and update `server_url` accordingly.
+
+---
+
+### Verifying Any Agent Connection
+
+Regardless of which agent you use, you can confirm the MCP server is reachable and tools are loaded:
+
+```bash
+# Health check — returns tool count and agent query usage
+curl http://127.0.0.1:3000/health
+# {"ok":true,"service":"vledger-mcp","version":"1.6.0","tools":15,
+#  "agent_queries_used":0,"agent_queries_limit":100,"agent_queries_remaining":100}
+```
+
+If `tools` shows `15`, the server is healthy and all tools are registered.
 
 ### All 15 MCP Tools
 
